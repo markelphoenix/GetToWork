@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,12 +7,12 @@ name = "gettowork"
 version = "0.1.0"
 description = "Get To Work: an edutainment text adventure that teaches local open-weight LLMs and the Jev typed-judgment API."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "markelphoenix" }]
 keywords = ["llm", "local-llm", "education", "game", "jev", "gguf", "ollama"]
 classifiers = [
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Topic :: Games/Entertainment",
   "Topic :: Education",

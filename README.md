@@ -23,6 +23,7 @@ installs everything for you. **All you do is pick a model.**
 - [A taste of the game](#a-taste-of-the-game)
 - [What you'll learn](#what-youll-learn)
 - [Quickstart in 3 steps](#quickstart-in-3-steps)
+- [Test builds (no Python needed)](#test-builds-no-python-needed)
 - [What happens automatically](#what-happens-automatically)
 - [Where files are stored (and how to delete them)](#where-files-are-stored-and-how-to-delete-them)
 - [Other ways to run the model (optional)](#other-ways-to-run-the-model-optional)
@@ -138,6 +139,35 @@ and confirm. The game does the rest.
 If your terminal says `gettowork` isn't found: after pipx, run
 `pipx ensurepath` and open a new terminal; after pip, `python -m gettowork`
 (with your virtual environment active) does the same thing.
+
+## Test builds (no Python needed)
+
+Every change to `main` (and every pull request) is built automatically by the
+[`build` workflow](.github/workflows/build.yml) on GitHub Actions. Open the
+repository's **Actions** tab, pick the latest **build** run, and download from
+its **Artifacts** list:
+
+| Artifact | What it is |
+|---|---|
+| `gettowork-windows-x64` | `gettowork.exe` - a single file, no Python needed |
+| `gettowork-macos-arm64` | `gettowork` for Apple Silicon Macs |
+| `gettowork-linux-x64` | `gettowork` for 64-bit Linux |
+| `gettowork-python-package` | the wheel and source archive (`pip install gettowork-*.whl`) |
+
+Each one was smoke-tested before upload (it plays a whole game with the
+pretend model). Unzip it, then run the game from a terminal:
+
+- **Windows:** `.\gettowork.exe` (or `gettowork.exe --mock` to try it offline).
+  The file isn't code-signed, so SmartScreen may say "Windows protected your
+  PC": choose **More info** then **Run anyway**.
+- **macOS:** `chmod +x gettowork`, then `xattr -d com.apple.quarantine gettowork`
+  (the file isn't signed or notarized, so Gatekeeper blocks it otherwise), then
+  `./gettowork`.
+- **Linux:** `chmod +x gettowork` then `./gettowork`.
+
+(Downloads through the Artifacts list need you to be signed in to GitHub, and
+they are kept for 14 days. These are test builds - for everyday use the
+Quickstart above is the recommended way.)
 
 ## What happens automatically
 

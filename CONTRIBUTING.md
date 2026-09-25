@@ -211,3 +211,19 @@ so people can learn. We follow the spirit of the
 [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
 Harassment or disrespect isn't tolerated. If something goes wrong, contact the
 maintainer through GitHub.
+
+## Test builds
+
+`.github/workflows/build.yml` builds the wheel/sdist and standalone
+executables (PyInstaller, via `packaging/gettowork_entry.py`) for Windows,
+macOS and Linux on every push to `main` and every pull request, smoke-tests
+each with `packaging/smoke_test.sh`, and uploads them as workflow artifacts.
+To check a build locally:
+
+```bash
+pip install . pyinstaller
+pyinstaller --onefile --name gettowork --collect-submodules rich \
+  --collect-submodules truststore --collect-data certifi packaging/gettowork_entry.py
+packaging/smoke_test.sh ./dist/gettowork
+```
+

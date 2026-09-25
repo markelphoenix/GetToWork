@@ -182,6 +182,8 @@ def macos_release() -> str:
     answer = (out or "").strip()
     if status == "ok" and re.match(r"^\d+(?:\.\d+)*$", answer) and not answer.startswith("10.16"):
         return answer
+    if getattr(sys, "frozen", False):
+        return ""  # a standalone build's sys.executable is the game itself, not a Python
     try:
         env = dict(config.child_env(), SYSTEM_VERSION_COMPAT="0")
         proc = subprocess.run([sys.executable, "-sS", "-c", "import platform; print(platform.mac_ver()[0])"],
