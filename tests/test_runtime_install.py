@@ -12,6 +12,7 @@ import stat
 import tarfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
@@ -276,6 +277,16 @@ def no_live_vulkan_probe(monkeypatch):
     monkeypatch.setattr(ri, "_system_has_vulkan_loader", lambda: False)
     monkeypatch.setattr(ri, "_glibc_version", lambda: (2, 39))  # a modern Linux, whatever runs the tests
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_disk_space(monkeypatch):
+    """The installer checks the real free space first; a test must not depend on the machine's disk.
+
+    (A nearly full CI disk once turned every install test into "not enough free disk space".)
+    Tests about the check itself set their own figure.
+    """
+    monkeypatch.setattr(ri.shutil, "disk_usage", lambda path: SimpleNamespace(total=10**13, used=10**12, free=9 * 10**12))
 
 
 def names(assets: list[dict]) -> list[str]:

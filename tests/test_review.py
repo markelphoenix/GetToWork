@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import math
@@ -304,7 +305,10 @@ def test_export_from_the_review_writes_both_files(tmp_path):
     run_review(ui, make_summary(), export_dir=tmp_path)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["gettowork-transcript-1.json", "gettowork-transcript-1.md"]
     text = " ".join(output(console).split())
-    assert "gettowork-transcript-1.json" in text and "gettowork-transcript-1.md" in text
+    # A long folder path (e.g. Windows' temp folder) wraps mid-name, so look for the
+    # file names with all line breaks and spaces squeezed out.
+    squeezed = "".join(output(console).split())
+    assert "gettowork-transcript-1.json" in squeezed and "gettowork-transcript-1.md" in squeezed
     assert "API key is never included" in text
 
 
@@ -339,6 +343,44 @@ def test_export_failure_is_explained(tmp_path):
     ui, _, console = make_ui(["n", "n", "y"])
     run_review(ui, make_summary(), export_dir=blocker)
     assert "Couldn't save the transcript" in output(console)
+
+
+class _FullDiskFile:
+    """A file on a full disk: it was created, but its contents can't be stored."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def write(self, text):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def close(self):
+        self._real.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+@pytest.mark.parametrize("full_at", [".json", ".md"])
+def test_a_full_disk_leaves_no_empty_or_half_written_transcript(tmp_path, monkeypatch, full_at):
+    from gettowork import review
+
+    def full_disk_open(path, mode="r", *args, **kwargs):
+        real = open(path, mode, *args, **kwargs)
+        return _FullDiskFile(real) if str(path).endswith(full_at) else real
+
+    monkeypatch.setattr(review, "open", full_disk_open, raising=False)
+    ui, _, console = make_ui(["n", "n", "y"])
+    run_review(ui, make_summary(), export_dir=tmp_path)
+    text = " ".join(output(console).split())
+    assert "Couldn't save the transcript" in text and "No space left on device" in text
+    assert list(tmp_path.iterdir()) == []  # not an empty .json, nor a .json without its .md
+    monkeypatch.delattr(review, "open")
+    json_path, _ = export_transcript(make_summary(), tmp_path)  # room again: number 1 is still free
+    assert json_path.name == "gettowork-transcript-1.json"
 
 
 def test_exported_json_and_markdown_contents(tmp_path):
@@ -479,6 +521,7 @@ def test_real_game_then_review_and_export(tmp_path):
     assert "The pretend model didn't show its reasoning while writing the victory story (the game asks" in text
     assert "Your model's reasoning" not in text
     assert SECRET not in text
+    assert "Couldn't save the transcript" not in text  # (a full disk, say): report that, not a JSON error
     data = json.loads((tmp_path / "gettowork-transcript-1.json").read_text(encoding="utf-8"))
     assert len(data["rounds"]) == 5 and data["result"] == "won"
     assert data["ending_calls"][0]["purpose"] == "victory"

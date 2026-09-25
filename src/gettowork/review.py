@@ -16,6 +16,7 @@ header again before showing or saving anything - belt and braces.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import math
@@ -307,6 +308,8 @@ def export_transcript(summary: GameSummary, export_dir: Optional[Path] = None, *
 
     Never overwrites an existing file (files are opened in exclusive-create
     mode). `secrets` (live credentials) are masked wherever they appear.
+    All or nothing: if a write fails (a full disk...), the error is raised and
+    no empty or half-written transcript is left behind.
     """
     directory = Path(export_dir) if export_dir is not None else Path.cwd()
     directory.mkdir(parents=True, exist_ok=True)
@@ -319,21 +322,38 @@ def export_transcript(summary: GameSummary, export_dir: Optional[Path] = None, *
         json_path = directory / f"{EXPORT_PREFIX}{n}.json"
         md_path = directory / f"{EXPORT_PREFIX}{n}.md"
         try:
-            # errors="replace": a character that can't be stored (e.g. a broken
-            # one typed in an old terminal) becomes "?" instead of a crash.
-            with open(json_path, "x", encoding="utf-8", errors="replace") as f:
-                f.write(json_text)
+            _write_new_file(json_path, json_text)
         except FileExistsError:  # someone created it a moment ago: try the next number
             n += 1
             continue
         try:
-            with open(md_path, "x", encoding="utf-8", errors="replace") as f:
-                f.write(md_text)
-        except FileExistsError:
-            json_path.unlink()
-            n += 1
-            continue
+            _write_new_file(md_path, md_text)
+        except BaseException as exc:
+            with contextlib.suppress(OSError):
+                json_path.unlink()  # never half a transcript
+            if isinstance(exc, FileExistsError):
+                n += 1
+                continue
+            raise
         return json_path, md_path
+
+
+def _write_new_file(path: Path, text: str) -> None:
+    """Create `path` (never overwriting: FileExistsError) and write `text` into it.
+
+    If writing fails - a full disk, often only noticed when the file is closed -
+    the new file is removed again instead of being left empty or cut short.
+    """
+    # errors="replace": a character that can't be stored (e.g. a broken
+    # one typed in an old terminal) becomes "?" instead of a crash.
+    f = open(path, "x", encoding="utf-8", errors="replace")
+    try:
+        with f:
+            f.write(text)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
 
 
 # ---------------------------------------------------------------------------

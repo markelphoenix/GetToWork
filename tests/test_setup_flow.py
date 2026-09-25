@@ -64,6 +64,18 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
+@pytest.fixture(autouse=True)
+def no_live_engine_probes(monkeypatch):
+    """Which llama.cpp builds the flow offers must not depend on the computer running the tests.
+
+    For Linux specs the engine planner asks *this* machine for its glibc version
+    (none on Windows/macOS, too old for the CUDA builds on Ubuntu 22.04) and
+    whether a Vulkan loader is installed: pin both, like tests/test_runtime_install.py.
+    """
+    monkeypatch.setattr(runtime_install, "_glibc_version", lambda: (2, 39))
+    monkeypatch.setattr(runtime_install, "_system_has_vulkan_loader", lambda: False)
+
+
 def make_specs(*, gpu: bool = True, ram: float = 32.0) -> SystemSpecs:
     gpus = [GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0, bandwidth_gbs=360.0,
                     driver_version="550.54")] if gpu else []
@@ -357,7 +369,9 @@ def test_model_table_shows_badges_speed_and_license_warnings():
 def test_compact_model_table_keeps_names_readable_on_narrow_terminals():
     picks = shortlist_for(make_specs())
     for width in (60, 80, 100):
-        console = Console(file=io.StringIO(), width=width)
+        # legacy_windows=False: on Windows, rich swaps rounded boxes for square ones when it
+        # writes to something that isn't a modern terminal - same table, different corners.
+        console = Console(file=io.StringIO(), width=width, legacy_windows=False)
         console.print(model_table(picks, FANCY_SYMBOLS, compact=True))
         lines = console.file.getvalue().splitlines()
         assert lines[0].endswith("╮")  # nothing was cropped
@@ -503,6 +517,7 @@ def test_managed_failure_falls_back_to_a_running_ollama(tmp_path, isolated_home)
     # Never a surprise multi-GB download: the size is shown and the player is asked.
     size = format_size(recommended_for(make_specs()).download_gb)
     assert f"Shall I ask Ollama to download it ({size})?" in script.prompts[-1]
+    assert "couldn't save your settings" not in text  # (a full disk, say): report that, not a missing file
     saved = settings_file(isolated_home)
     assert saved["backend"] == "ollama"
     assert saved["ollama_model"] == entry_for_fit(recommended_for(make_specs())).ollama_ref

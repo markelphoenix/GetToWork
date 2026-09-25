@@ -46,7 +46,9 @@ def test_download_bar_stays_on_one_line_at_80_columns():
 
 def test_legacy_code_pages_get_plain_look_alikes_instead_of_crashing():
     raw = io.BytesIO()
-    stream = io.TextIOWrapper(raw, encoding="cp437", errors="strict")
+    # newline="\n": no newline translation, so the bytes are the same on every OS (a default
+    # TextIOWrapper writes "\r\n" on Windows). Only the character swapping is under test here.
+    stream = io.TextIOWrapper(raw, encoding="cp437", errors="strict", newline="\n")
     make_stream_safe(stream)
     stream.write("✓ ok — 3 → 4 ≈ 5 · ★ ⚡ 🧠 é\n")
     stream.flush()
