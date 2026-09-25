@@ -16,6 +16,7 @@ shows up in the raw text depends on the model family:
   If a runtime strips those special tokens, what's left looks like
   ``analysis...assistantfinal...``.
 * Mistral's Magistral uses ``[THINK] ... [/THINK]``.
+* ByteDance's Seed-OSS uses ``<seed:think> ... </seed:think>``.
 
 `split_reasoning` handles all of these so the game can show the player a clean
 answer, and keep the reasoning for the end-of-game review.
@@ -29,7 +30,7 @@ from typing import Optional
 __all__ = ["split_reasoning"]
 
 # The tag names we treat as "thinking". Matching is case-insensitive.
-_TAG_NAMES = r"(?:think|thinking|reasoning)"
+_TAG_NAMES = r"(?:seed:think|think|thinking|reasoning)"
 _OPEN_TAG = rf"<{_TAG_NAMES}(?:\s[^>]*)?>"
 _CLOSE_TAG = rf"</{_TAG_NAMES}\s*>"
 

@@ -306,3 +306,89 @@ def test_answer_is_always_stripped_str_and_reasoning_is_none_or_nonempty(text):
     assert isinstance(answer, str)
     assert answer == answer.strip()
     assert reasoning is None or (isinstance(reasoning, str) and reasoning.strip() == reasoning and reasoning)
+
+
+# ---------------------------------------------------------------------------
+# More real-world shapes
+# ---------------------------------------------------------------------------
+
+
+def test_docstring_examples_hold():
+    import doctest
+
+    import gettowork.reasoning as reasoning
+
+    failures, _ = doctest.testmod(reasoning)
+    assert failures == 0
+
+
+def test_windows_line_endings():
+    text = "<think>\r\nGeese are loud.\r\n</think>\r\n\r\nBring earplugs."
+    answer, reasoning = split_reasoning(text)
+    assert answer == "Bring earplugs."
+    assert reasoning == "Geese are loud."
+
+
+def test_qwen3_style_output_with_json_answer_and_blank_lines():
+    text = (
+        "<think>\nThe plan addresses the goose picket.\nIt is absurd but on-topic.\n</think>\n\n"
+        '{"made_progress": true, "explanation": "Bread diplomacy works."}\n'
+    )
+    answer, reasoning = split_reasoning(text)
+    assert answer == '{"made_progress": true, "explanation": "Bread diplomacy works."}'
+    assert reasoning.startswith("The plan addresses") and reasoning.endswith("on-topic.")
+
+
+def test_nested_think_tags_do_not_leak_into_the_answer():
+    answer, reasoning = split_reasoning("<think>a<think>b</think>c</think>d")
+    assert answer == "d"
+    assert "a" in reasoning and "c" in reasoning
+
+
+def test_unicode_is_preserved():
+    answer, reasoning = split_reasoning("<think>Café? Über-plan! 🦆</think>Ride the duck — carefully.")
+    assert answer == "Ride the duck — carefully."
+    assert reasoning == "Café? Über-plan! 🦆"
+
+
+def test_multiline_answer_keeps_paragraphs():
+    text = "<think>x</think>\n\nParagraph one.\n\nParagraph two.\n\nCHALLENGE: A goose."
+    answer, _ = split_reasoning(text)
+    assert answer == "Paragraph one.\n\nParagraph two.\n\nCHALLENGE: A goose."
+
+
+def test_long_reasoning_is_fast_and_complete():
+    thoughts = "\n".join(f"step {i}: consider the octopus" for i in range(5000))
+    answer, reasoning = split_reasoning(f"<think>{thoughts}</think>Done.")
+    assert answer == "Done."
+    assert reasoning == thoughts
+
+
+def test_whitespace_only_reasoning_before_stray_closer_is_none():
+    assert split_reasoning("   \n</think>\nAnswer") == ("Answer", None)
+
+
+def test_unclosed_opener_with_whitespace_only_after_it():
+    assert split_reasoning("Answer first.\n<think>\n\n  ") == ("Answer first.", None)
+
+
+def test_harmony_final_channel_with_constrain_header():
+    text = (
+        "<|channel|>analysis<|message|>Check the plan.<|end|>"
+        "<|start|>assistant<|channel|>final <|constrain|>json<|message|>{\"made_progress\": true}<|return|>"
+    )
+    assert split_reasoning(text) == ('{"made_progress": true}', "Check the plan.")
+
+
+def test_harmony_multiple_final_segments_are_joined():
+    text = (
+        "<|channel|>final<|message|>Part one.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>Part two.<|end|>"
+    )
+    assert split_reasoning(text) == ("Part one.\n\nPart two.", None)
+
+
+def test_harmony_flattened_with_analysis_only_is_left_alone():
+    # Without "assistantfinal" we can't be sure it's harmony, so nothing is hidden.
+    text = "analysis: the goose is winning"
+    assert split_reasoning(text) == (text, None)

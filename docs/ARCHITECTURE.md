@@ -13,8 +13,8 @@ reversible.
 1. `gettowork` launches → banner. Returning players: "Welcome back! Play again
    with Qwen3 4B? [Y/n]" skips straight to the game.
 2. **Hardware check** (`specs.py` + `perf.py`): OS, CPU (+ SIMD flags), RAM,
-   GPU(s)/VRAM, Apple unified memory, free disk, plus a ~0.3 s memory-bandwidth
-   micro-benchmark. Summarised in plain English ("16 GB of RAM and an NVIDIA
+   GPU(s)/VRAM, Apple unified memory, free disk, plus a quick (< 1 s)
+   multi-core memory *read* benchmark (~512 MB, bigger than any CPU cache). Summarised in plain English ("16 GB of RAM and an NVIDIA
    RTX 3060 with 12 GB of video memory — a solid setup for local AI!"), with a
    details table and a "Learn" panel on why memory size *and* bandwidth matter.
 3. **Live model discovery** (`hf_discovery.py`): searches the Hugging Face Hub
@@ -29,9 +29,12 @@ reversible.
    on a laptop, IQ3 when tight), estimates memory (weights + KV cache +
    overhead) and generation speed (bandwidth ÷ bytes-per-token), and scores it
    on fit, speed, quality and popularity. The player sees ~6 picks with plain
-   badges — **Recommended**, **Fastest**, **Smartest that fits** — and just types
+   badges — **Recommended**, **Fastest comfortable fit**, **Smartest at a playable pace** — and just types
    a number (Enter = recommended). By default only permissively licensed
-   (Apache-2.0 / MIT) models are shown.
+   (Apache-2.0 / MIT) models are shown. Models whose chat template *forces*
+   thinking (QwQ, DeepSeek-R1 distills, Phi-4-reasoning...) can't be asked for
+   a quick answer, so they never reach this short menu (they stay under
+   `more`, with a warning).
 5. **One confirmation, then automatic** (`setup_flow.py`): "Here's what will
    happen: ① download the llama.cpp engine (~40 MB, MIT, from GitHub)
    ② download Qwen3 4B Q4_K_M (2.5 GB, Apache-2.0, from Hugging Face)
@@ -47,32 +50,49 @@ reversible.
    - **llama-cpp-python** (`--backend llamacpp`, for tinkerers).
    - **Mock** (`--mock`) — scripted, offline, instant.
    If anything fails (no GPU driver, blocked network), the game explains in
-   one sentence and falls back automatically (GPU build → CPU build; managed →
-   Ollama if running → offer mock).
+   one sentence and falls back (GPU build → CPU build; a model architecture
+   the installed engine doesn't know → update the engine; managed → Ollama if
+   running, *after asking*, handing it the already-downloaded file instead of
+   downloading again → offer mock). A computer no official build can run on
+   (too old a Linux/macOS, a build already marked unusable) is recognised
+   *before* anything is downloaded, and every fresh engine is test-run
+   (`llama-server --version`) before the model download starts. A GPU build
+   that passes start-up but crashes on real work (or hangs setting up the
+   device) falls back the same way.
 6. **Warm-up & speed test**: a tiny generation measures real tokens/second and
    reports it ("Your model is talking at ~18 tokens/sec!"). If it's painfully
    slow (< 3 tok/s) the game offers to switch to a smaller pick.
 7. **Jev onboarding** (`onboarding.py`): "Do you want to enable Jev?" with a
-   plain-language explanation. Yes → paste API key (hidden input), or "help me
-   get one" (opens the TypeSafe website/docs in a browser, step-by-step), or
-   back out to local-only at *any* prompt. Keys are validated with
+   plain-language explanation, including a privacy line saying exactly what
+   Jev receives (the typed plan, the challenge, a story summary, progress) and
+   where it goes (TypeSafe AI's host). Yes → paste API key (hidden input; if
+   the window can't hide input the player is told first and pointed to
+   `TYPESAFE_API_KEY`), or "help me get one" (opens the TypeSafe website/docs
+   in a browser, step-by-step), or back out to local-only at *any* step
+   (including Ctrl+C while the key is being checked). Keys are validated with
    `GET /v1/models`. Saving the key to disk is opt-in only.
 8. **The game** (`game.py`, `prompts.py`): the local LLM narrates a farcical
-   "you're about to be late for work" intro and the first absurd challenge.
-   Each round the player types how they'll get past it. A judge decides whether
-   they made progress:
+   "you're about to be late for work" intro (no obstacle yet). **Round 1 asks
+   "How do you plan to get to work?"** (on foot, bike, bus, broomstick...); a
+   real way of travelling counts as the first step, and the LLM then narrates
+   them setting off and invents the first obstacle to fit that choice. Every
+   later round shows an obstacle and the player types how they'll get past it.
+   A judge decides whether they made progress:
    - **Jev enabled** → one `POST /v1/systemone` call with three questions:
      a **Noul** (did they make progress?), a **Choice** (what kind of outcome?),
      and a **Score** (how creative was it, 0–4). The Noul decides progress.
      The answers are shown with "Learn" panels the first time each type appears.
    - **Local only** → the local LLM is asked for a small JSON verdict.
    Progress +1 on success. The LLM narrates the result and invents the next,
-   ever-more-ridiculous challenge. Reaching **5** wins: the LLM narrates a
-   triumphant arrival at work. Typing `quit` ends early.
+   ever-more-ridiculous challenge (the absurdity level comes from the progress,
+   and the last step is always the finale at the office). Reaching **5** (the
+   commute plus four obstacles) wins: the LLM narrates a triumphant arrival at
+   work. Typing `quit` ends early.
 9. **Review** (`review.py`): two *independent* yes/no questions — show the Jev
    request/response JSON per round? show the local model's exposed reasoning
-   (chain-of-thought) per round? — plus an optional transcript export
-   (JSON + Markdown, API key never included).
+   (chain-of-thought) per round? — each asked only when there is something to
+   show (plus the local referee's JSON verdicts when it didn't think out loud),
+   then an optional transcript export (JSON + Markdown, API key never included).
 10. On exit, the managed `llama-server` process is always stopped.
 
 ## Package layout
@@ -90,6 +110,7 @@ src/gettowork/
   hf_discovery.py    live Hugging Face search, GGUF metadata, disk cache
   download.py        Hugging Face GGUF download (exact files / shards)
   runtime_install.py fetch + unpack official prebuilt llama.cpp binaries
+  tls.py             HTTPS trust store (truststore -> certifi -> default) + cert-error detection
   reasoning.py       split chain-of-thought from answers
   backends/
     __init__.py      exports + detect_backends()
@@ -116,7 +137,9 @@ see exactly what is sent. Python ≥ 3.10. Must run on Windows, macOS, Linux.
 Data locations (`config.py`): settings in `config_dir()`; models in
 `models_dir()`; add `runtime_dir()` = `config_dir()/runtime` (llama.cpp
 builds) and `cache_dir()` = `config_dir()/cache` (discovery cache). Both honour
-`GETTOWORK_HOME`.
+`GETTOWORK_HOME`. On Windows `config_dir()` is `%LOCALAPPDATA%\GetToWork`
+(multi-GB models must not ride along in a roaming profile); a folder an older
+version created in `%APPDATA%\GetToWork` keeps being used.
 
 ## Module contracts
 
@@ -126,7 +149,15 @@ Signatures below are binding. Private helpers are free-form.
 Already written — read them. Do not change existing signatures; additive
 changes only if truly necessary (and then update this doc). `ModelEntry` and
 `FitResult` have extra optional fields for live discovery (quant options,
-exact files, downloads, speed estimate, badges...).
+exact files, downloads, speed estimate, badges...). `GPUInfo.driver_version`
+(optional, e.g. "550.54.14" from nvidia-smi) feeds the CUDA 12/13 choice in
+`runtime_install.py`.
+*As built (integration):* `UI.confirm` escapes its `[y/N]` hint (rich would
+otherwise read it as a style tag and hide it); `UI.download_progress` keeps
+one line at 80 columns (long file names are shortened with "…"); additive
+`ui.make_stream_safe(stream)` makes a non-UTF-8 stdout (legacy Windows code
+pages, output redirected to a cp1252 file) print plain look-alikes ("→" → "->",
+"✓" → "OK") instead of raising UnicodeEncodeError — cli.py applies it.
 
 ### specs.py
 ```python
@@ -153,10 +184,14 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
   append a note on failure. `detect_specs()` must never raise.
 - Calls `perf.measure_ram_bandwidth()` and `perf.estimate_gpu_bandwidth()` to
   fill the bandwidth fields (skippable via parameter `benchmark: bool = True`).
+- RAM/VRAM are GiB rounded to 0.1; `arch` is normalised to `x86_64`/`arm64`;
+  `disk_free_gb = -1.0` means "unknown" (the fit engine then skips the disk
+  check); a found Vulkan loader is recorded as `"vulkan"` in `cpu_flags`
+  (`specs.has_vulkan(specs)`); integrated GPUs are listed with `vram_gb=0`.
 
 ### perf.py
 ```python
-def measure_ram_bandwidth(budget_s: float = 0.3) -> float | None   # GB/s via large bytearray/memoryview copies; None on failure
+def measure_ram_bandwidth(budget_s: float = 0.3, threads: int | None = None) -> float | None   # GB/s *read*, all cores, median of 3 rounds; None on failure
 def estimate_gpu_bandwidth(gpu: GPUInfo) -> float | None           # rough GB/s by vendor + VRAM tier (+ name keywords); documented as a guess
 def estimate_tokens_per_s(specs: SystemSpecs, *, active_gb: float, placement: str, offload_fraction: float = 1.0) -> float
 SPEED_EXPLAINER: str   # Markdown: generation is memory-bandwidth bound; tok/s ≈ efficiency × bandwidth ÷ bytes read per token
@@ -165,7 +200,19 @@ SPEED_EXPLAINER: str   # Markdown: generation is memory-bandwidth bound; tok/s �
   0.45 unified, 0.35 CPU (clamped by core count); partial offload = harmonic
   mix of GPU and CPU speed by offload fraction. For MoE use active params'
   share of the weights. Always label as an estimate.
-- Micro-benchmark must stay under ~0.5 s and ~256 MB, and never raise.
+  *As built:* re-calibrated against real llama.cpp numbers (see perf.py) to
+  `seconds/token = active_gb / (eff × bandwidth) + overhead` with eff 0.73 GPU,
+  0.85 unified, 0.70 CPU (relative to the *measured* single-thread copy
+  bandwidth; × core-count and no-AVX2 factors) and overhead 1.3 / 5 / 2 ms.
+  Extra helpers: `primary_gpu(specs)`, `bandwidth_for(specs, placement) ->
+  (GB/s, source)`, `speed_label(tps)`.
+- Micro-benchmark must stay well under a second, use at most 1/8 of the free
+  RAM (~512 MB, ≥ 32 MB per thread, so neither the CPU cache nor memcpy's
+  store tricks decide the number), and never raise. *Round 3:* it *reads*
+  (libc `memchr` over each thread's buffer, GIL-free via ctypes; fallback:
+  slice copies into a cached scratch buffer), because token generation reads;
+  `last_benchmark_note` flags a shrunk test on low-RAM machines; readings
+  are clamped to `MAX_PLAUSIBLE_RAM_GBS` (460).
 
 ### catalog.py
 ```python
@@ -176,7 +223,7 @@ QUANT_BITS: dict[str, float]             # approx bits/weight per quant tag (Q8_
 QUANT_PREFERENCE: tuple[str, ...]        # best -> smallest acceptable: Q8_0, Q6_K, Q5_K_M, Q4_K_M, IQ4_XS, Q4_K_S, Q3_K_M, IQ3_M (never below 3 bits by default)
 def get_model(key: str) -> ModelEntry | None
 def estimate_memory_gb(model: ModelEntry, context_tokens: int | None = None, *, weights_gb: float | None = None) -> float
-def choose_quant(specs: SystemSpecs, model: ModelEntry) -> tuple[str, float] | None   # best (quant, size_gb) that fits, using model.quant_options (or model.quant/file_size_gb)
+def choose_quant(specs: SystemSpecs, model: ModelEntry, *, downloaded: Downloaded | None = None) -> tuple[str, float] | None   # best (quant, size_gb) that fits, using model.quant_options (or model.quant/file_size_gb); an already-downloaded quant that fits wins
 def evaluate_fit(specs: SystemSpecs, model: ModelEntry) -> FitResult
 def rank_models(specs: SystemSpecs, catalog: list[ModelEntry] | None = None) -> list[FitResult]
 def pick_shortlist(ranked: list[FitResult], n: int = 6) -> list[FitResult]   # diverse picks with badges
@@ -192,9 +239,32 @@ MEMORY_FORMULA_EXPLAINER: str   # Markdown for a UI.teach panel
   `0.00012 GB × params_b × context_tokens/1024` (floor 0.05) — or computed
   exactly when layer/head metadata is available; `overhead = 0.6 GB` (+ ~0.3 GB
   compute buffer for GPU). Documented in MEMORY_FORMULA_EXPLAINER.
+  *As built:* KV is exact (`2 × layers × kv_heads × head_dim × 2 B × ctx`)
+  for families in a known-shapes table (Qwen3/2.5, gpt-oss, Mistral, Phi-4-mini,
+  SmolLM2/3, Granite); otherwise `(0.1 + 0.006 × params_b) GB per 1024 tokens`
+  (active params for MoE) — the formula above under-estimated real KV caches
+  ~100×. Context is capped at `native_context`. `choose_quant` also requires
+  disk space and only upgrades above ~4-bit if the model stays ≥ 20 tok/s and
+  on the same placement. FitResult for placement "none" has
+  `est_tokens_per_s=None`, `est_speed="n/a"`. Shortlist fillers must run at
+  ≥ 3 tok/s and prefer new families only within 12 score points of the best.
+  Extra public helpers:
+  `is_permissive`, `quant_bits`, `quant_quality`, `estimate_quant_size_gb`,
+  `kv_cache_gb`, `score_fit`, `explain_fit(specs, fit) -> Markdown`.
 - Placement: gpu if fits VRAM (keep ~0.8 GB free); unified if Apple and fits
   usable unified memory; partial if VRAM ≥ 40% of need and RAM covers the
-  rest; cpu if RAM (total − ~2.5 GB OS headroom) fits; none otherwise.
+  rest (*Round 4:* also at ≥ 15% when the CPU-only plan would be tight, and at
+  any share when only VRAM + RAM together fit - llama.cpp's auto-fit uses the
+  card anyway); cpu if RAM (total − ~2.5 GB OS headroom) fits; none otherwise.
+  *Round 4:* a non-Apple split is graded on its RAM side (spill ÷ RAM budget,
+  never better than "ok" because the card is full); the Recommended tiers
+  that need a comfortable fit only take a split with ≥ 75% on the GPU
+  (`SPLIT_RECOMMENDED_MIN_GPU_SHARE`). `FitResult.gpu_share` and
+  `FitResult.shares_system_ram` (cpu, unified, Apple split) record this.
+  *Round 3:* on Apple Silicon an overflow past the unified budget is a Metal
+  "partial" (GPU share at unified speed, the rest at CPU speed, within RAM −
+  2.5 GB) - never a separate "cpu" plan. A partial plan fills the card's
+  memory by definition, so its verdict is at best "tight".
   Verdict thresholds on need/budget: ≤0.6 great, ≤0.85 ok, ≤1.0 tight, else
   no; "no" also if disk free < download + 1 GB (reason says so).
 - Speed from `perf.estimate_tokens_per_s`; labels: ≥20 tok/s "fast",
@@ -203,9 +273,22 @@ MEMORY_FORMULA_EXPLAINER: str   # Markdown for a UI.teach panel
   speed (penalise < 8 tok/s hard, < 3 tok/s disqualify from Recommended) +
   headroom + popularity (log downloads) + small bonus for curated/trusted,
   reasoning-capable, and instruction-tuned. `pick_shortlist`: Recommended
-  (best score), Fastest (highest tok/s among great/ok), Smartest that fits
-  (largest params with ≥ 5 tok/s), then fill with the next best distinct
+  (best score), Fastest comfortable fit (highest turn tok/s among great/ok;
+  near-ties within 5% go to the better score), Smartest at a playable pace
+  (most quality with ≥ 5 turn tok/s; never a tight fit in system RAM - cpu,
+  unified, or a split - nor a last-tier quant), then fill with the next best distinct
   families; never two variants of the same base model.
+  *Round 3:* within a quant tier the ladder prefers the fastest home (gpu /
+  unified, then partial, then cpu) and only takes a slower one for ≥ 2%
+  quality (`_pick_home`); quants within 0.25% quality tie and the smaller
+  file wins (Q8_0 over UD-Q8_K_XL); quants under 1.8 bits (or under 3.3 bits
+  below ~7B) are never suggested; `evaluate_fit` tries the 2,048-token
+  context *before* accepting a last-resort (< 3.7-bit) quant. Fastest keeps
+  ≥ 70% of Recommended's quality points and ≥ 2B effective params (MoE
+  effective size = total^0.6 × active^0.4); fillers prefer new families *and*
+  new lineages (architecture + size), so fine-tunes of one base share a
+  slot. Always-thinking models are never on the short menu and their turn
+  speed counts `ALWAYS_THINKING_TOKENS`. Apple prefill speed-up is 10x.
 - The heuristic is our own, MIT licensed, provided with no warranty.
 
 ### hf_discovery.py
@@ -237,14 +320,32 @@ DISCOVERY_EXPLAINER: str   # Markdown: what the Hub is, GGUF, how we filter, lic
 - ModelEntry from hub: key = repo id, display_name prettified from repo
   (strip "-GGUF", publisher), params from gguf.total (fallback: parse "4B",
   "0.6B", "30B-A3B" from the name, or infer from Q4 size), MoE active params
-  from name ("A3B"), reasoning=True for known thinking families (qwen3,
-  gpt-oss, deepseek-r1 distills, phi-4-mini-reasoning, magistral, …),
+  from name ("A3B"), `thinking` = "none" / "switchable" / "always" from the
+  GGUF `chat_template` (a thinking switch → switchable; `<think>` opened for
+  the model with no switch → always), else name rules (`thinking_mode_for`);
+  `reasoning = thinking != "none"`,
   ollama_ref "hf.co/<repo>:<quant>", license_url
   `https://huggingface.co/<repo>` (model card), quant_options from files.
 - Cache: JSON at `cache_dir()/hf_models.json` with `fetched_at`; used when
   fresh, or when offline / the Hub fails (stale cache is fine with a note).
   If live fails and no cache: return curated seeds (`source="curated"`).
 - Never raise for network errors; put a friendly note in `notes`.
+- *As built:* `DiscoveryResult.stale: bool = False` (True when an expired
+  cache was used as a fallback). `expand` also requests `pipeline_tag` (with
+  `expand` the Hub returns only the listed fields). Live and cached results
+  also include curated seeds for original models the search missed
+  (`source="curated"` on those entries; the cache stores live entries only,
+  with `schema_version`, `fetched_at`, `allow_all_licenses`). Lookups run on
+  ≤ 6 threads; jobs not started before `timeout_s` are skipped with a note.
+  Extra public helpers: `rejection_reason(info, *, allow_all_licenses)` (plain-
+  English reason or None), `license_of`, `params_from_name` ("30B-A3B" →
+  (30, 3)), `prettify_repo_name`, `shard_info`, `repo_gguf_files(api, repo)`,
+  `default_cache_path()`, `FALLBACK_QUANT_ORDER`, `CACHE_SCHEMA_VERSION`.
+  *Round 3:* the cache also stores `rules_version` (`RULES_VERSION`, a
+  fingerprint of every screening/labelling rule plus the game version); a
+  cache saved under other rules is never "fresh", and when it's used as a
+  fallback each entry is re-screened (`rescreen_entry`: name/family/license/
+  size/popularity, restricted-family relabel, thinking mode).
 
 ### reasoning.py
 ```python
@@ -278,6 +379,20 @@ def download_custom_gguf(repo_id: str, quant: str, ui: UI, dest_dir: Path | None
 - Before downloading, print file name(s), size, license, model page URL and
   destination, and remind that weights come from Hugging Face under the
   author's license.
+- *As built:* `DownloadError(message, kind="other")` — `kind` ∈ not_found,
+  gated, no_gguf, missing_file, network, offline_mode, server, disk,
+  incomplete, bad_repo_id. Default folder `model_folder(repo)` =
+  `models_dir()/<owner>--<name>`. Already-downloaded files are returned
+  without any network call; offline, an existing local copy of the quant is
+  reused. Progress: a tqdm-compatible bridge is passed as `tqdm_class` when the
+  downloader accepts it, feeding `ui.download_progress`. Extra public helpers:
+  `custom_entry(repo_id, quant=None, *, hf_api=None) -> ModelEntry` (describe a
+  pasted repo so the fit engine can check it before downloading) and
+  `normalize_repo_id(text) -> (repo_id, quant | None)` (accepts owner/name,
+  huggingface.co links, `hf.co/owner/name:QUANT`).
+  `find_local_copy(repo_id, quant, dest_dir=None) -> Path | None` finds a
+  finished local download of a quant without the network; `download_gguf`
+  uses it first when the entry has no exact file names for the chosen quant.
 
 ### runtime_install.py
 ```python
@@ -310,7 +425,12 @@ RUNTIME_EXPLAINER: str   # Markdown: what llama.cpp / llama-server is, why prebu
   and ≥ 580 prefer cuda-13) + cudart, then vulkan, then cpu; Windows AMD/Intel
   → vulkan, then cpu; Linux + NVIDIA → cuda-12.8 (+cudart) then vulkan (if
   loader present) then cpu; Linux AMD/Intel with vulkan loader → vulkan then
-  cpu; else cpu. Windows arm64 → win-cpu-arm64.
+  cpu; else cpu. Windows arm64 → win-cuda-13.x-arm64 (+cudart) when an NVIDIA
+  GPU with driver ≥ 580 (or unknown) is present, then win-cpu-arm64. CUDA 13
+  is skipped when every NVIDIA GPU reports a compute capability below 7.5
+  (`GPUInfo.compute_capability`, from `nvidia-smi --query-gpu=…,compute_cap`,
+  retried without it on drivers that don't know the field): CUDA 13 builds
+  have no code for Maxwell/Pascal/Volta.
 - Download via urllib to a temp file with a `ui.download_progress` bar,
   verify size matches the asset `size` (and the GitHub `digest` sha256 field
   if present), extract safely (reject absolute paths / `..` / symlinks
@@ -498,7 +618,7 @@ def outcome_messages(*, intro, challenge, plan, made_progress: bool, judge_note:
 def judge_messages(*, intro, challenge, plan, progress, target, history) -> list[dict]  # TASK: judge
 def victory_messages(*, intro, history, final_plan) -> list[dict]          # TASK: victory
 def quit_messages(*, intro, history, progress, target) -> list[dict]       # TASK: ending_quit
-def parse_challenge(text: str) -> tuple[str, str]   # (narration, challenge) split on a "CHALLENGE:" line; fallback = last paragraph
+def parse_challenge(text: str, *, current: str | None = None, truncated: bool = False) -> tuple[str, str]   # (narration, challenge) split on the first usable "CHALLENGE:" line (skips echoes of `current`); fallback = last paragraph, or "" if `truncated`
 def parse_judge_json(text: str) -> tuple[bool, str] | None   # lenient JSON extraction
 ```
 - Tone: farcical, fantastical, family-friendly, second person, short
@@ -526,18 +646,33 @@ class Game:
   (plan ≥ 4 words and not trivially "do nothing" → progress) and say so.
 - LLM backend failure (BackendError) → show error, offer retry / quit.
 - Every LLM call is recorded in the RoundRecord (`purpose`, LLMResult).
+  *As built:* a Jev call that failed is kept in the additive field
+  `RoundRecord.failed_jev_exchange` so the review can show it; the error menu
+  also offers a "skip" (built-in intro/challenge, or the backup rule for a
+  verdict) so an LLM hiccup never costs the player their round.
+  The Jev "Learn" panels are staggered: one new answer type per Jev verdict
+  (Noul, then Choice, then Score), so round 1 isn't three lessons in a row.
 - Truncate plans to `max_input_chars`.
 
 ### review.py
 ```python
-def run_review(ui: UI, summary: GameSummary, *, export_dir: Path | None = None) -> None
-def summary_to_dict(summary: GameSummary) -> dict        # JSON-safe, no secrets
-def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, include_reasoning: bool = True) -> str
+def run_review(ui: UI, summary: GameSummary, *, export_dir: Path | None = None,
+               secrets: Iterable[str] = (), thinking_skipped_note: str | None = None) -> None
+def export_transcript(summary: GameSummary, export_dir: Path | None = None, *,
+                      secrets: Iterable[str] = ()) -> tuple[Path, Path]
+def summary_to_dict(summary: GameSummary, *, secrets: Iterable[str] = ()) -> dict   # JSON-safe, no secrets
+def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, include_reasoning: bool = True,
+                        secrets: Iterable[str] = ()) -> str
 ```
-- Asks two independent questions (either, both, or neither):
+- Asks independent questions (either, both, or neither), each only when there
+  is something to show:
   1. "See the Jev request & response for each round?" (only if any round used Jev)
   2. "See the local model's reasoning (chain-of-thought) for each round?"
-     (note if the model exposed none).
+     (only if it exposed some; otherwise `thinking_skipped_note` or a short
+     note that the model didn't think out loud).
+  3. "See the local model's verdict (its JSON answer) for each round?" (only
+     when the local model refereed and there was no reasoning to show - the
+     reasoning view already includes those answers).
   Then renders per round. Then offers to export JSON + Markdown to
   `export_dir` (default cwd) as `gettowork-transcript-<n>.json/.md`
   (n = first unused integer; no clocks needed).
@@ -572,6 +707,31 @@ Super-friendly, few decisions:
    < 3 tok/s offer to go back and pick a faster model.
 7. Save settings (backend, model repo/quant/path, server exe) for next time.
 
+*As built:* `run_setup(..., services: SetupServices | None = None)` — a
+dataclass of injectable callables (`detect_specs`, `discover_models`,
+`make_backend(kind, **kw)`, `installed_runtimes`, `custom_entry`) so tests use
+fakes. Extra menu words: `learn` (full explainers), `why N`
+(`catalog.explain_fit`), `back`, `quit`; the table switches to a compact
+layout below 140 columns. The failure menu also offers `pick` (choose another
+model). The measured tokens/s is fed back into the fit engine: the memory
+bandwidth behind the chosen placement is scaled by measured ÷ estimated
+(clamped 0.25–2×), re-ranking the menu in-session and saved in
+`Settings.extra["speed_calibration"]` keyed by a hardware fingerprint for later
+launches (*Round 3:* only from bandwidth-dominated dense models, solved for
+the bandwidth, tagged with the engine build - see the Round 3 notes).
+`--mock` runs discovery with `offline=True`. Extra public helpers:
+`find_models`, `ModelSearch`, `show_hardware`, `model_table`/`show_model_table`,
+`entry_for_fit`, `fit_for_quant`, `calibrate_specs`, `apply_saved_calibration`,
+`entry_to_dict`/`entry_from_dict`, `default_backend_factory`.
+Integration notes: if the managed engine had to fall back to CPU mode
+(`backend.cpu_only`) for a GPU/unified estimate, the measurement is *not* used
+for calibration (it says so instead). Asking for a faster model when none is
+clearly faster (≥ 1.5× the measured speed) says so and offers to play anyway
+rather than re-offering the same pick. The discovery line counts Hub results
+and built-in seeds separately ("Found 11 models on Hugging Face (plus 3 of my
+hand-checked favourites)"). The confirmation screen recognises an
+already-downloaded quant via `download.find_local_copy`.
+
 ### cli.py
 ```python
 def main(argv: list[str] | None = None) -> int
@@ -583,11 +743,29 @@ runtime), `--list-models` (print the ranked shortlist for this machine and
 exit), `--specs` (print hardware + bandwidth and exit), `--refresh-models`
 (ignore discovery cache), `--offline` (no network: cache or curated seeds),
 `--all-licenses` (include non-permissive licenses in discovery; shows each
-license prominently), `--no-jev`, `--target N` (default 5), `--reset` (forget
-saved settings), `--export-dir DIR`, `--debug` (tracebacks), `--version`.
+license prominently), `--no-jev`, `--think` (let a thinking model think out
+loud even when it's slow), `--target N` (default 5), `--reset` (forget saved
+settings), `--export-dir DIR`, `--debug` (tracebacks), `--version`.
 Ctrl+C anywhere exits cleanly with a friendly line (exit code 130); the
 backend is always `close()`d. Flow: banner → setup → Jev onboarding (skipped
 by `--no-jev`) → Game.run() → run_review().
+*As built:* `main(argv=None, *, ui=None, services=None)` (test hooks). Exit
+codes: 0 ok (including choosing `quit` - at a menu, or typed at a yes/no
+question, which raises `UserChoseQuit`, a `UserQuit` subclass; in the game it
+still leads to the quit ending and the review), 1 unexpected error (friendly line +
+"rerun with --debug"; `--debug` prints the traceback), 2 bad option or a
+missing `--gguf` file, 130 Ctrl+C. `-h` and `--version` return 0 instead of
+raising `SystemExit`; `--quant` is upper-cased; `--target` accepts 1–50.
+SIGTERM, SIGHUP and (Windows) SIGBREAK are handled like Ctrl+C for the
+duration of main(); the previous handlers are restored on return. The engine
+is not orphaned even when no Python code gets to run (console window closed,
+game killed): on Windows it is assigned to a Job Object with
+`KILL_ON_JOB_CLOSE`, on Linux it gets `PR_SET_PDEATHSIG`, and on POSIX it runs
+in its own session (so Ctrl+C reaches only the game, which stops it itself).
+Each launch also writes an owner record, and the next launch stops any engine
+whose game is gone (`reap_orphaned_servers`). `main()` also makes stdin
+tolerant of undecodable bytes (`ui.make_input_safe`) and passes the warm-up
+speed and context window to `Game`.
 
 ## Testing rules
 - `pytest` only, no network, no real models, no real browser. Use MockBackend,
@@ -597,9 +775,361 @@ by `--no-jev`) → Game.run() → run_review().
 ## Legal / safety rules for the codebase
 - No model weights are bundled. Models are downloaded by the player from
   Hugging Face under each model's own license; the game shows that license.
-- Curated seeds and default discovery results: Apache-2.0 / MIT only. `--all-licenses` shows others, always with the license visible.
+- Curated seeds and default discovery results: Apache-2.0 / MIT only. `--all-licenses` shows others, and so does naming a model yourself (`custom`, `--model`) - always with the license visible and the same yellow warning.
 - The llama.cpp engine (MIT) is downloaded from the official ggml-org GitHub releases at the player's request; it is not bundled.
 - The hardware-fit heuristic is original code in this repo (MIT, no warranty).
 - Not affiliated with TypeSafe AI, Hugging Face, Ollama, or any model author;
   names are used only to identify their products.
-- API keys: never printed, never logged, never exported, redacted in review.
+- API keys: never printed, never logged, never exported, redacted in review,
+  never in `repr()` (`JevClient` and `Settings`), never sent to another host
+  on a redirect, and never over plain http (except to localhost). The same
+  goes for `GITHUB_TOKEN` (the engine installer drops credential headers on a
+  redirect to another host and refuses https → http). A key pasted by
+  accident as a plan is refused, and the review/transcripts mask the live key
+  wherever it appears. Hardware-detection tools and the engine never receive
+  the player's API tokens in their environment.
+
+## Review fixes (as built)
+
+These notes record behaviour added after the first full review. They are
+binding in the same way as the contracts above.
+
+**backends/base.py.** `chat(..., think: bool | None = None, stop: list[str] | None = None)`:
+`think=False` asks a thinking model to answer straight away (llama-server:
+`chat_template_kwargs {"enable_thinking": false, "reasoning_effort": "low"}`;
+Ollama: `"think": false`; llama-cpp-python: `/no_think` for Qwen3), `stop`
+ends the answer early. `LLMResult.truncated` is True when the answer hit
+`max_tokens` (`finish_reason`/`done_reason` "length"). `supported_chat_options(backend)`
+tells the game which of these a backend accepts (older backends get neither).
+`LLMBackend.on_notice` is set by the game while a call runs; a backend calls
+`self._notice(text)` for a mid-call status, e.g. `RETRY_WITHOUT_THINKING_NOTICE`
+before the empty-answer retry, and the game shows it in the spinner.
+
+**llamaserver.py.** Each launch gets a random API key, passed as
+`LLAMA_API_KEY` in the child's environment (never on the command line) and sent
+as a Bearer header; the child environment drops the player's `LLAMA_*`
+variables and common secrets. CPU mode passes `--device none` (and `-ngl 0`).
+The bad-arguments check is anchored to llama.cpp's own messages (an
+`Invalid argument` in a model-load error is not a bad flag). The health
+timeout scales with the size of the whole model - every part of a split
+model (`health_timeout_for`, `_model_total_bytes`) - and is extended while
+the log is still growing *or the engine is still reading from disk* (psutil
+`io_counters`, Linux/Windows; current engines log nothing between "loading
+model" and "model loaded"); the chat timeout scales with the measured tok/s.
+Before the model is loaded, a GPU build is asked which devices it can use
+(`llama-server --list-devices`, `gpu_devices_from_listing`): an empty list
+("(none)" - no Vulkan driver, a CUDA library that won't load) moves to the
+next build, or runs this one in CPU mode with a driver hint. After start-up,
+`gpu_offload_from_log` decides GPU use from where the weights went
+(`CUDA0`/`Vulkan0`/`MTL0` model buffers vs `CPU_Mapped`) when the log shows
+it, never from "offloaded N/M layers to GPU" alone (every official build has
+the RPC backend, which reports layers "offloaded" with no GPU at all). "unknown model
+architecture" means the engine is too old: the engine is updated once
+(`ensure_llama_server(update=True)`), otherwise the error says so. The log
+file is locked while in use (a second copy of the game uses its own log).
+
+**runtime_install.py.** Linux CUDA builds need glibc ≥ 2.38
+(`CUDA_LINUX_MIN_GLIBC`); older systems skip them, and a build that failed for a
+permanent reason (`PERMANENT_FAILURES`) is marked unusable so the next launch
+doesn't retry it. The confirmation screen shows `license_text(variant)`: CUDA
+builds include NVIDIA's CUDA runtime under NVIDIA's terms, not only MIT. A
+stale `GITHUB_TOKEN` (401) is retried without the token. Finishing an install
+that another copy of the game completed first reuses that install.
+
+**hf_discovery.py / download.py.** Every Hub call has a finite timeout (an
+httpx client factory with a timeout) and runs under a deadline on daemon
+threads, so a stalled connection can't block exit. MoE active parameters are
+read from the GGUF header (expert counts), not only from "A3B"-style names.
+A partial or slow Hub answer is cached with a short TTL and never served as
+fresh for the full 72 h; a cache written by `--all-licenses` is not reused by
+a normal launch. Licences are shown "as declared on Hugging Face", with the
+original model's card linked, and families with their own licence are labelled
+as such. `download._hub_errors()` looks up each error class in
+`huggingface_hub.errors` and then `huggingface_hub.utils`. The dependency floor
+is `huggingface_hub>=1.1` (the first version with `tqdm_class`, which drives
+the download bar).
+
+**catalog.py / perf.py (fit engine).** RAM and VRAM are GiB and file sizes
+are GB, so sizes are converted (`GIB_PER_GB`) before comparing. OS headroom is
+3.5 GiB on Windows (2.5 elsewhere). Speed thresholds use the *turn* speed
+(`turn_tokens_per_s`: reading a ~1,200-token prompt plus writing a ~250-token
+answer); the reasoning bonus only applies when the model is fast enough for
+the game to let it think (≥ `THINKING_MIN_TOKENS_PER_S`), which is the same
+threshold the game uses. A quant that is already downloaded needs no
+disk space; a model that fits only with a shorter context gets
+`FitResult.context_tokens = 2048` rather than being dropped. The Fastest badge
+needs a minimum quality (no sub-1B toy unless nothing else fits); Smartest
+excludes tight fits in system RAM and last-tier quants; near-identical
+variants of one family take one slot, and in the filler passes an
+unrecognised fine-tune never comes before the original model of its lineage
+(`_originals_first`). The curated bonus also goes to a seed's newer dated
+release from the same publisher (`_earns_curated_bonus`).
+RAM bandwidth is measured with parallel `memmove` copies on several threads
+(`measure_ram_bandwidth(budget_s, threads=None)`), and the no-AVX penalty
+depends only on the CPU's SIMD flags. `specs.friendly_summary` uses the same
+ranking as the menu, so the two never disagree.
+
+**setup_flow.py.** The engine's actual limits (e.g. a CPU-only engine) are
+applied to the specs before ranking (`apply_engine_limits`), so the menu never
+promises GPU speed the engine can't deliver. The managed → Ollama fallback asks
+first and hands over the downloaded file with `/api/blobs` + `/api/create`
+(`OllamaBackend(gguf_path=...)`) instead of pulling it again. `--model` with a
+repo whose size can't be read says so instead of "won't fit". `SetupResult`
+gains `tokens_per_s` (the warm-up measurement).
+
+**prompts.py.** `COMMUTE_CHALLENGE` is round 1's question and
+`COMMUTE_JUDGE_CHALLENGE` is what referees (local or Jev) are asked in that
+round. `intro_messages` asks for no CHALLENGE line; `outcome_messages(...,
+commute=...)` narrates setting off (or a comic failure to set off, with no
+CHALLENGE line) and passes the chosen way of travelling to later rounds.
+`absurdity_index(progress, target)` spreads the levels end to end over the
+obstacles after the commute (the first is always mild, the last one before the
+finale always the fantastical, magical tier - a default 5-step game goes mild,
+surreal, fantastical) and always uses the finale for the last step.
+`parse_challenge(text, *, current=None, truncated=False)` uses the **first**
+usable CHALLENGE line (skipping placeholders, prompt examples, echoed
+"CURRENT CHALLENGE" lines and, after a success, a repeat of `current`), drops
+everything after it (a rambling model playing the player's part), accepts
+numbered, quoted and inline labels, and never turns a cut-off sentence into a
+challenge. Echoed prompt labels and `<player_plan>` blocks are removed from
+stories. The judge template uses placeholders (`<true or false>`), a copied
+template is unreadable, and when several verdicts appear the last one wins.
+`screen_plan(plan, *, commute=False)` is the one shared heuristic for the
+backup rule and the pretend model (empty, gave up, waits, claims victory,
+orders the referee, too short; any short answer counts in round 1).
+`quote_plan` quotes earlier plans inside `<player_plan>` tags in the round
+history, and the referee rules (and Jev's `state.note`) say earlier quoted
+plans are player data too.
+
+**game.py.** `Game(..., tokens_per_s=None, context_tokens=None)`. Story
+narration (outcome, victory, quit) never thinks and uses stop sequences
+(`STORY_STOPS`); the intro and the local referee may think only when the model
+is fast enough and has room; models squeezed into a 2048-token context get
+shorter answers. A truncated or unusable challenge is replaced by a built-in
+one from `FALLBACK_CHALLENGE_TIERS` matching the progress. The meter reads
+"Progress to your desk"; round 1 is titled "Round 1: the journey" and later
+panels "Challenge N". In an interactive terminal the game pauses ("Press
+Enter...") after the opening and after a verdict with a lesson. Jev's Choice
+label reaches the narrator only when it agrees with the Noul, and the verdict
+panel explains a disagreement as a close call. With the pretend model the
+chain-of-thought lesson (and the review) call its thinking "scripted example"
+text.
+
+**backends/mock.py.** The intro has no CHALLENGE line; the commute outcome
+sets off (or not); the next obstacle's tier comes from the progress stated in
+the prompt (or its own count), never goes down, and a failed round keeps the
+same obstacle.
+
+**jev.py.** `normalize_base_url` adds `https://` to a bare host and refuses
+non-https addresses (except localhost) with a `kind="config"` error. The
+default transport never follows redirects (urllib would forward the
+Authorization header); a 3xx becomes a `JevError` explaining why. An address
+urllib can't use is reported like any unreachable address.
+
+**onboarding.py.** Ctrl+C while the key is being checked skips Jev like Ctrl+C
+at a prompt. Navigation words typed at the key prompt ("back", "help"...) go
+back instead of being sent as a key, and the prompt says Enter goes back.
+Choosing a new key without saving it, or having the saved key rejected,
+removes the old saved key; a saved key can also be forgotten from the menu.
+Any unexpected error during the key check becomes the retry/back menu.
+
+**config.py.** `Settings.load` ignores a file that isn't a JSON object and any
+setting of the wrong type; `setup_flow.entry_from_dict` rejects saved entries
+without the fields the game relies on. `Settings.save` creates the temporary
+file owner-only from the start and removes it if the save fails; `reset()`
+also removes a leftover `settings.tmp`. `jev_api_key` is excluded from
+`repr()`.
+
+**ui.py / review.py.** `safe_text` strips terminal control sequences from all
+printed text; `UI.ask`/`secret` survive undecodable input; `UI.choose`
+accepts `y`/`n` for yes/no menus and unique prefixes; `UI.can_hide_input()`
+tells callers whether hidden input is really hidden; `UI.status` shows elapsed
+seconds and yields `update(text)`; `UI.pause` only waits in an interactive
+terminal (or with `UI(pauses=True)`). Transcripts replace the home folder with
+`~` (so the OS user name isn't shared) and never fail on broken characters.
+
+## Round 3 review fixes (as built)
+
+**Thinking models (hf_discovery.py, catalog.py, game.py, llamaserver.py).**
+`ModelEntry.thinking` is "none", "switchable" or "always" (read through
+`catalog.thinking_mode`, which falls back to `reasoning` for old entries).
+Always-thinkers are penalised (`PENALTY_ALWAYS_THINKING`), their turn speed
+counts `ALWAYS_THINKING_TOKENS`, only switchable models earn
+`BONUS_REASONING`, and they never reach the short menu. When the game asks for
+no thinking, llama-server gets every known switch: `chat_template_kwargs`
+`enable_thinking=false`, `reasoning_effort="low"`, `thinking_budget=0`
+(Seed-OSS), plus the top-level `reasoning_budget_tokens=0` (current llama.cpp
+closes a forced `<think>` straight away; older builds ignore it). `Game` takes
+`thinking=` and gives an always-thinker `ALWAYS_THINKING_EXTRA_TOKENS` on top
+of each answer budget, in case an engine ignores the switches.
+
+**Showing the thinking (game.py, review.py, setup_flow.py, cli.py).** When the
+game keeps a switchable model from thinking (slow, or a short context),
+`Game.thinking_note` says why and `run_review(thinking_skipped_note=...)`
+shows it instead of "your model doesn't think out loud". `--think` lets a slow
+model think anyway (`Game(force_think=True)`); the warm-up mentions it.
+
+**Engine lifecycle (runtime_install.py, llamaserver.py, tls.py).** HTTPS
+(GitHub and Jev) uses `tls.https_context()`: truststore (the OS store), else
+the default store plus certifi. A failed certificate check is explained
+(`tls.CERTIFICATE_HELP`, "Install Certificates.command") instead of "are you
+offline?", and Jev doesn't retry it. `UrllibHttp` drops credential headers on
+a redirect to another host and refuses https → http. `platform_problem` (per
+build glibc minimums: x64 CPU/Vulkan 2.35, arm64 and CUDA 2.38; macOS 13.3)
+and builds marked unusable (`unusable_reasons`; `cant_execute` and
+`gpu_arch` join `glibc`/`cpu_unsupported`) make `is_available()` say no - and
+`ensure_llama_server` refuse - before anything is downloaded; an install
+marked unusable is never downloaded again. The note belongs to one install
+(one `<tag>-<build>` folder): a build *type* only counts as unusable while it
+has no working install left and the note is under `UNUSABLE_RETRY_DAYS` (30)
+old, so a broken engine update never blocks the older install that works (a
+model that needs the newer engine is told exactly that:
+`newer_engine_unusable_message`), and a later release gets another chance.
+An engine fetched by an update is checked with `--version` before the model
+is loaded with it. Right after installing,
+`llama-server --version` runs (`LlamaServerBackend(runner=...)`); a build that
+can't run moves to the next one before the model download. The `.part`
+rename waits out antivirus locks (`_rename_with_retry`, ~15 s), deleting the
+archive may fail harmlessly, other disk errors become friendly
+`RuntimeInstallError`s, and `LlamaServerBackend._install` turns an `OSError`
+into a `BackendError` so the fallback chain continues. After a successful
+start, `prune_old_installs` deletes same-build installs an update replaced
+(unless a running game uses them, per the owner records) and the payload of
+unusable builds (keeping their `install.json` note). A GPU build that dies or
+answers 5xx on its first real work (the warm-up now reads a ~1,000-token
+prompt) or during a chat switches to the next build (warm-up only) or to CPU
+mode, with a notice; if nothing works, `benchmark` raises `EngineStopped` and
+setup treats it as a failed start. A quiet restart happens once; a second
+stop switches setup. A GPU start that times out with no load progress at all
+- nothing in its log and no disk reads - may be a stuck device (`gpu_hang`):
+the player is asked whether to keep waiting or try the next build (the build
+that works is saved for next time, so this is never switched silently). On
+Windows (no `flock`) each game writes its own `llama-server-<pid>-<id>.log`.
+
+**Fit engine (catalog.py, perf.py, setup_flow.py).** See the catalog/perf
+contract notes above. Calibration only learns from dense models whose
+estimated time per token is ≥ 70% bandwidth (`CALIBRATION_MIN_BANDWIDTH_SHARE`),
+solves `seconds/token = GB / (eff × bw) + overhead` for the bandwidth instead
+of scaling by measured/estimated, never learns "cpu" when a GPU build
+(including Metal) ran, and records the engine build (`engine_key`, e.g.
+"managed:cuda-12") so a correction isn't applied to another build.
+`fit_for_quant` (an explicit `--quant`) bypasses the quant floor.
+
+**Parsing and prompts (prompts.py, mock.py).** `parse_judge_json` never
+raises, decodes only top-level objects (braces inside strings are skipped),
+ignores verdict dicts the player typed (`plan=`) and prompt few-shot copies
+unless that's all there is. `defang_plan` (used for plans in prompts and the
+Jev state) NFKC-folds, removes invisible characters and breaks up
+chat-template tokens (`<|...|>`, `[INST]`, `</s>`, `<think>`...).
+`screen_plan` reads any script (CJK counted by characters) and catches a typed
+`made_progress: true`. The mock reads the official `REFEREE'S VERDICT` line
+(never the player's text), picks obstacles that fit the journey
+(`Challenge.modes`, `travel_mode`), and its scripted round-1 reasoning no
+longer claims "at least four words". Challenges are numbered by progress.
+
+**UI and review (ui.py, review.py, onboarding.py, specs.py).** Menus accept
+only decimal digits (`isdecimal`); `safe_text` never removes a backslash at
+all (*Round 4*: removing one of `escape()`'s doubled backslashes exposed a live
+`[/]`; review text now goes through `ui.plain()` = sanitise then escape);
+`UI.table` cells and `UI.json` C1 characters are sanitised; review reasoning
+and answers go through `safe_text`. `UI.choose(aliases=...)` and
+`UI.confirm` understand back/cancel/skip (no) and quit (UserQuit); onboarding
+menus accept the back-out words they advertise, a returning local-only player
+gets one short question, `privacy_notice` survives a malformed
+`TYPESAFE_BASE_URL`, key tails are escaped, and any unexpected error means
+"local only". The Jev review shows the three question definitions once,
+then only each round's state, pausing between rounds in a real terminal.
+`learn` at the model menu redraws the menu after the lessons. On Windows,
+`specs._run` starts powershell/wmic/nvidia-smi from their real system paths
+(missing = not installed), and child programs get `config.child_env()`.
+
+## Round 4 review fixes (as built)
+
+**Speed calibration that lasts (setup_flow.py).** The warm-up records the
+engine by its *setup kind* (`engine_key("managed", backend)` →
+"managed:cuda-12"; the class name "llamacpp-server" also maps to "managed"),
+so the key saved matches the key the next launch plans with
+(`planned_engine_key`, which for a returning player reads the saved
+`server_exe`'s install.json variant). `_detect` records which saved factors it
+applied (`saved_calibration` + `_apply_factors` → `_specs_factors`); a new
+measurement is relative to those, so the saved total is
+`applied × factor` - a factor that wasn't applied (another build) is replaced,
+never compounded. After a slow warm-up the menu shows the model just tried at
+its *measured* speed (`_with_measured_speeds`, score adjusted), the message
+admits when the correction hit its clamp, and the question is a menu
+(`pick` / `play`; "back" = pick) instead of a [Y/n] where "back" meant no.
+`--gguf` paths (and every saved path) are stored absolute; a vanished saved
+model file is mentioned. Saved and cached ModelEntry JSON goes through one
+type-checking loader (`types.model_entry_from_json`: numbers written as text
+are converted, anything unreadable drops the entry). Badges are named for what
+they mean - **Fastest comfortable fit**, **Smartest at a playable pace** - with
+a one-line footnote (`BADGE_FOOTNOTE`).
+
+**Discovery (hf_discovery.py).** `granitehybrid` and `jamba` are
+`MAYBE_MOE_ARCHITECTURES`: Mixture-of-Experts only when the GGUF header says
+`expert_count > 1` (a header with 0 or 1 expert means dense for any
+architecture), so dense Granite-4.0-H micro / 1B aren't ranked with a 25%
+active-share guess. `rescreen_entry` recomputes the active size (dropping an
+old guess) and the family; the MoE tables and `_FAMILIES` are part of
+`RULES_VERSION`. The specialist screen also rejects agents and domain
+fine-tunes (agent, swe, dev, openhands, search, research, tool(s),
+function(s), medical/med/clinical, rag, structure(d); "guard" and "research"
+also inside a word) and checks the base model's name too. A family comes from
+the names, then the GGUF architecture, never the uploader's name. Candidates
+whose attention shape isn't in `catalog._KV_SHAPES` get their GGUF header
+read (`_needs_header`), and `kv_shape_from_header` stores
+`ModelEntry.kv_shape` = (layers, KV heads, head size) for exact KV maths.
+
+**Fit engine (catalog.py).** KV table entries for Phi-4, Phi-3/3.5-mini and
+-medium and OLMo-2 (no grouped-query attention: 3-5x the rule of thumb); a
+stored `kv_shape` wins next; architectures known to lack GQA get
+`0.18 × params^0.6` GB per 1,024 tokens. Smartest never goes to a tight fit in
+system RAM (cpu, unified, Apple split, or a split whose RAM side is snug) or a
+last-tier quant; `explain_fit` words an Apple split's budget as the Mac's own
+memory. In the filler passes `_originals_first` keeps an unrecognised
+fine-tune from claiming its lineage before the original; Fastest near-ties
+(within 5%) go to the better score; the curated bonus also covers a seed's
+newer dated release from the same publisher.
+
+**Engine lifecycle (llamaserver.py, runtime_install.py, specs.py).** See the
+engine-lifecycle notes above for `--list-devices`, buffer-based GPU detection,
+disk-read progress, per-install unusable notes and the update check. Also:
+`gpu_arch` ("no kernel image is available") is a permanent failure of that
+install; `GPUInfo.compute_capability` keeps CUDA 13 away from cards below 7.5;
+Windows on ARM with an NVIDIA GPU tries the CUDA 13 arm64 build; the
+"10.16" macOS compatibility answer is seen through (`specs.macos_release`:
+`sysctl kern.osproductversion`, or a fresh Python with
+`SYSTEM_VERSION_COMPAT=0`) and never treated as a real version;
+`engine_can_use_gpu` uses `usable_plan`; a missing library is named with the
+fix for this OS (`missing_library_hint`: the apt package on Linux, the VC++
+Redistributable on Windows); CUDA build sizes say 0.6-0.8 GB and big backups
+are priced on the confirmation screen; built-in graphics are described as
+"Vulkan on the built-in graphics" in the hardware table and on the
+confirmation screen (`specs.uses_built_in_graphics`).
+
+**Game, prompts and review.** `screen_plan` judges what the player does:
+give-up phrases count only at the start of a clause after the player's own
+subject, with nothing afterwards that does something else (`_gives_up`); "I
+win" only as a claim at the end or with "the game/this round"; orders need an
+instruction to the referee, not a bare "you must". The mock has separate
+give-up lines for the commute and for obstacles. `defang_plan` also breaks up
+`<name:name>` / `<name_with_underscore>` tokens (Seed-OSS, Nemotron) and
+EXAONE's `[|...|]`. A typed "quit" at a yes/no question raises
+`UserChoseQuit` (a `UserQuit`): in the game it ends with the quit ending and
+review, and the program exits 0. Menu numbers are capped at 6 digits (`int()`
+refuses 4,300+). A disagreeing Choice is called a close call only for a Noul
+between 0.35 and 0.65. With `--mock` the referee is labelled "the pretend
+model (a simple scripted rule)" everywhere (welcome, verdict panel, lesson,
+review, transcript). The review offers each local verdict (its JSON answer)
+when there's no reasoning to show, and says "pick either, both or neither"
+only when two or more questions follow.
+
+**Privacy and keys.** A plain-http localhost Jev address is reached without
+any `http_proxy` (`jev._LOCAL_OPENER`). An `OLLAMA_HOST` on another computer
+is named ("another computer - your OLLAMA_HOST"), the player is told plans
+and the model file would go there (over plain http if so) and asked before
+the upload, and onboarding stops promising "nothing leaves this computer".
+On Windows a saved key's `settings.json` gets an owner-only access list
+(`config.restrict_to_owner_windows`, `icacls /inheritance:r /grant:r`); if
+that fails, onboarding says so.
+

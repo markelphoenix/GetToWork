@@ -24,6 +24,10 @@ class GPUInfo:
     vendor: GPUVendor
     vram_gb: float  # dedicated VRAM; for Apple unified memory this is the usable share of RAM
     bandwidth_gbs: Optional[float] = None  # estimated memory bandwidth (GB/s), if known
+    driver_version: Optional[str] = None  # e.g. "550.54.14" (NVIDIA, from nvidia-smi), if known
+    # NVIDIA "compute capability" (the chip generation), e.g. 6.1 for a GTX 1080,
+    # 8.6 for an RTX 3060 - newer CUDA builds leave out older generations.
+    compute_capability: Optional[float] = None
 
 
 @dataclass
@@ -42,8 +46,12 @@ class SystemSpecs:
     gpus: list[GPUInfo] = field(default_factory=list)
     unified_memory: bool = False  # True on Apple Silicon: GPU shares system RAM
     notes: list[str] = field(default_factory=list)  # human-readable caveats from detection
-    ram_bandwidth_gbs: Optional[float] = None  # measured by a quick copy benchmark (perf.py)
+    ram_bandwidth_gbs: Optional[float] = None  # measured by a quick read benchmark (perf.py)
     cpu_flags: list[str] = field(default_factory=list)  # e.g. ["avx2", "avx512f", "neon"]
+    # False when the engine that will run the model can't use any graphics card
+    # here (e.g. an AMD card on Linux without the Vulkan loader): the fit engine
+    # then plans with the CPU. None = no limit known.
+    gpu_offload: Optional[bool] = None
 
     @property
     def best_vram_gb(self) -> float:
@@ -86,6 +94,114 @@ class ModelEntry:
     architecture: Optional[str] = None  # e.g. "qwen3", "llama", "phi3" (from GGUF metadata)
     native_context: Optional[int] = None  # model's trained context length, if known
     gated: bool = False  # requires accepting terms / logging in on Hugging Face
+    # How the model thinks out loud: "none" (never), "switchable" (thinks, but can
+    # be asked to answer straight away - Qwen3, gpt-oss, SmolLM3...) or "always"
+    # (its chat template forces thinking - QwQ, DeepSeek-R1 distills, Phi-4-reasoning...).
+    # "" = not recorded (older saved lists): read as "switchable" if `reasoning`, else "none".
+    # Use `catalog.thinking_mode(entry)` rather than reading it directly.
+    thinking: str = ""
+    # (layers, KV heads, head size) read from the GGUF header, for exact KV-cache
+    # maths when `catalog` doesn't know the family; () = not read.
+    kv_shape: tuple[int, ...] = ()
+
+
+# How each saved ModelEntry field is read back from JSON (settings file, model
+# list cache). Every field must be listed: tests check this table stays complete.
+_ENTRY_TEXT = ("key", "display_name", "family", "license", "license_url", "hf_repo", "quant", "ollama_ref",
+               "blurb", "source", "thinking")
+_ENTRY_OPTIONAL_TEXT = ("base_model", "architecture")
+_ENTRY_NUMBER = ("params_b", "file_size_gb")
+_ENTRY_OPTIONAL_NUMBER = ("active_params_b",)
+_ENTRY_COUNT = ("context_tokens", "downloads", "likes")
+_ENTRY_OPTIONAL_COUNT = ("native_context",)
+_ENTRY_FLAG = ("reasoning", "gated")
+_ENTRY_LISTS = ("quant_options", "gguf_files", "kv_shape")
+
+
+class _BadField(ValueError):
+    pass
+
+
+def _as_number(value: Any) -> float:
+    if isinstance(value, bool):
+        raise _BadField(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise _BadField(value) from None
+    if number != number or number in (float("inf"), float("-inf")):
+        raise _BadField(value)
+    return number
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    raise _BadField(value)
+
+
+def _as_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no", "1", "0"):
+        return value.strip().lower() in ("true", "yes", "1")
+    raise _BadField(value)
+
+
+def model_entry_from_json(data: Any) -> Optional[ModelEntry]:
+    """Rebuild a ModelEntry from JSON (the settings file or the model-list cache).
+
+    Both can be hand-edited or damaged, so every field is checked against its
+    type (numbers written as text are accepted and converted; a missing name
+    becomes ""), and an entry with a field that can't be read - or a required
+    field missing - comes back as None instead of crashing the game later.
+    """
+    if not isinstance(data, dict):
+        return None
+    import dataclasses as _dc
+
+    fields = {f.name: f for f in _dc.fields(ModelEntry)}
+    values: dict[str, Any] = {}
+    try:
+        for name, raw in data.items():
+            if name not in fields:
+                continue
+            if name in _ENTRY_TEXT:
+                values[name] = _as_text(raw)
+            elif name in _ENTRY_OPTIONAL_TEXT:
+                values[name] = None if raw is None or raw == "" else _as_text(raw)
+            elif name in _ENTRY_NUMBER:
+                values[name] = _as_number(raw)
+            elif name in _ENTRY_OPTIONAL_NUMBER:
+                number = None if raw is None else _as_number(raw)
+                values[name] = number if number is not None and number > 0 else None
+            elif name in _ENTRY_COUNT:
+                values[name] = max(0, int(_as_number(raw or 0)))
+            elif name in _ENTRY_OPTIONAL_COUNT:
+                count = None if raw is None else int(_as_number(raw))
+                values[name] = count if count is not None and count > 0 else None
+            elif name in _ENTRY_FLAG:
+                values[name] = _as_flag(raw)
+            elif name == "quant_options":
+                values[name] = tuple((_as_text(q), _as_number(size)) for q, size in (raw or ()))
+            elif name == "kv_shape":
+                shape = tuple(int(_as_number(x)) for x in (raw or ()))
+                values[name] = shape if len(shape) == 3 and all(x > 0 for x in shape) else ()
+            elif name == "gguf_files":
+                if isinstance(raw, str):
+                    raise _BadField(raw)
+                values[name] = tuple(_as_text(f) for f in (raw or ()))
+        if values.get("context_tokens", 1) <= 0:
+            values["context_tokens"] = 4096
+        return ModelEntry(**values)
+    except (_BadField, TypeError, ValueError, OverflowError):
+        return None
 
 
 @dataclass
@@ -103,6 +219,12 @@ class FitResult:
     est_tokens_per_s: Optional[float] = None  # rough generation speed estimate
     score: float = 0.0  # overall ranking score (higher = better pick)
     badges: tuple[str, ...] = ()  # e.g. ("recommended",), ("fastest",), ("smartest",)
+    context_tokens: Optional[int] = None  # a shorter context the fit engine chose so it fits (None = the model's own)
+    gpu_share: Optional[float] = None  # share of the model on the graphics card (1.0 = all, 0 = none)
+    # True when the memory this plan fills is the computer's own RAM - the
+    # processor, a Mac's unified memory, or an Apple split - so a snug fit means
+    # the whole computer is short of memory (and overflow means swapping).
+    shares_system_ram: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +243,7 @@ class LLMResult:
     elapsed_s: float
     messages: list[dict[str, str]] = field(default_factory=list)  # the prompt that was sent
     raw: Optional[dict[str, Any]] = None  # backend-specific raw response (JSON-safe)
+    truncated: bool = False  # the answer was cut off by the token limit (finish_reason "length")
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +299,7 @@ class RoundRecord:
     progress_after: int
     jev: Optional[JevVerdict] = None
     llm_calls: list[tuple[str, LLMResult]] = field(default_factory=list)  # (purpose, result)
+    failed_jev_exchange: Optional[JevExchange] = None  # a Jev call that failed this round (the local model judged instead)
 
 
 @dataclass

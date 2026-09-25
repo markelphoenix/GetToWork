@@ -9,3 +9,5 @@ dist/
 *.gguf
 gettowork-transcript-*.json
 gettowork-transcript-*.md
+.mypy_cache/
+.ruff_cache/

@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
   "rich>=13.0",
   "psutil>=5.9",
-  "huggingface_hub>=0.23",
+  "huggingface_hub>=1.1",  # 1.1 added hf_hub_download(tqdm_class=...), which drives the download bar
 ]
 
 [project.optional-dependencies]
