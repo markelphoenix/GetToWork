@@ -1,0 +1,130 @@
+# Builds test copies of the game and uploads them as downloadable artifacts:
+#
+#   * gettowork-python-package  - the pip-installable wheel + source archive
+#   * gettowork-<os>-<arch>     - a standalone executable (no Python needed),
+#                                 built with PyInstaller for Windows, macOS
+#                                 and Linux
+#
+# Every build is smoke-tested before upload (packaging/smoke_test.sh): the
+# info commands run and a whole game is won with the offline "pretend" model.
+# No secrets, network models or GPUs are needed.
+#
+# Find the files on the workflow run's page under "Artifacts". These are
+# unsigned test builds: see the README's "Test builds" section.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  package:
+    name: Python package (wheel + sdist)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build the wheel and source archive
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+
+      - name: Install the wheel in a clean virtual environment
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/python -m pip install dist/*.whl
+
+      - name: Smoke test the installed game
+        run: packaging/smoke_test.sh /tmp/wheel-venv/bin/gettowork
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gettowork-python-package
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  standalone:
+    name: Standalone ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            exe: gettowork
+          - os: windows-latest
+            target: windows-x64
+            exe: gettowork.exe
+          - os: macos-latest
+            target: macos-arm64
+            exe: gettowork
+    defaults:
+      run:
+        # Git Bash on Windows, so one smoke-test script works everywhere.
+        shell: bash
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the game and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller
+
+      - name: Build the standalone executable
+        # rich loads some modules dynamically, and truststore/certifi supply the
+        # HTTPS certificate checks used for downloads - bundle them explicitly.
+        run: >
+          pyinstaller --onefile --console --noconfirm --clean
+          --name gettowork
+          --collect-submodules rich
+          --collect-submodules truststore
+          --collect-data certifi
+          packaging/gettowork_entry.py
+
+      - name: Smoke test the executable
+        run: packaging/smoke_test.sh "./dist/${{ matrix.exe }}"
+
+      - name: Gather the executable with its license and notices
+        run: |
+          mkdir -p "out/gettowork-${{ matrix.target }}"
+          cp "dist/${{ matrix.exe }}" LICENSE NOTICE.md README.md "out/gettowork-${{ matrix.target }}/"
+
+      - name: Upload the executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: gettowork-${{ matrix.target }}
+          path: out/gettowork-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 14
