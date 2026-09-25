@@ -109,6 +109,8 @@ def machine(monkeypatch, tmp_path):
         monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
         monkeypatch.setattr(specs, "_windows_cpu_flags", lambda arch: ["avx", "avx2"])
         monkeypatch.setattr(specs.perf, "measure_ram_bandwidth", lambda budget_s=0.3: bandwidth)
+        # The real benchmark leaves a note behind (e.g. on a low-memory CI runner); the fake leaves none.
+        monkeypatch.setattr(specs.perf, "last_benchmark_note", None)
         return fake
 
     return build

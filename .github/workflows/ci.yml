@@ -54,4 +54,5 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Run the tests
-        run: python -m pytest -q
+        # --durations lists the slowest tests, to spot ones waiting on real timeouts on some OS.
+        run: python -m pytest -q --durations=15

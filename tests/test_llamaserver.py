@@ -1035,12 +1035,37 @@ def test_server_requires_a_per_launch_key_and_chat_sends_it(tmp_path):
     assert "Authorization" not in health_call["headers"]  # /health stays public
 
 
-def test_posix_launch_uses_its_own_session_and_a_parent_death_signal(tmp_path):
+def test_posix_launch_uses_its_own_session_and_a_parent_death_signal(tmp_path, monkeypatch):
+    # The real hook needs Linux's prctl(), which a macOS/Windows test runner doesn't
+    # have even while the autouse fixture pretends to be Linux - so stand it in.
+    def hook() -> None:
+        pass
+
+    monkeypatch.setattr(ls, "_parent_death_signal_hook", lambda: hook)
     backend, _http, popen = started(tmp_path)
     kwargs = popen.calls[0][1]
     assert kwargs["start_new_session"] is True  # terminal Ctrl+C doesn't reach the engine
-    assert callable(kwargs.get("preexec_fn"))  # Linux: the kernel stops it if the game dies
+    assert kwargs.get("preexec_fn") is hook  # Linux: the kernel stops it if the game dies
     backend.close()
+
+
+def test_posix_launch_without_a_death_signal_hook_still_starts(tmp_path, monkeypatch):
+    monkeypatch.setattr(ls, "_parent_death_signal_hook", lambda: None)  # e.g. macOS
+    backend, _http, popen = started(tmp_path)
+    kwargs = popen.calls[0][1]
+    assert kwargs["start_new_session"] is True
+    assert "preexec_fn" not in kwargs
+    backend.close()
+
+
+def test_parent_death_signal_hook_is_linux_only(monkeypatch):
+    monkeypatch.setattr(ls.platform, "system", lambda: "Darwin")
+    assert ls._parent_death_signal_hook() is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl() only exists on Linux")
+def test_parent_death_signal_hook_on_real_linux():
+    assert callable(ls._parent_death_signal_hook())
 
 
 def test_windows_launch_joins_the_kill_on_close_job(tmp_path, monkeypatch):
