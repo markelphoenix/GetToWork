@@ -414,6 +414,21 @@ def _pretty_lspci_name(desc: str) -> str:
     return f"{prefix} {model}".strip() if prefix and prefix.lower() not in model.lower() else model
 
 
+def _drm_pci_slot(device: Path) -> str:
+    """The PCI slot ("0000:03:00.0") of a /sys/class/drm/cardN/device, or "".
+
+    The kernel names it in the device's ``uevent`` file (``PCI_SLOT_NAME=``).
+    Failing that, ``device`` is a symlink to a folder named after the slot.
+    """
+    match = re.search(r"^PCI_SLOT_NAME=(\S+)\s*$", _read_text(device / "uevent") or "", re.MULTILINE)
+    if match:
+        return match.group(1)
+    try:
+        return os.path.basename(os.path.realpath(device))
+    except Exception:
+        return ""
+
+
 def _linux_drm_cards() -> list[tuple[str, str, float]]:
     """[(pci_slot, vendor, vram_gb)] from /sys/class/drm (amdgpu reports VRAM there)."""
     cards = []
@@ -429,11 +444,7 @@ def _linux_drm_cards() -> list[tuple[str, str, float]]:
         raw = (_read_text(device / "mem_info_vram_total") or "").strip()
         if raw.isdecimal():
             vram = _gib(int(raw))
-        try:
-            slot = os.path.basename(os.path.realpath(device))
-        except Exception:
-            slot = ""
-        cards.append((slot, vendor, vram))
+        cards.append((_drm_pci_slot(device), vendor, vram))
     return cards
 
 
@@ -543,7 +554,7 @@ def _windows_registry_vram() -> dict[str, float]:
 def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
     """Non-NVIDIA GPUs (and NVIDIA ones nvidia-smi missed) on Windows."""
     adapters: list[tuple[str, float]] = []
-    out, _ = _run(
+    out, ps_status = _run(
         [
             "powershell", "-NoProfile", "-NonInteractive", "-Command",
             "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
@@ -556,13 +567,20 @@ def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
                 adapters.append((_clean(str(item["Name"])), float(item.get("AdapterRAM") or 0)))
     except (ValueError, TypeError):
         adapters = []
-    if not adapters:  # older systems: wmic
-        out, _ = _run(["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"])
+        ps_status = "failed"
+    if not adapters:  # PowerShell blocked or too slow: try wmic (gone from Windows 11 24H2 on)
+        out, wmic_status = _run(["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"])
         for line in (out or "").splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 3 and parts[2] and parts[2].lower() != "name":  # Node,AdapterRAM,Name
                 ram = float(parts[1]) if parts[1].isdecimal() else 0.0
                 adapters.append((_clean(parts[2]), ram))
+        if ps_status != "ok" and wmic_status != "ok":
+            # Never a silent "no graphics card": say we couldn't look.
+            notes.append(
+                "Windows didn't tell us which graphics cards are installed (PowerShell didn't answer), so an "
+                "AMD or Intel graphics card may have been missed."
+            )
 
     registry = _windows_registry_vram()
     found = []

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import types
@@ -48,6 +49,19 @@ ENTRY = ModelEntry(
     blurb="A tiny storyteller.",
 )
 NVIDIA = GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0)
+
+# The real host helpers, before the autouse fixture stands fakes in for them.
+REAL_POSIX_LOCKS_AVAILABLE = ls._posix_locks_available
+REAL_LOCK_EXCLUSIVELY = ls._lock_exclusively
+try:
+    import fcntl as _host_fcntl
+except ImportError:  # Windows
+    _host_fcntl = None
+needs_real_flock = pytest.mark.skipif(
+    _host_fcntl is None,
+    reason="exercises the real flock() call, which only exists on POSIX (Linux, macOS); Windows has no fcntl "
+           "module, and there each game uses its own log (see test_windows_games_each_use_their_own_log)",
+)
 
 CUDA_CRASH_LOG = """\
 build: 7000 (abcdef0) with cc (Ubuntu 13.3.0) for x86_64-linux-gnu
@@ -254,8 +268,69 @@ class FakeDownloader:
         return path
 
 
+class FakeFileLocks:
+    """flock() as a Linux/macOS host does it - in-process, so it behaves the same on every OS.
+
+    A file can be locked through one open handle at a time, until that handle
+    is closed; a second ``open()`` of the same file can't take the lock (flock
+    locks belong to the open file, not the process).
+    """
+
+    def __init__(self):
+        self._holders: dict[str, object] = {}
+
+    @staticmethod
+    def _key(path) -> str:
+        return os.path.normcase(os.path.realpath(path))
+
+    def lock(self, fh) -> bool:
+        key = self._key(fh.name)
+        holder = self._holders.get(key)
+        if holder is not None and holder is not fh and not holder.closed:
+            return False
+        self._holders[key] = fh
+        return True
+
+    def hold(self, path):
+        """Another copy of the game holding `path` locked; close the returned file to let go."""
+        fh = open(path, "ab")
+        assert self.lock(fh)
+        return fh
+
+
+def fake_file_sizes(monkeypatch, sizes: dict) -> None:
+    """Make the backend see these file sizes (e.g. a 40 GB model) without writing them.
+
+    Never create big files in a test, not even with truncate(): that is only
+    "sparse" (free) on some file systems - NTFS really allocates it and fills
+    the disk. Files not listed keep their real size.
+    """
+    real = ls._file_size
+    wanted = {os.path.normcase(os.path.realpath(p)): int(n) for p, n in sizes.items()}
+
+    def size(path):
+        key = os.path.normcase(os.path.realpath(path))
+        return wanted[key] if key in wanted else real(path)
+
+    monkeypatch.setattr(ls, "_file_size", size)
+
+
 @pytest.fixture(autouse=True)
-def linux_host(monkeypatch, tmp_path):
+def posix_file_locks(monkeypatch):
+    """The log-file locking a Linux host has, whatever OS runs the tests.
+
+    The backend decides between one shared ``llama-server.log`` (guarded by
+    flock) and a log per game by asking whether ``fcntl`` exists - a host fact
+    that faking ``platform.system()`` doesn't change - so set it explicitly.
+    """
+    locks = FakeFileLocks()
+    monkeypatch.setattr(ls, "_posix_locks_available", lambda: True)
+    monkeypatch.setattr(ls, "_lock_exclusively", locks.lock)
+    return locks
+
+
+@pytest.fixture(autouse=True)
+def linux_host(monkeypatch, tmp_path, posix_file_locks):
     """Pretend to be Linux, keep data dirs in tmp, and never touch real atexit."""
     monkeypatch.setattr(ls.platform, "system", lambda: "Linux")
     monkeypatch.setattr(runtime_install, "_system_has_vulkan_loader", lambda: False)
@@ -1092,8 +1167,6 @@ def _sleeper_named_llama_server(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="uses a real Linux process")
 def test_real_engine_process_is_in_its_own_process_group(tmp_path):
-    import os
-
     exe = _sleeper_named_llama_server(tmp_path)
     backend = make_backend(tmp_path, popen=lambda args, **kw: subprocess.Popen([str(exe), "30"], **kw))
     backend._launch(exe, tmp_path / "m.gguf", cpu_only=True, minimal=False)
@@ -1105,8 +1178,6 @@ def test_real_engine_process_is_in_its_own_process_group(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="uses a real Linux process")
 def test_orphaned_engine_from_a_force_quit_game_is_stopped(tmp_path):
-    import os
-
     exe = _sleeper_named_llama_server(tmp_path)
     orphan = subprocess.Popen([str(exe), "60"])
     try:
@@ -1136,14 +1207,10 @@ def test_owner_record_is_written_while_running_and_removed_on_close(tmp_path):
     assert not list((tmp_path / "logs").glob(f"*{ls.OWNER_SUFFIX}"))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file locks")
-def test_log_in_use_by_another_game_gets_its_own_file(tmp_path):
-    import fcntl
-
+def test_log_in_use_by_another_game_gets_its_own_file(tmp_path, posix_file_locks):
     logs = tmp_path / "logs"
     logs.mkdir()
-    other = open(logs / "llama-server.log", "ab")  # another copy of the game, still running
-    fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    other = posix_file_locks.hold(logs / "llama-server.log")  # another copy of the game, still running
     other.write(b"the other game's engine is busy\n")
     other.flush()
     try:
@@ -1153,6 +1220,29 @@ def test_log_in_use_by_another_game_gets_its_own_file(tmp_path):
         backend.close()
     finally:
         other.close()
+    again, _http, _ = started(tmp_path)  # that game has quit: the shared log is free again
+    assert again.log_path == logs / "llama-server.log"
+    again.close()
+
+
+@needs_real_flock
+def test_real_flock_keeps_a_second_game_off_the_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(ls, "_posix_locks_available", REAL_POSIX_LOCKS_AVAILABLE)
+    monkeypatch.setattr(ls, "_lock_exclusively", REAL_LOCK_EXCLUSIVELY)
+    assert ls._posix_locks_available() is True
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with open(logs / "llama-server.log", "ab") as other:  # another copy of the game, still running
+        _host_fcntl.flock(other.fileno(), _host_fcntl.LOCK_EX | _host_fcntl.LOCK_NB)
+        other.write(b"the other game's engine is busy\n")
+        other.flush()
+        backend, _http, _ = started(tmp_path)
+        assert backend.log_path == logs / "llama-server-50123.log"
+        assert (logs / "llama-server.log").read_bytes() == b"the other game's engine is busy\n"  # untouched
+        backend.close()
+    with open(logs / "llama-server.log", "ab") as first, open(logs / "llama-server.log", "ab") as second:
+        assert ls._lock_exclusively(first) is True
+        assert ls._lock_exclusively(second) is False  # a lock belongs to the open file, not the process
 
 
 def test_health_timeout_grows_with_the_model_size():
@@ -1161,10 +1251,10 @@ def test_health_timeout_grows_with_the_model_size():
     assert ls.health_timeout_for(500) == ls.HEALTH_MAX_TIMEOUT_S
 
 
-def test_big_model_file_gets_a_longer_wake_up_time(tmp_path):
+def test_big_model_file_gets_a_longer_wake_up_time(tmp_path, monkeypatch):
     model = tmp_path / "big.gguf"
-    with open(model, "wb") as fh:
-        fh.truncate(40 * 10**9)  # sparse: 40 GB on paper, nothing on disk
+    model.write_bytes(b"GGUF")
+    fake_file_sizes(monkeypatch, {model: 40 * 10**9})  # 40 GB on paper, nothing on disk
     backend = LlamaServerBackend(ENTRY, specs=make_specs(), http=FakeServerHttp(), popen=FakePopen(),
                                  installer=FakeInstaller(tmp_path), downloader=FakeDownloader(tmp_path),
                                  sleep=lambda s: None, clock=FakeClock(), log_dir=tmp_path / "logs", model_path=model)
@@ -1400,16 +1490,31 @@ def test_a_slow_but_loading_gpu_start_still_times_out_with_the_disk_message(tmp_
 
 
 def test_windows_games_each_use_their_own_log(tmp_path, monkeypatch):
+    # A Windows host: no fcntl (so no flock to guard a shared log file).
+    monkeypatch.setattr(ls.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ls, "_assign_to_kill_on_close_job", lambda proc: True)
     monkeypatch.setattr(ls, "_posix_locks_available", lambda: False)
+
+    def no_flock(fh):
+        raise AssertionError("there is no flock() on Windows to rely on")
+
+    monkeypatch.setattr(ls, "_lock_exclusively", no_flock)
     first = make_backend(tmp_path)
     first.prepare(make_ui())
     first_log = first.log_path
     first_log.write_bytes(b"first game's engine output\n")
-    second = make_backend(tmp_path)
+    second = make_backend(tmp_path)  # a second copy of the game, while the first still runs
     second.prepare(make_ui())
-    assert second.log_path != first_log
-    assert first_log.read_bytes() == b"first game's engine output\n"  # not truncated
-    assert first_log.name.startswith("llama-server-") and second.log_path.name.startswith("llama-server-")
+    try:
+        assert second.log_path != first_log
+        assert first_log.read_bytes() == b"first game's engine output\n"  # not truncated
+        for log in (first_log, second.log_path):
+            assert log.parent == tmp_path / "logs" and log.is_file()
+            assert log.name.startswith(f"llama-server-{os.getpid()}-") and log.suffix == ".log"
+            assert log.name not in ("llama-server.log", "llama-server-50123.log")  # never a shared name
+    finally:
+        first.close()
+        second.close()
 
 
 def test_lock_helper_says_no_without_flock(monkeypatch):
@@ -1423,8 +1528,8 @@ def test_lock_helper_says_no_without_flock(monkeypatch):
         return real_import(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", no_fcntl)
-    assert ls._lock_exclusively(io.BytesIO()) is False
-    assert ls._posix_locks_available() is False
+    assert REAL_LOCK_EXCLUSIVELY(io.BytesIO()) is False
+    assert REAL_POSIX_LOCKS_AVAILABLE() is False
 
 
 def test_a_successful_start_tidies_older_engine_copies(tmp_path, monkeypatch):
@@ -1570,13 +1675,15 @@ def test_a_quiet_gpu_start_asks_before_switching_builds(tmp_path):
     assert "Keep waiting" in output(ui) and "hasn't started loading the model" in " ".join(output(ui).split())
 
 
-def test_a_split_model_gets_time_to_load_every_part(tmp_path):
+def test_a_split_model_gets_time_to_load_every_part(tmp_path, monkeypatch):
     folder = tmp_path / "split"
     folder.mkdir()
-    for part in (1, 2, 3):
-        with open(folder / f"big-Q4_K_M-0000{part}-of-00003.gguf", "wb") as fh:
-            fh.truncate(15 * 10**9 if part < 3 else 5 * 10**9)  # sparse: no real disk space used
-    first = folder / "big-Q4_K_M-00001-of-00003.gguf"
+    parts = [folder / f"big-Q4_K_M-0000{part}-of-00003.gguf" for part in (1, 2, 3)]
+    for path, size in zip(parts, (3, 5, 7)):
+        path.write_bytes(b"x" * size)
+    first = parts[0]
+    assert ls._model_total_bytes(first) == 15  # real (tiny) files: every part is counted
+    fake_file_sizes(monkeypatch, dict(zip(parts, (15 * 10**9, 15 * 10**9, 5 * 10**9))))  # nothing big on disk
     assert ls._model_total_bytes(first) == 35 * 10**9
     backend = make_backend(tmp_path, model_path=first)
     backend.prepare(make_ui())

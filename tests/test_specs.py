@@ -1,13 +1,15 @@
 """Tests for gettowork.specs (hardware detection).
 
 Nothing here touches the real machine's tools: `subprocess.run`, `platform`,
-`psutil`, /proc and /sys are all replaced with fakes describing imaginary
-computers.
+`psutil`, /proc, /sys, the Windows system folder and "am I on Windows?"
+(`os.name`) are all replaced with fakes describing imaginary computers, so
+every test gives the same answer on Linux, macOS and Windows hosts.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections import namedtuple
 from pathlib import Path
@@ -34,22 +36,34 @@ CPUINFO_X86 = (
 )
 
 
+def program_name(arg0: str) -> str:
+    """The program a command runs: "C:\\Windows\\System32\\wbem\\WMIC.exe" -> "wmic", "lspci" -> "lspci"."""
+    name = re.split(r"[\\/]", arg0)[-1]
+    return name[:-4].lower() if name.lower().endswith(".exe") else name
+
+
 class FakeRun:
     """Stands in for subprocess.run. `outputs` maps a program name to:
     a string (stdout, exit code 0), an (exit_code, stdout) tuple, an exception
     to raise, or a callable(args) returning one of those. Unknown programs
-    raise FileNotFoundError, exactly like a missing executable."""
+    raise FileNotFoundError, exactly like a missing executable.
+
+    Programs are matched by name, so a Windows tool started from its real
+    location ("...\\System32\\wbem\\WMIC.exe") is "wmic". `calls` records each
+    command with that name first; `raw_calls` records it exactly as started."""
 
     def __init__(self, outputs: dict):
         self.outputs = outputs
         self.calls: list[list[str]] = []
+        self.raw_calls: list[list[str]] = []
 
     def __call__(self, args, **kwargs):
         assert isinstance(args, list), "commands must be passed as a list (no shell)"
         assert not kwargs.get("shell"), "never use shell=True"
         assert 0 < kwargs.get("timeout", 999) <= 5, "every command needs a timeout of at most 5 s"
-        self.calls.append(list(args))
-        value = self.outputs.get(args[0])
+        self.raw_calls.append(list(args))
+        self.calls.append([program_name(args[0]), *args[1:]])
+        value = self.outputs.get(program_name(args[0]))
         if callable(value) and not isinstance(value, BaseException):
             value = value(args)
         if value is None:
@@ -97,9 +111,28 @@ def machine(monkeypatch, tmp_path):
         )
         fake = FakeRun(commands or {})
         monkeypatch.setattr(specs.subprocess, "run", fake)
+        # `_run` decides "Windows or not" from os.name (not platform.system()), so fake that too -
+        # otherwise a Windows host would treat every imaginary Linux machine as Windows.
+        monkeypatch.setattr(specs, "_on_windows", lambda: system == "Windows")
+        # An imaginary %SystemRoot% and %ProgramFiles%: on Windows, system tools are started from
+        # their real location, so a tool counts as installed when the test gives it an answer (the
+        # host's own C:\Windows\System32 - with or without powershell/wmic/nvidia-smi - is never used).
+        host = tmp_path / "fake-host"
+        fake.system_root = host / "Windows"
+        (host / "Program Files").mkdir(parents=True, exist_ok=True)
+        for var in ("SystemRoot", "windir"):
+            monkeypatch.setenv(var, str(fake.system_root))
+        for var in ("ProgramW6432", "ProgramFiles"):
+            monkeypatch.setenv(var, str(host / "Program Files"))
+        if system == "Windows":
+            for name, (location, *_) in specs._WINDOWS_TOOLS.items():
+                if name in fake.outputs:
+                    exe = fake.system_root.joinpath(*location.split("\\"))
+                    exe.parent.mkdir(parents=True, exist_ok=True)
+                    exe.write_bytes(b"")
         cpuinfo_path = tmp_path / "cpuinfo"
         if cpuinfo is not None:
-            cpuinfo_path.write_text(cpuinfo)
+            cpuinfo_path.write_text(cpuinfo, encoding="utf-8")
         monkeypatch.setattr(specs, "_PROC_CPUINFO", cpuinfo_path)
         drm = tmp_path / "drm"
         drm.mkdir(exist_ok=True)
@@ -117,19 +150,20 @@ def machine(monkeypatch, tmp_path):
 
 
 def add_drm_card(tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes: int | None) -> None:
-    """Create /sys/class/drm/cardN/device -> ../devices/<slot> like the kernel does."""
-    devices = tmp_path / "devices"
-    device = devices / slot
+    """Create /sys/class/drm/cardN/device with the files the kernel puts there.
+
+    In real sysfs `device` is a symlink to a folder named after the PCI slot
+    (../../../0000:03:00.0); its `uevent` file names the slot too, and that is
+    what's read - so the fake needs no symlink and no ':' in a file name
+    (neither is available on Windows). See test_drm_slot_falls_back_to_the_device_symlink.
+    """
+    device = tmp_path / "drm" / f"card{index}" / "device"
     device.mkdir(parents=True)
     (device / "vendor").write_text(vendor + "\n")
+    driver = {"0x1002": "amdgpu", "0x10de": "nvidia", "0x8086": "i915"}.get(vendor, "unknown")
+    (device / "uevent").write_text(f"DRIVER={driver}\nPCI_CLASS=30000\nPCI_SLOT_NAME={slot}\n")
     if vram_bytes is not None:
         (device / "mem_info_vram_total").write_text(f"{vram_bytes}\n")
-    card = tmp_path / "drm" / f"card{index}"
-    card.mkdir(parents=True)
-    try:
-        os.symlink(device, card / "device")
-    except (OSError, NotImplementedError):  # pragma: no cover - Windows without symlink rights
-        pytest.skip("symlinks not available")
     (tmp_path / "drm" / f"card{index}-DP-1").mkdir()  # connectors must be ignored
 
 
@@ -349,6 +383,24 @@ def test_sysfs_only_when_lspci_missing(machine, tmp_path):
     assert [(g.name, g.vram_gb) for g in s.gpus] == [("AMD GPU", 8.0)]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the subject is a sysfs symlink to a folder named like 0000:03:00.0; Windows forbids ':' in file names",
+)
+def test_drm_slot_falls_back_to_the_device_symlink(machine, tmp_path):
+    """No uevent to read: the slot is the name of the folder cardN/device links to, as in real sysfs."""
+    device = tmp_path / "devices" / "0000:03:00.0"
+    device.mkdir(parents=True)
+    (device / "vendor").write_text("0x1002\n")
+    (device / "mem_info_vram_total").write_text(f"{16 * GIB}\n")
+    (tmp_path / "drm" / "card0").mkdir(parents=True)
+    os.symlink(device, tmp_path / "drm" / "card0" / "device", target_is_directory=True)
+    machine(commands={"lspci": "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] "
+                               "Navi 21 [Radeon RX 6800]\n"})
+    s = specs.detect_specs(tmp_path)
+    assert [(g.name, g.vram_gb) for g in s.gpus] == [("AMD Radeon RX 6800", 16.0)]
+
+
 # ---------------------------------------------------------------------------
 # macOS
 # ---------------------------------------------------------------------------
@@ -464,8 +516,31 @@ def test_windows_nvidia_via_nvidia_smi_and_wmic_fallback(machine, monkeypatch, t
     assert [(g.vendor, g.vram_gb) for g in s.gpus] == [("nvidia", 12.0), ("intel", 0.0)]
     assert s.gpus[0].driver_version == "581.15"
     assert any(call[0] == "wmic" for call in fake.calls)
+    # ...started from its real location, never by bare name (which Windows looks up in the current folder).
+    assert [call[0] for call in fake.raw_calls if program_name(call[0]) == "wmic"] == [
+        str(fake.system_root / "System32" / "wbem" / "WMIC.exe")
+    ]
+    assert all("graphics cards are installed" not in n for n in s.notes)
     summary = specs.friendly_summary(s)
     assert "an NVIDIA GeForce RTX 4070 with 12 GB" in summary and "plenty of muscle" in summary
+
+
+def test_windows_11_without_wmic_says_when_it_could_not_list_graphics_cards(machine, monkeypatch, tmp_path):
+    """wmic is gone from Windows 11 24H2 on; if PowerShell doesn't answer either, the player is told
+    we couldn't look - not silently shown "no graphics card"."""
+    fake = machine(
+        system="Windows",
+        machine_name="AMD64",
+        processor="AMD64 Family 25 Model 33 Stepping 0, AuthenticAMD",
+        commands={"powershell": subprocess.TimeoutExpired(["powershell"], 5)},
+        cpuinfo=None,
+    )
+    monkeypatch.setattr(specs, "_windows_registry_cpu_name", lambda: "AMD Ryzen 5 5600X 6-Core Processor")
+    s = specs.detect_specs(tmp_path)
+    assert s.cpu_name == "AMD Ryzen 5 5600X 6-Core Processor"  # the registry still knows the CPU
+    assert s.gpus == []
+    assert any("graphics cards are installed" in n for n in s.notes)
+    assert [call[0] for call in fake.calls] == ["powershell"]  # missing tools are never started
 
 
 # ---------------------------------------------------------------------------

@@ -460,6 +460,15 @@ def health_timeout_for(model_gb: float, minimum: float = HEALTH_TIMEOUT_S) -> fl
 _SHARD_RE = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
 
 
+def _file_size(path: Path) -> int:
+    """A file's size in bytes (raises OSError if it can't be read).
+
+    The one place model sizes are read, so tests can stand in a 40 GB model
+    without writing one (NTFS really allocates "sparse" truncated files).
+    """
+    return os.stat(path).st_size
+
+
 def _model_total_bytes(model: Path) -> int:
     """Size of the whole model: all its parts for a split model ("-00001-of-00003.gguf").
 
@@ -467,7 +476,7 @@ def _model_total_bytes(model: Path) -> int:
     wait for it to load must allow for all of them.
     """
     model = Path(model)
-    size = model.stat().st_size
+    size = _file_size(model)
     m = _SHARD_RE.match(model.name)
     if m is None:
         return size
@@ -475,7 +484,7 @@ def _model_total_bytes(model: Path) -> int:
     for part in range(1, int(m.group("total")) + 1):
         sibling = model.with_name(f"{m.group('stem')}-{part:05d}-of-{m.group('total')}{model.name[m.end('total'):]}")
         with contextlib.suppress(OSError):
-            total += sibling.stat().st_size
+            total += _file_size(sibling)
     return max(size, total)
 
 
