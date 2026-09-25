@@ -39,11 +39,23 @@ def models_dir() -> Path:
     return config_dir() / "models"
 
 
+def runtime_dir() -> Path:
+    """Where the automatically installed llama.cpp engine lives."""
+    return config_dir() / "runtime"
+
+
+def cache_dir() -> Path:
+    """Where cached Hugging Face search results are kept."""
+    return config_dir() / "cache"
+
+
 @dataclass
 class Settings:
-    backend: Optional[str] = None  # "ollama" | "llamacpp"
-    model_key: Optional[str] = None  # catalog key, or "custom"
-    model_path: Optional[str] = None  # local GGUF path (llamacpp backend)
+    backend: Optional[str] = None  # "managed" | "ollama" | "llamacpp"
+    model_key: Optional[str] = None  # catalog key or Hugging Face repo id
+    model_quant: Optional[str] = None  # quantization chosen for this machine, e.g. "Q4_K_M"
+    model_path: Optional[str] = None  # local GGUF path (managed / llamacpp backends)
+    server_exe: Optional[str] = None  # installed llama-server executable (managed backend)
     ollama_model: Optional[str] = None  # model tag used with ollama
     jev_enabled: Optional[bool] = None  # remembered answer to "enable Jev?"
     jev_api_key: Optional[str] = None  # only stored if the player explicitly opted in

@@ -47,3 +47,10 @@ class LLMBackend(ABC):
     @abstractmethod
     def model_label(self) -> str:
         """Human-readable model name for display."""
+
+    def benchmark(self, ui: Optional[UI] = None) -> Optional[float]:
+        """Measure generation speed in tokens/second, or None if unsupported."""
+        return None
+
+    def close(self) -> None:
+        """Release resources (e.g. stop a server subprocess). Safe to call twice."""

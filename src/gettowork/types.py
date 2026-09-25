@@ -23,6 +23,7 @@ class GPUInfo:
     name: str
     vendor: GPUVendor
     vram_gb: float  # dedicated VRAM; for Apple unified memory this is the usable share of RAM
+    bandwidth_gbs: Optional[float] = None  # estimated memory bandwidth (GB/s), if known
 
 
 @dataclass
@@ -41,6 +42,8 @@ class SystemSpecs:
     gpus: list[GPUInfo] = field(default_factory=list)
     unified_memory: bool = False  # True on Apple Silicon: GPU shares system RAM
     notes: list[str] = field(default_factory=list)  # human-readable caveats from detection
+    ram_bandwidth_gbs: Optional[float] = None  # measured by a quick copy benchmark (perf.py)
+    cpu_flags: list[str] = field(default_factory=list)  # e.g. ["avx2", "avx512f", "neon"]
 
     @property
     def best_vram_gb(self) -> float:
@@ -73,6 +76,16 @@ class ModelEntry:
     reasoning: bool  # emits visible chain-of-thought (e.g. <think> blocks)
     blurb: str  # one friendly sentence for the selection table
     context_tokens: int = 4096  # context window the game will request
+    # --- fields filled in by live Hugging Face discovery (hf_discovery.py) ---
+    source: str = "curated"  # "curated" (built-in seed list) or "huggingface" (live search)
+    quant_options: tuple[tuple[str, float], ...] = ()  # (quant tag, total size GB) available in the repo
+    gguf_files: tuple[str, ...] = ()  # exact file name(s) for `quant` (several if split into shards)
+    downloads: int = 0  # Hugging Face download count (popularity signal)
+    likes: int = 0
+    base_model: Optional[str] = None  # the original (non-GGUF) model this was converted from
+    architecture: Optional[str] = None  # e.g. "qwen3", "llama", "phi3" (from GGUF metadata)
+    native_context: Optional[int] = None  # model's trained context length, if known
+    gated: bool = False  # requires accepting terms / logging in on Hugging Face
 
 
 @dataclass
@@ -85,6 +98,11 @@ class FitResult:
     est_memory_gb: float  # estimated memory to run (weights + KV cache + overhead)
     est_speed: str  # rough, e.g. "fast", "usable", "slow", "very slow"
     reason: str  # one human-readable sentence explaining the verdict
+    quant: Optional[str] = None  # the quantization chosen for this machine (may differ from model.quant)
+    download_gb: Optional[float] = None  # size of the chosen quant's file(s)
+    est_tokens_per_s: Optional[float] = None  # rough generation speed estimate
+    score: float = 0.0  # overall ranking score (higher = better pick)
+    badges: tuple[str, ...] = ()  # e.g. ("recommended",), ("fastest",), ("smartest",)
 
 
 # ---------------------------------------------------------------------------

@@ -5,29 +5,59 @@ modules are built against. If code and this document disagree, fix one of them.
 
 ## The player's journey
 
-1. `gettowork` launches → banner.
-2. **Hardware check** (`specs.py`): OS, CPU, RAM, GPU(s)/VRAM, Apple unified
-   memory, free disk. Shown in a table, with a "Learn" panel explaining why RAM
-   and VRAM matter for LLMs.
-3. **Model picker** (`catalog.py`): every curated open-weight model is rated
-   `great / ok / tight / no` for *this* machine using our own transparent
-   heuristic (no third-party data or paid services). The best fit is
-   pre-selected. A "Learn" panel explains parameters, quantization (Q4_K_M), and
-   the memory formula.
-4. **Backend + download** (`setup_flow.py`, `backends/`, `download.py`):
-   - **Ollama** (if its local server is running): `ollama pull hf.co/<repo>:<quant>`
-     via its HTTP API — Ollama downloads the GGUF straight from Hugging Face.
-   - **llama.cpp** (if `llama-cpp-python` is installed): the game downloads the
-     GGUF from Hugging Face with `huggingface_hub`, then loads it in-process.
-   - If neither is available, the game explains both options with copy-paste
-     install commands and lets the player try again, or play in `--mock` mode
-     (a scripted stand-in model, great for a quick look / classrooms / tests).
-5. **Jev onboarding** (`onboarding.py`): "Do you want to enable Jev?" with a
+The design goal: **the player only ever picks a model.** Everything else —
+finding models that fit, downloading the engine, downloading the weights,
+starting the model — is automatic, explained in friendly language, and
+reversible.
+
+1. `gettowork` launches → banner. Returning players: "Welcome back! Play again
+   with Qwen3 4B? [Y/n]" skips straight to the game.
+2. **Hardware check** (`specs.py` + `perf.py`): OS, CPU (+ SIMD flags), RAM,
+   GPU(s)/VRAM, Apple unified memory, free disk, plus a ~0.3 s memory-bandwidth
+   micro-benchmark. Summarised in plain English ("16 GB of RAM and an NVIDIA
+   RTX 3060 with 12 GB of video memory — a solid setup for local AI!"), with a
+   details table and a "Learn" panel on why memory size *and* bandwidth matter.
+3. **Live model discovery** (`hf_discovery.py`): searches the Hugging Face Hub
+   API for popular instruction-tuned GGUF models from trusted publishers,
+   reads their real GGUF metadata (parameter count, architecture, context
+   length), real per-file sizes, and licenses. Results are cached on disk
+   (default 3 days) so later launches are instant and work offline. If the Hub
+   is unreachable and there is no cache, the built-in curated seed list
+   (`catalog.py`) is used instead, with a note.
+4. **Fit engine** (`catalog.py` + `perf.py`): for every candidate, picks the
+   best quantization that fits *this* machine (e.g. Q8_0 on a big GPU, Q4_K_M
+   on a laptop, IQ3 when tight), estimates memory (weights + KV cache +
+   overhead) and generation speed (bandwidth ÷ bytes-per-token), and scores it
+   on fit, speed, quality and popularity. The player sees ~6 picks with plain
+   badges — **Recommended**, **Fastest**, **Smartest that fits** — and just types
+   a number (Enter = recommended). By default only permissively licensed
+   (Apache-2.0 / MIT) models are shown.
+5. **One confirmation, then automatic** (`setup_flow.py`): "Here's what will
+   happen: ① download the llama.cpp engine (~40 MB, MIT, from GitHub)
+   ② download Qwen3 4B Q4_K_M (2.5 GB, Apache-2.0, from Hugging Face)
+   ③ start it on your computer. OK? [Y/n]". Then:
+   - **Managed llama.cpp (default)** — `runtime_install.py` downloads the
+     official prebuilt `llama-server` for this OS/CPU/GPU from the
+     ggml-org/llama.cpp GitHub releases (CUDA / Vulkan / Metal / CPU), verifies
+     and unpacks it into the app's data folder; `download.py` fetches the GGUF;
+     `backends/llamaserver.py` launches `llama-server` on a free localhost port
+     and talks to its OpenAI-compatible API. No compilers, no admin rights.
+   - **Ollama** (if the player already runs it, or `--backend ollama`) —
+     `ollama pull hf.co/<repo>:<quant>` pulls the same GGUF from Hugging Face.
+   - **llama-cpp-python** (`--backend llamacpp`, for tinkerers).
+   - **Mock** (`--mock`) — scripted, offline, instant.
+   If anything fails (no GPU driver, blocked network), the game explains in
+   one sentence and falls back automatically (GPU build → CPU build; managed →
+   Ollama if running → offer mock).
+6. **Warm-up & speed test**: a tiny generation measures real tokens/second and
+   reports it ("Your model is talking at ~18 tokens/sec!"). If it's painfully
+   slow (< 3 tok/s) the game offers to switch to a smaller pick.
+7. **Jev onboarding** (`onboarding.py`): "Do you want to enable Jev?" with a
    plain-language explanation. Yes → paste API key (hidden input), or "help me
    get one" (opens the TypeSafe website/docs in a browser, step-by-step), or
    back out to local-only at *any* prompt. Keys are validated with
    `GET /v1/models`. Saving the key to disk is opt-in only.
-6. **The game** (`game.py`, `prompts.py`): the local LLM narrates a farcical
+8. **The game** (`game.py`, `prompts.py`): the local LLM narrates a farcical
    "you're about to be late for work" intro and the first absurd challenge.
    Each round the player types how they'll get past it. A judge decides whether
    they made progress:
@@ -39,10 +69,11 @@ modules are built against. If code and this document disagree, fix one of them.
    Progress +1 on success. The LLM narrates the result and invents the next,
    ever-more-ridiculous challenge. Reaching **5** wins: the LLM narrates a
    triumphant arrival at work. Typing `quit` ends early.
-7. **Review** (`review.py`): two *independent* yes/no questions — show the Jev
+9. **Review** (`review.py`): two *independent* yes/no questions — show the Jev
    request/response JSON per round? show the local model's exposed reasoning
    (chain-of-thought) per round? — plus an optional transcript export
    (JSON + Markdown, API key never included).
+10. On exit, the managed `llama-server` process is always stopped.
 
 ## Package layout
 
@@ -52,14 +83,18 @@ src/gettowork/
   __main__.py        `python -m gettowork` -> cli.main()
   types.py           shared dataclasses (read this first)
   ui.py              rich-based UI; all input/output goes through UI
-  config.py          settings file + models dir
+  config.py          settings file + data dirs
   specs.py           hardware detection
-  catalog.py         curated model list + fit heuristic
-  download.py        Hugging Face GGUF download
+  perf.py            bandwidth micro-benchmark + tokens/sec estimates
+  catalog.py         curated seed models + the fit/ranking engine
+  hf_discovery.py    live Hugging Face search, GGUF metadata, disk cache
+  download.py        Hugging Face GGUF download (exact files / shards)
+  runtime_install.py fetch + unpack official prebuilt llama.cpp binaries
   reasoning.py       split chain-of-thought from answers
   backends/
     __init__.py      exports + detect_backends()
     base.py          LLMBackend ABC, BackendError
+    llamaserver.py   LlamaServerBackend (managed llama-server subprocess) — default
     ollama.py        OllamaBackend (HTTP to localhost:11434)
     llamacpp.py      LlamaCppBackend (llama-cpp-python, optional)
     mock.py          MockBackend (scripted, offline, deterministic)
@@ -68,15 +103,20 @@ src/gettowork/
   prompts.py         all LLM prompt text
   game.py            core game loop
   review.py          end-of-game review + transcript export
-  setup_flow.py      hardware -> model -> backend -> download orchestration
+  setup_flow.py      hardware -> discovery -> pick -> install -> warm-up
   cli.py             argparse entry point
 tests/               pytest, no network, no real models
 ```
 
 Runtime deps: `rich` (MIT), `psutil` (BSD-3), `huggingface_hub` (Apache-2.0).
-Optional: `llama-cpp-python` (MIT). HTTP to Ollama and Jev uses only the Python
-standard library (`urllib.request`) so learners can see exactly what is sent.
-Python ≥ 3.10. Must run on Windows, macOS, Linux.
+Optional: `llama-cpp-python` (MIT). HTTP to GitHub, llama-server, Ollama and
+Jev uses only the Python standard library (`urllib.request`) so learners can
+see exactly what is sent. Python ≥ 3.10. Must run on Windows, macOS, Linux.
+
+Data locations (`config.py`): settings in `config_dir()`; models in
+`models_dir()`; add `runtime_dir()` = `config_dir()/runtime` (llama.cpp
+builds) and `cache_dir()` = `config_dir()/cache` (discovery cache). Both honour
+`GETTOWORK_HOME`.
 
 ## Module contracts
 
@@ -84,60 +124,127 @@ Signatures below are binding. Private helpers are free-form.
 
 ### types.py, ui.py, config.py, backends/base.py
 Already written — read them. Do not change existing signatures; additive
-changes only if truly necessary (and then update this doc).
+changes only if truly necessary (and then update this doc). `ModelEntry` and
+`FitResult` have extra optional fields for live discovery (quant options,
+exact files, downloads, speed estimate, badges...).
 
 ### specs.py
 ```python
 def detect_specs(models_path: Path | None = None) -> SystemSpecs
+def describe_specs(specs: SystemSpecs) -> list[tuple[str, str]]   # rows for a 2-col table
+def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm plain-English sentences
 ```
 - psutil for RAM/CPU/disk (disk = free space of `models_path` or its nearest
   existing parent, defaulting to `config.models_dir()`).
 - CPU name: `platform.processor()`, falling back to `/proc/cpuinfo` "model name"
-  (Linux), `sysctl -n machdep.cpu.brand_string` (macOS), registry/`wmic` optional
-  on Windows; never fail — "Unknown CPU".
-- NVIDIA: `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`
-  (MiB). AMD (Linux): `rocm-smi --showmeminfo vram --json` best effort. Apple
-  Silicon (`Darwin` + `arm64`): one GPUInfo(vendor="apple",
-  vram_gb≈ 0.70 × RAM (0.75 if RAM ≥ 64 GB)), `unified_memory=True`.
-- Every subprocess: timeout ≤ 5 s, catch everything, append a note on failure.
-  `detect_specs()` must never raise.
+  (Linux), `sysctl -n machdep.cpu.brand_string` (macOS), `wmic`/PowerShell
+  best effort on Windows; never fail — "Unknown CPU". CPU flags: `/proc/cpuinfo`
+  flags (avx, avx2, avx512f, f16c, fma), `sysctl hw.optional` on macOS (neon on
+  arm64), best effort elsewhere.
+- NVIDIA: `nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits`
+  (MiB). AMD (Linux): `rocm-smi --showmeminfo vram --json` best effort; also
+  detect AMD/Intel GPUs by name via `lspci` / Windows `Win32_VideoController`
+  (VRAM unknown → 0, noted). Apple Silicon (`Darwin` + `arm64`): one
+  GPUInfo(vendor="apple", vram_gb≈0.70 × RAM (0.75 if RAM ≥ 64 GB)),
+  `unified_memory=True`. Vulkan loader present? (Linux: `libvulkan.so.1`
+  findable via ctypes.util.find_library("vulkan"); Windows: vulkan-1.dll in
+  System32) — record in notes/flags as "vulkan" for runtime selection.
+- Every subprocess: timeout ≤ 5 s, list args (no shell), catch everything,
+  append a note on failure. `detect_specs()` must never raise.
+- Calls `perf.measure_ram_bandwidth()` and `perf.estimate_gpu_bandwidth()` to
+  fill the bandwidth fields (skippable via parameter `benchmark: bool = True`).
+
+### perf.py
 ```python
-def describe_specs(specs: SystemSpecs) -> list[tuple[str, str]]   # rows for a 2-col table
+def measure_ram_bandwidth(budget_s: float = 0.3) -> float | None   # GB/s via large bytearray/memoryview copies; None on failure
+def estimate_gpu_bandwidth(gpu: GPUInfo) -> float | None           # rough GB/s by vendor + VRAM tier (+ name keywords); documented as a guess
+def estimate_tokens_per_s(specs: SystemSpecs, *, active_gb: float, placement: str, offload_fraction: float = 1.0) -> float
+SPEED_EXPLAINER: str   # Markdown: generation is memory-bandwidth bound; tok/s ≈ efficiency × bandwidth ÷ bytes read per token
 ```
+- Tokens/s model: `eff × bandwidth / active_weight_bytes`, eff≈0.55 GPU,
+  0.45 unified, 0.35 CPU (clamped by core count); partial offload = harmonic
+  mix of GPU and CPU speed by offload fraction. For MoE use active params'
+  share of the weights. Always label as an estimate.
+- Micro-benchmark must stay under ~0.5 s and ~256 MB, and never raise.
 
 ### catalog.py
 ```python
-MODEL_CATALOG: list[ModelEntry]          # ordered small -> large
+MODEL_CATALOG: list[ModelEntry]          # curated seeds, ordered small -> large (offline fallback + trust bonus)
+TRUSTED_PUBLISHERS: tuple[str, ...]      # e.g. ("unsloth", "bartowski", "ggml-org", "lmstudio-community", "Qwen", "microsoft", "mistralai", "HuggingFaceTB", "ibm-granite", "NousResearch")
+PERMISSIVE_LICENSES: frozenset[str]      # {"apache-2.0", "mit"}
+QUANT_BITS: dict[str, float]             # approx bits/weight per quant tag (Q8_0 8.5, Q6_K 6.6, Q5_K_M 5.7, Q4_K_M 4.8, IQ4_XS 4.3, Q3_K_M 3.9, IQ3_M 3.7, Q2_K 3.0, MXFP4 4.25, F16 16, BF16 16 ...)
+QUANT_PREFERENCE: tuple[str, ...]        # best -> smallest acceptable: Q8_0, Q6_K, Q5_K_M, Q4_K_M, IQ4_XS, Q4_K_S, Q3_K_M, IQ3_M (never below 3 bits by default)
 def get_model(key: str) -> ModelEntry | None
-def estimate_memory_gb(model: ModelEntry, context_tokens: int | None = None) -> float
+def estimate_memory_gb(model: ModelEntry, context_tokens: int | None = None, *, weights_gb: float | None = None) -> float
+def choose_quant(specs: SystemSpecs, model: ModelEntry) -> tuple[str, float] | None   # best (quant, size_gb) that fits, using model.quant_options (or model.quant/file_size_gb)
 def evaluate_fit(specs: SystemSpecs, model: ModelEntry) -> FitResult
 def rank_models(specs: SystemSpecs, catalog: list[ModelEntry] | None = None) -> list[FitResult]
+def pick_shortlist(ranked: list[FitResult], n: int = 6) -> list[FitResult]   # diverse picks with badges
 def recommend(specs: SystemSpecs, catalog: list[ModelEntry] | None = None) -> FitResult | None
 MEMORY_FORMULA_EXPLAINER: str   # Markdown for a UI.teach panel
 ```
-- Only permissively licensed (Apache-2.0 or MIT) models, GGUF repos on HF.
-  Include small → large so every machine gets something, e.g. Qwen3 0.6B/1.7B/
-  4B/8B/14B/32B + Qwen3-30B-A3B (MoE), SmolLM2 1.7B, Phi-4-mini (MIT),
-  Mistral 7B Instruct v0.3, Mistral Small 3.2 24B, gpt-oss-20b (Apache-2.0,
-  `ollama_ref="gpt-oss:20b"`). Prefer well-known GGUF publishers (unsloth,
-  bartowski, ggml-org). Exact filenames are **not** hardcoded; download.py
-  discovers them by `quant` tag.
-- Memory estimate (document it in MEMORY_FORMULA_EXPLAINER):
-  `weights = file_size_gb`; `kv = params-based estimate for context_tokens`
-  (e.g. ≈ 0.00012 GB × params_b × context_tokens/1024, floor 0.05);
-  `overhead = 0.6 GB`; total = weights + kv + overhead.
-- Fit: compare to VRAM (dedicated), unified usable memory, or RAM
-  (use `ram_total_gb` minus ~2.5 GB OS headroom, and consider available RAM for
-  a caveat). Placement: gpu if fits VRAM; partial if VRAM ≥ 40% of need and
-  RAM covers the rest; cpu if RAM fits; none otherwise. Verdict thresholds on
-  headroom ratio (need / budget): ≤0.6 great, ≤0.85 ok, ≤1.0 tight, else no.
-  Speed: gpu/unified → "fast"; partial → "usable"; cpu → by active params
-  (≤4B "usable", ≤9B "slow", else "very slow"). Also "no" if disk free <
-  file_size_gb + 1 (reason says so).
-- `rank_models`: sorted with fitting models first, preferring the **largest
-  model rated great/ok that isn't very slow**; `recommend` returns the first,
-  or the smallest model if nothing fits (with verdict "no").
+- Curated seeds: only permissively licensed (Apache-2.0 or MIT) GGUF repos
+  from well-known publishers, small → large (Qwen3 0.6B/1.7B/4B/8B/14B/32B,
+  Qwen3-30B-A3B MoE, SmolLM2 1.7B, Phi-4-mini (MIT), Mistral 7B Instruct v0.3,
+  Mistral Small 3.2 24B, gpt-oss-20b with `ollama_ref="gpt-oss:20b"`). The seed
+  list is a fallback and a "known good" bonus; live discovery is primary.
+- Memory estimate: `weights = chosen quant size`; KV cache ≈
+  `0.00012 GB × params_b × context_tokens/1024` (floor 0.05) — or computed
+  exactly when layer/head metadata is available; `overhead = 0.6 GB` (+ ~0.3 GB
+  compute buffer for GPU). Documented in MEMORY_FORMULA_EXPLAINER.
+- Placement: gpu if fits VRAM (keep ~0.8 GB free); unified if Apple and fits
+  usable unified memory; partial if VRAM ≥ 40% of need and RAM covers the
+  rest; cpu if RAM (total − ~2.5 GB OS headroom) fits; none otherwise.
+  Verdict thresholds on need/budget: ≤0.6 great, ≤0.85 ok, ≤1.0 tight, else
+  no; "no" also if disk free < download + 1 GB (reason says so).
+- Speed from `perf.estimate_tokens_per_s`; labels: ≥20 tok/s "fast",
+  ≥8 "usable", ≥3 "slow", else "very slow".
+- Score (documented in code): quality (log params × quant quality factor) +
+  speed (penalise < 8 tok/s hard, < 3 tok/s disqualify from Recommended) +
+  headroom + popularity (log downloads) + small bonus for curated/trusted,
+  reasoning-capable, and instruction-tuned. `pick_shortlist`: Recommended
+  (best score), Fastest (highest tok/s among great/ok), Smartest that fits
+  (largest params with ≥ 5 tok/s), then fill with the next best distinct
+  families; never two variants of the same base model.
 - The heuristic is our own, MIT licensed, provided with no warranty.
+
+### hf_discovery.py
+```python
+class DiscoveryResult: models: list[ModelEntry]; source: str  # "live" | "cache" | "curated"; fetched_at: float | None; notes: list[str]
+def discover_models(*, api=None, cache_path: Path | None = None, ttl_hours: float = 72,
+                    refresh: bool = False, offline: bool = False, allow_all_licenses: bool = False,
+                    max_candidates: int = 40, timeout_s: float = 20.0, clock=time.time) -> DiscoveryResult
+def entry_from_hub(info, files: list[tuple[str, int]]) -> ModelEntry | None   # pure; used by tests
+def parse_quant(filename: str) -> str | None       # "Qwen3-4B-Q4_K_M.gguf" -> "Q4_K_M"; handles IQ*, MXFP4, F16/BF16, UD- prefixes, shards
+def group_quant_files(files: list[tuple[str, int]]) -> dict[str, tuple[tuple[str, ...], int]]   # quant -> (files incl. all shards, total bytes)
+DISCOVERY_EXPLAINER: str   # Markdown: what the Hub is, GGUF, how we filter, licenses, caching
+```
+- Uses `huggingface_hub.HfApi` (injectable `api` for tests):
+  `list_models(filter="gguf", pipeline_tag="text-generation", author=<publisher>, sort="downloads", limit=…, expand=["gguf","cardData","tags","downloads","likes","lastModified","gated"])`
+  for each trusted publisher (plus one global `filter="gguf"` query), then
+  `list_repo_tree(repo, recursive=True, expand=False)` or
+  `model_info(repo, files_metadata=True)` for real file sizes of the top
+  `max_candidates` after pre-filtering. `ModelInfo.gguf` gives
+  `{"total": <params>, "architecture": ..., "context_length": ...}` when present.
+- Filters: instruction/chat models only (tags `conversational`, names with
+  instruct/chat/-it, or known chat families like Qwen3 / gpt-oss / Phi-4-mini);
+  exclude base/embedding/reranker/vision-projector-only/coder-only?(keep coder
+  out: not great storytellers), "abliterated"/"uncensored"/NSFW/
+  `not-for-all-audiences`; exclude gated unless nothing else; licenses
+  permissive only unless `allow_all_licenses` (license read from `license:`
+  tags or cardData; unknown license → excluded by default). De-duplicate by
+  base model (prefer trusted publisher order, then downloads).
+- ModelEntry from hub: key = repo id, display_name prettified from repo
+  (strip "-GGUF", publisher), params from gguf.total (fallback: parse "4B",
+  "0.6B", "30B-A3B" from the name, or infer from Q4 size), MoE active params
+  from name ("A3B"), reasoning=True for known thinking families (qwen3,
+  gpt-oss, deepseek-r1 distills, phi-4-mini-reasoning, magistral, …),
+  ollama_ref "hf.co/<repo>:<quant>", license_url
+  `https://huggingface.co/<repo>` (model card), quant_options from files.
+- Cache: JSON at `cache_dir()/hf_models.json` with `fetched_at`; used when
+  fresh, or when offline / the Hub fails (stale cache is fine with a note).
+  If live fails and no cache: return curated seeds (`source="curated"`).
+- Never raise for network errors; put a friendly note in `notes`.
 
 ### reasoning.py
 ```python
@@ -153,63 +260,141 @@ reasoning), and gpt-oss/harmony style `<|channel|>analysis<|message|>...<|end|>
 ```python
 class DownloadError(RuntimeError)
 def pick_gguf_file(filenames: list[str], quant: str) -> str | None
-def download_gguf(entry: ModelEntry, ui: UI, dest_dir: Path | None = None,
-                  *, hf_api=None, hf_download=None) -> Path
+def resolve_files(entry: ModelEntry, quant: str | None = None, *, hf_api=None) -> tuple[str, ...]   # exact file(s) incl. shards
+def download_gguf(entry: ModelEntry, ui: UI, dest_dir: Path | None = None, *, quant: str | None = None,
+                  hf_api=None, hf_download=None) -> Path          # returns path of the first shard / the file
 def download_custom_gguf(repo_id: str, quant: str, ui: UI, dest_dir: Path | None = None,
                          *, hf_api=None, hf_download=None) -> Path
 ```
-- `pick_gguf_file`: case-insensitive; `.gguf` only; skip `mmproj` and split
-  shards other than `-00001-of-`; prefer exact quant tag match, then a
-  closest-quality fallback order (Q4_K_M, Q4_K_S, Q5_K_M, Q4_0, IQ4_XS, Q6_K,
-  Q8_0, MXFP4, anything). Prefer files at repo root over subfolders.
-- Uses `huggingface_hub.HfApi().list_repo_files` and `hf_hub_download`
-  (injectable for tests). Skips download if the file already exists locally.
-  Checks disk space first. Clear errors: repo not found, no GGUF, network
-  failure, gated repo (tell user it needs HF login — `hf auth login`).
-- Prints license + model page URL before downloading and reminds the user the
-  weights come from Hugging Face under the author's license.
+- Uses `entry.gguf_files` when present and matching the quant; otherwise lists
+  the repo and uses `pick_gguf_file` (case-insensitive; `.gguf` only; skip
+  `mmproj`; prefer exact quant; fallback order Q4_K_M, Q4_K_S, Q5_K_M, Q4_0,
+  IQ4_XS, Q6_K, Q8_0, MXFP4, anything; prefer repo root). Downloads **all
+  shards** of split models (`-00001-of-0000N`) into the same folder.
+- `hf_hub_download(repo_id, filename, local_dir=...)` (injectable). Skip if the
+  complete file already exists (size matches when known). Check disk space
+  first (`shutil.disk_usage`). Clear errors: repo not found, no GGUF, network
+  failure, gated repo (needs HF login: `hf auth login`), disk full.
+- Before downloading, print file name(s), size, license, model page URL and
+  destination, and remind that weights come from Hugging Face under the
+  author's license.
+
+### runtime_install.py
+```python
+class RuntimeInstallError(RuntimeError)
+@dataclass
+class RuntimeVariant: name: str  # "cuda-12.4", "cuda-13", "vulkan", "metal", "cpu", "rocm", ...
+                      asset_patterns: tuple[str, ...]; needs_cudart: bool; gpu: bool
+def plan_variants(specs: SystemSpecs) -> list[RuntimeVariant]   # ordered best -> safest (always ends with cpu)
+def select_assets(assets: list[dict], variant: RuntimeVariant, os_name: str, arch: str) -> list[dict]   # pure; [] if no match
+def fetch_releases(*, http=None, limit: int = 8) -> list[dict]   # GET https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=N (NOT /latest: builds are published as prereleases)
+def ensure_llama_server(ui: UI, specs: SystemSpecs, *, variant: RuntimeVariant | None = None,
+                        http=None, runtime_root: Path | None = None) -> tuple[Path, RuntimeVariant]   # path to llama-server executable
+def installed_runtimes(runtime_root: Path | None = None) -> list[tuple[Path, str, str]]   # (exe, tag, variant)
+RUNTIME_EXPLAINER: str   # Markdown: what llama.cpp / llama-server is, why prebuilt, what CUDA/Vulkan/Metal mean
+```
+- Official release asset names (from ggml-org/llama.cpp `.github/workflows/release.yml`):
+  `llama-<tag>-bin-macos-arm64.tar.gz`, `llama-<tag>-bin-macos-x64.tar.gz`,
+  `llama-<tag>-bin-ubuntu-x64.tar.gz`, `llama-<tag>-bin-ubuntu-arm64.tar.gz`,
+  `llama-<tag>-bin-ubuntu-vulkan-x64.tar.gz`, `llama-<tag>-bin-ubuntu-cuda-12.8-x64.tar.gz`
+  (+ `cudart-llama-<tag>-bin-ubuntu-cuda-12.8-x64.tar.gz`), `…-ubuntu-cuda-13.4-x64…`,
+  `llama-<tag>-bin-win-cpu-x64.zip`, `llama-<tag>-bin-win-cpu-arm64.zip`,
+  `llama-<tag>-bin-win-vulkan-x64.zip`, `llama-<tag>-bin-win-cuda-12.4-x64.zip`
+  (+ `cudart-llama-bin-win-cuda-12.4-x64.zip`), `llama-<tag>-bin-win-cuda-13.4-x64.zip`,
+  `llama-<tag>-bin-win-rocm-*-x64.zip`. Tarballs contain a top-level
+  `llama-<tag>/` folder; Windows zips are flat. Names drift over time → match
+  with tolerant regexes on (os, accel, arch), never exact strings; pick the
+  newest release that has a matching asset.
+- Variant plan: macOS arm64 → metal build (the macos-arm64 asset); macOS x64 →
+  cpu; Windows + NVIDIA → cuda-12.4 (driver ≥ 525-ish; if driver_version known
+  and ≥ 580 prefer cuda-13) + cudart, then vulkan, then cpu; Windows AMD/Intel
+  → vulkan, then cpu; Linux + NVIDIA → cuda-12.8 (+cudart) then vulkan (if
+  loader present) then cpu; Linux AMD/Intel with vulkan loader → vulkan then
+  cpu; else cpu. Windows arm64 → win-cpu-arm64.
+- Download via urllib to a temp file with a `ui.download_progress` bar,
+  verify size matches the asset `size` (and the GitHub `digest` sha256 field
+  if present), extract safely (reject absolute paths / `..` / symlinks
+  escaping the target — zip-slip/tar-slip protection; use
+  `tarfile` `filter="data"` when available), flatten the top folder, `chmod +x`
+  executables on POSIX, write a small `install.json` marker
+  (tag, variant, asset names). Install dir:
+  `runtime_dir()/llama.cpp/<tag>-<variant>/`. Reuse an existing install.
+- Respect `GITHUB_TOKEN` env if set (higher rate limit) but never print it.
+  GitHub API rate limit / offline → RuntimeInstallError with a friendly
+  message suggesting Ollama or retry later.
 
 ### backends/
 ```python
 # backends/__init__.py
 from .base import LLMBackend, BackendError
+from .llamaserver import LlamaServerBackend
 from .ollama import OllamaBackend
 from .llamacpp import LlamaCppBackend
 from .mock import MockBackend
-def detect_backends() -> dict[str, tuple[bool, str]]   # {"ollama": (ok, why), "llamacpp": (ok, why)}
+def detect_backends() -> dict[str, tuple[bool, str]]   # {"managed": (ok, why), "ollama": (ok, why), "llamacpp": (ok, why)}
 
+# llamaserver.py  — the default, fully automatic backend
+class LlamaServerBackend(LLMBackend):
+    name = "llamacpp-server"
+    def __init__(self, entry: ModelEntry | None = None, *, specs: SystemSpecs | None = None,
+                 model_path: Path | None = None, quant: str | None = None, n_ctx: int = 4096,
+                 server_exe: Path | None = None, http=None, popen=None, port: int | None = None)
+    def is_available(self) -> tuple[bool, str]      # True unless platform totally unsupported
+    def prepare(self, ui, entry=None) -> None       # ensure_llama_server + download_gguf + start + wait healthy (+ GPU->CPU fallback)
+    def chat(...) -> LLMResult                      # POST /v1/chat/completions
+    def benchmark(self, ui=None) -> float | None    # tokens/s from a short generation (use `timings.predicted_per_second` if returned, else usage/elapsed)
+    def close(self) -> None                         # terminate the subprocess (also registered with atexit); idempotent
+    @property model_label
+```
+  - Launch: `[exe, "-m", gguf, "--host", "127.0.0.1", "--port", str(port),
+    "-c", str(n_ctx), "--reasoning-format", "deepseek", "--no-webui", "-np", "1"]`
+    (`-ngl` defaults to auto / `--fit` on in current builds; on the CPU variant
+    pass `-ngl 0`). Free port chosen via a bound socket. stdout/stderr to a log
+    file in `runtime_dir()/logs/` (show its tail on failure). Windows:
+    `creationflags=CREATE_NO_WINDOW`; Linux: `LD_LIBRARY_PATH` += exe dir.
+    If the process exits with an unknown-argument error, retry once with the
+    minimal args (`-m`, `--host`, `--port`, `-c`).
+  - Health: poll `GET /health` until 200 `{"status":"ok"}` (503 = still
+    loading), up to ~180 s with a friendly spinner ("Waking up the model…");
+    if the process dies, read the log tail: CUDA/Vulkan errors → retry with
+    the next variant from `plan_variants` (download it) → finally CPU.
+  - Chat: `{"messages", "temperature", "max_tokens", "stream": false}` plus
+    `"response_format": {"type": "json_object"}` when json_mode. Reasoning =
+    `choices[0].message.reasoning_content` if present, else
+    `split_reasoning(content)`. Empty answer after stripping → retry once with
+    `"chat_template_kwargs": {"enable_thinking": false}` and more max_tokens.
+  - Timeouts: chat 300 s. Every error surfaces as BackendError with a
+    friendly message.
+```python
 # ollama.py
 class OllamaBackend(LLMBackend):
     name = "ollama"
     def __init__(self, model: str, host: str | None = None, *, http=None, think: bool | None = None)
-    # host default: env OLLAMA_HOST (normalize "0.0.0.0:11434" / no scheme) or http://127.0.0.1:11434
-    # http: injectable callable(method, url, json_body|None, timeout, stream: bool) for tests
     def is_available(self) -> tuple[bool, str]          # GET /api/version
     def has_model(self) -> bool                         # GET /api/tags
-    def prepare(self, ui, entry=None) -> None           # POST /api/pull {"model":..., "stream": true}; show progress from streamed JSON lines (completed/total)
+    def prepare(self, ui, entry=None) -> None           # POST /api/pull {"model":..., "stream": true}; progress from streamed JSON lines (completed/total)
     def chat(...) -> LLMResult                          # POST /api/chat, stream false, options {temperature, num_predict, num_ctx}; format "json" when json_mode
     @property model_label
 ```
-  - Thinking: send `"think": true` when `think` is True (default: True when the
-    catalog entry is a reasoning model). If Ollama returns an error mentioning
-    "think", retry once without it. Reasoning = `message.thinking` if present,
-    else `split_reasoning(message.content)`.
-  - If the answer is empty after stripping reasoning (thinking ate the token
-    budget), retry once with `"think": false` and a larger `num_predict`.
-  - Timeouts: chat 300 s, pull streaming per-read 600 s.
+  - host default: env OLLAMA_HOST (normalize "0.0.0.0:11434" / no scheme) or
+    http://127.0.0.1:11434; `http` injectable for tests.
+  - Thinking: send `"think": true` when `think` is True (default: the catalog
+    entry's `reasoning`). If Ollama returns an error mentioning "think", retry
+    once without it. Reasoning = `message.thinking` if present, else
+    `split_reasoning(message.content)`. Empty answer → retry once with
+    `"think": false` and larger `num_predict`. Timeouts: chat 300 s, pull
+    streaming per-read 600 s.
 ```python
 # llamacpp.py
 class LlamaCppBackend(LLMBackend):
     name = "llamacpp"
     def __init__(self, model_path: Path | None = None, entry: ModelEntry | None = None,
                  *, n_ctx: int = 4096, n_gpu_layers: int = -1, llama_factory=None)
-    def is_available(self) -> tuple[bool, str]          # importlib.util.find_spec("llama_cpp")
-    def prepare(self, ui, entry=None) -> None           # download_gguf if no path, then load Llama(model_path, n_ctx, n_gpu_layers, verbose=False)
-    def chat(...) -> LLMResult                          # create_chat_completion; response_format {"type":"json_object"} when json_mode; split_reasoning
 ```
-  - Lazy-import `llama_cpp` inside methods (optional dependency).
-  - Same empty-answer retry: for Qwen3 append " /no_think" to the last user
-    message and retry once.
+  - Lazy-import `llama_cpp`; `Llama(model_path, n_ctx, n_gpu_layers, verbose=False)`;
+    `create_chat_completion(... response_format={"type":"json_object"} when json_mode)`;
+    GPU load failure → retry n_gpu_layers=0; same empty-answer retry (append
+    " /no_think" for Qwen3).
 ```python
 # mock.py
 class MockBackend(LLMBackend):
@@ -217,13 +402,14 @@ class MockBackend(LLMBackend):
     def __init__(self, seed: int = 0, *, think: bool = True)
 ```
   - Deterministic, offline. Recognises what it's being asked via the
-    `purpose` marker the game places in the system prompt (see prompts.py:
-    every system prompt contains a line `TASK: <purpose>` where purpose ∈
-    {intro, outcome, judge, victory, ending_quit}). Returns plausible farcical
-    text; for `judge` returns JSON `{"made_progress": ..., "explanation": ...}`
-    (progress = plan has ≥ 4 words and isn't "nothing"/"give up").
-  - Emits fake `reasoning` ("(mock reasoning) ...") so the review feature works.
-  - Outcome/intro responses must contain a `CHALLENGE:` line (see prompts.py).
+    `TASK: <purpose>` line the game places in the system prompt (purpose ∈
+    {intro, outcome, judge, victory, ending_quit}). Farcical text; `judge`
+    returns JSON `{"made_progress": ..., "explanation": ...}` (progress = plan
+    has ≥ 4 words and isn't "nothing"/"give up"). Emits fake `reasoning`.
+    Intro/outcome always contain a `CHALLENGE:` line.
+
+All backends that own resources implement `close()` (no-op default is fine
+for others); cli.py calls it in a `finally`.
 
 ### jev.py
 Wire format (from TypeSafe's official MIT-licensed SDK, `typesafe-sdk` 0.7.1):
@@ -359,28 +545,49 @@ def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, inclu
 ### setup_flow.py
 ```python
 @dataclass
-class SetupResult: backend: LLMBackend; entry: ModelEntry | None; specs: SystemSpecs
+class SetupResult: backend: LLMBackend; entry: ModelEntry | None; specs: SystemSpecs; fit: FitResult | None
 def run_setup(ui: UI, settings: Settings, *, args) -> SetupResult | None   # None = user quit
 ```
-Hardware table → Learn panel → ranked model table (#, model, size, license,
-verdict, where, speed, reason) → pick (default = recommended; also allow
-`custom` HF GGUF repo for llama.cpp or any Ollama tag) → backend choice
-(auto-detect; explain install steps for Ollama — https://ollama.com/download —
-and `pip install llama-cpp-python` if neither is available; offer retry or
-mock) → `backend.prepare(ui, entry)` → remember choices in settings (offer to
-reuse next launch).
+Super-friendly, few decisions:
+1. Returning player with saved settings whose model file / runtime still
+   exists → "Welcome back! Play with <model> again? [Y/n]" → start it
+   (warm-up) and return.
+2. "Let me take a look at your computer…" spinner → `specs.friendly_summary`
+   + compact details table; `teach` panel (condensed memory + speed
+   explainers) — offer "details?" rather than dumping walls of text.
+3. "Searching Hugging Face for models that fit your computer…" spinner →
+   `discover_models` → `rank_models` → `pick_shortlist` → a clean numbered
+   table: #, badge, model, download size, est. speed ("~25 tokens/s"),
+   license, one-line why. Enter = Recommended. Extra options: `more`
+   (show the full ranked list), `refresh` (re-query the Hub), `custom`
+   (paste any HF GGUF repo id), `mock` (play offline without a model).
+4. One confirmation screen listing exactly what will be downloaded (engine
+   size/source/license if not yet installed; model files/size/source/license)
+   and where it will be stored. Y → everything automatic with progress bars.
+5. Backend choice is automatic: `--backend auto` → managed llama-server;
+   if its install fails and Ollama is running → Ollama (explain); else offer
+   retry / mock / quit with friendly guidance (Ollama download link
+   https://ollama.com/download, `pip install llama-cpp-python`).
+6. Warm-up + `benchmark()` → "Your model is talking at ~N tokens/sec"; if
+   < 3 tok/s offer to go back and pick a faster model.
+7. Save settings (backend, model repo/quant/path, server exe) for next time.
 
 ### cli.py
 ```python
 def main(argv: list[str] | None = None) -> int
 ```
-Flags: `--mock` (offline scripted model), `--backend {auto,ollama,llamacpp}`,
-`--model KEY`, `--ollama-model TAG`, `--gguf PATH`, `--list-models`
-(print catalog + fit and exit), `--specs` (print hardware and exit),
-`--no-jev`, `--target N` (default 5), `--reset` (forget saved settings),
-`--export-dir DIR`, `--version`. Ctrl+C anywhere exits cleanly with a friendly
-line (exit code 130). Flow: banner → setup → Jev onboarding (skipped by
-`--no-jev`) → Game.run() → run_review().
+Flags: `--mock` (offline scripted model), `--backend {auto,managed,ollama,llamacpp}`
+(default auto), `--model REPO_OR_KEY` (skip the picker), `--quant TAG`,
+`--ollama-model TAG`, `--gguf PATH` (use a local GGUF with the managed
+runtime), `--list-models` (print the ranked shortlist for this machine and
+exit), `--specs` (print hardware + bandwidth and exit), `--refresh-models`
+(ignore discovery cache), `--offline` (no network: cache or curated seeds),
+`--all-licenses` (include non-permissive licenses in discovery; shows each
+license prominently), `--no-jev`, `--target N` (default 5), `--reset` (forget
+saved settings), `--export-dir DIR`, `--debug` (tracebacks), `--version`.
+Ctrl+C anywhere exits cleanly with a friendly line (exit code 130); the
+backend is always `close()`d. Flow: banner → setup → Jev onboarding (skipped
+by `--no-jev`) → Game.run() → run_review().
 
 ## Testing rules
 - `pytest` only, no network, no real models, no real browser. Use MockBackend,
@@ -390,7 +597,8 @@ line (exit code 130). Flow: banner → setup → Jev onboarding (skipped by
 ## Legal / safety rules for the codebase
 - No model weights are bundled. Models are downloaded by the player from
   Hugging Face under each model's own license; the game shows that license.
-- Only list Apache-2.0 / MIT models in the catalog.
+- Curated seeds and default discovery results: Apache-2.0 / MIT only. `--all-licenses` shows others, always with the license visible.
+- The llama.cpp engine (MIT) is downloaded from the official ggml-org GitHub releases at the player's request; it is not bundled.
 - The hardware-fit heuristic is original code in this repo (MIT, no warranty).
 - Not affiliated with TypeSafe AI, Hugging Face, Ollama, or any model author;
   names are used only to identify their products.
