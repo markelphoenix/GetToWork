@@ -1,4 +1,8 @@
-"""Lets you run the game with ``python -m gettowork``."""
+"""Lets you run the game with ``python -m gettowork`` (the terminal version).
+
+The game's own window - what Steam and a double-click open - is
+``python -m gettowork.launcher`` (or the ``gettowork-gui`` command).
+"""
 
 from __future__ import annotations
 

@@ -11,12 +11,13 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
-from gettowork import catalog, runtime_install, setup_flow
+from gettowork import catalog, distribution, runtime_install, setup_flow
 from gettowork.backends.base import BackendError, LLMBackend
 from gettowork.cli import build_parser
 from gettowork.config import Settings
@@ -74,6 +75,14 @@ def no_live_engine_probes(monkeypatch):
     """
     monkeypatch.setattr(runtime_install, "_glibc_version", lambda: (2, 39))
     monkeypatch.setattr(runtime_install, "_system_has_vulkan_loader", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def developer_copy(monkeypatch):
+    """Every test starts as a developer copy (downloads on, no built-in engine), whatever the shell has set."""
+    for var in ("GETTOWORK_DISTRIBUTION", "GETTOWORK_ENGINE_DIR", "GETTOWORK_ALLOW_ENGINE_DOWNLOAD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(distribution, "_cache", distribution.Distribution())
 
 
 def make_specs(*, gpu: bool = True, ram: float = 32.0) -> SystemSpecs:
@@ -141,7 +150,7 @@ class FakeBackend(LLMBackend):
             raise UserQuit()
         if self.factory.failures.get(self.name, 0) > 0:
             self.factory.failures[self.name] -= 1
-            raise BackendError(f"The {self.name} engine exploded politely.")
+            raise self.factory.errors.get(self.name) or BackendError(f"The {self.name} engine exploded politely.")
         if self.name in ("managed", "llamacpp"):
             self.model_path = self.model_path or self.factory.model_file
         if self.name == "managed":
@@ -165,7 +174,9 @@ class FakeBackend(LLMBackend):
 class FakeFactory:
     """Stands in for `default_backend_factory`: records every backend it builds."""
 
-    def __init__(self, tmp_path: Path, *, available=None, failures=None, speeds=None, quit_on_prepare=()) -> None:
+    def __init__(self, tmp_path: Path, *, available=None, failures=None, speeds=None, quit_on_prepare=(),
+                 errors=None) -> None:
+        self.errors = dict(errors or {})  # {kind: the exception a failing prepare() raises}
         self.available = {
             "managed": (True, "The llama.cpp engine can be set up automatically."),
             "ollama": (False, "Ollama isn't running."),
@@ -475,6 +486,24 @@ def test_managed_path_enter_enter_downloads_starts_and_saves(tmp_path, isolated_
     assert saved["extra"]["last_tokens_per_s"] == 25.0
 
 
+def test_the_model_menu_offers_buttons_in_the_game_window(tmp_path):
+    """The one real decision in setup gets buttons too (touch screens, a Steam Deck's controller)."""
+    shown: list = []
+    factory = FakeFactory(tmp_path)
+    script = Script("2", "")  # the second pick (as a button press would send), then yes
+    ui = UI(console=Console(file=io.StringIO(), width=200), input_fn=script, open_url_fn=lambda url: True,
+            choices_fn=shown.append)
+    result = run_setup(ui, Settings(), args=parse(), services=make_services(factory))
+    assert result.entry == entry_for_fit(shortlist_for(make_specs())[1])
+    menu = next(options for options in shown if options and options[0][0] == "1")
+    keys = [key for key, _label in menu]
+    picks = len(shortlist_for(make_specs()))
+    assert keys[:picks] == [str(i) for i in range(1, picks + 1)]
+    assert {"more", "mock", "learn", "quit"} <= set(keys)
+    assert dict(menu)["1"].startswith("1. ") and "*" in dict(menu)["1"]  # the recommended pick is marked
+    assert shown[shown.index(menu) + 1] == []  # the buttons go away once it's answered
+
+
 def test_confirmation_decline_goes_back_to_the_menu(tmp_path):
     factory = FakeFactory(tmp_path)
     ui = make_ui(Script("", "n", "2", "y"))
@@ -548,6 +577,40 @@ def test_managed_failure_without_ollama_can_be_retried(tmp_path):
     assert first.close_calls >= 1 and second.close_calls == 0
     text = output(ui)
     assert "Plan B" in text and "ollama.com/download" in text and "pip install llama-cpp-python" in text
+
+
+def test_a_built_game_never_suggests_pip_after_a_failed_start(tmp_path, monkeypatch):
+    """No pip in a Steam / double-click build (and llama_cpp is left out of it)."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    factory = FakeFactory(tmp_path, failures={"managed": 1})
+    ui = make_ui(Script("", "", "quit"))
+    assert run_setup(ui, Settings(), args=parse(), services=make_services(factory)) is None
+    text = output(ui)
+    assert "Plan B" in text and "ollama.com/download" in text
+    assert "pip install" not in text and "--backend llamacpp" not in text
+
+
+def test_a_failed_model_download_suggests_checking_the_internet_not_another_engine(tmp_path):
+    error = BackendError("The model download didn't work: I couldn't reach Hugging Face.")
+    error.__cause__ = DownloadError("I couldn't reach Hugging Face.")
+    factory = FakeFactory(tmp_path, failures={"managed": 1}, errors={"managed": error})
+    script = Script("", "", "retry")
+    ui = make_ui(script)
+    result = run_setup(ui, Settings(), args=parse(), services=make_services(factory))
+    assert result.backend.name == "managed"
+    text = " ".join(output(ui).split())
+    assert "Check your internet connection" in text and "picks up where it stopped" in text
+    assert "Plan B" not in text and "pip install" not in text
+    assert "Try again (handy if the internet hiccupped)" in text and "just started Ollama" not in text
+
+
+def test_explicit_llamacpp_failure_in_a_built_game_has_no_pip_advice(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    factory = FakeFactory(tmp_path, available={"llamacpp": (True, "installed")}, failures={"llamacpp": 1})
+    ui = make_ui(Script("", "", "quit"))
+    assert run_setup(ui, Settings(), args=parse("--backend", "llamacpp"), services=make_services(factory)) is None
+    text = output(ui)
+    assert "isn't part of this build of the game" in text and "pip install" not in text
 
 
 def test_failure_menu_quit_returns_none_and_cleans_up(tmp_path):
@@ -688,6 +751,38 @@ def test_returning_player_fast_path(tmp_path):
     assert "Last time it talked at ~18 tokens/s" in output(ui)
 
 
+def test_a_player_who_turned_jev_down_can_turn_it_on_at_welcome_back(tmp_path):
+    """The window has no command line for --jev: "Welcome back" is the way back to Jev."""
+    factory = FakeFactory(tmp_path)
+    settings = saved_managed_settings(factory)
+    settings.jev_enabled = False
+    script = Script("jev")
+    ui = make_ui(script)
+    result = run_setup(ui, settings, args=parse(), services=make_services(factory))
+    assert "Welcome back! Play with Qwen3 4B again?" in script.prompts[0]
+    assert "Play with Jev on this time" in output(ui)
+    assert result is not None and result.ask_jev is True and result.entry == QWEN4B
+
+
+@pytest.mark.parametrize("answer, asks_jev", [("", False), ("y", False), ("yes", False)])
+def test_welcome_back_with_jev_off_still_goes_straight_in_on_enter(tmp_path, answer, asks_jev):
+    factory = FakeFactory(tmp_path)
+    settings = saved_managed_settings(factory)
+    settings.jev_enabled = False
+    result = run_setup(make_ui(Script(answer)), settings, args=parse(), services=make_services(factory))
+    assert result is not None and result.ask_jev is asks_jev
+
+
+def test_welcome_back_with_jev_off_can_still_pick_another_model(tmp_path):
+    factory = FakeFactory(tmp_path)
+    settings = saved_managed_settings(factory)
+    settings.jev_enabled = False
+    services = make_services(factory)
+    ui = make_ui(Script("n", "", ""))
+    run_setup(ui, settings, args=parse(), services=services)
+    assert len(services.calls["discover"]) == 1
+
+
 def test_returning_player_can_choose_something_else(tmp_path):
     factory = FakeFactory(tmp_path)
     services = make_services(factory)
@@ -779,19 +874,105 @@ def test_custom_repo_with_a_restrictive_license_is_flagged(tmp_path):
     assert "not Apache-2.0 or MIT" in output(ui)
 
 
-def test_more_shows_every_model_and_accepts_its_numbers(tmp_path):
-    specs = make_specs()
+# A newly popular model family whose architecture the built game's pinned engine doesn't know yet.
+NEWFAM = dataclasses.replace(QWEN4B, key="unsloth/NewFam9-4B-GGUF", hf_repo="unsloth/NewFam9-4B-GGUF",
+                             display_name="NewFam9 4B", family="NewFam9", architecture="newfam9",
+                             source="huggingface", downloads=900_000)
+ENGINE_ARCHS = frozenset({"llama", "qwen3", "qwen3moe", "phi3", "gpt-oss", "gemma3"})
+
+
+def test_a_built_game_only_offers_models_its_engine_can_load(tmp_path):
+    """A built game can't update its engine: a model of an architecture the pinned llama.cpp doesn't know
+    would download (GBs) and then fail. It's left out of the menu - with a note - before ranking; models
+    of an unknown architecture stay."""
+    unknown = dataclasses.replace(QWEN4B, key="someone/Mystery-GGUF", hf_repo="someone/Mystery-GGUF",
+                                  display_name="Mystery", architecture=None, source="huggingface")
+    services = make_services(FakeFactory(tmp_path), models=MODELS + [NEWFAM, unknown])
+    services.engine_architectures = lambda: ENGINE_ARCHS
+    ui = make_ui(Script())
+    search = setup_flow.find_models(ui, make_specs(), services)
+    repos = {f.model.hf_repo for f in search.ranked}
+    assert NEWFAM.hf_repo not in repos and unknown.hf_repo in repos
+    assert all(f.model.hf_repo != NEWFAM.hf_repo for f in search.shortlist)
+    assert "Left out 1 model built on a newer design (newfam9)" in " ".join(output(ui).split())
+    assert "a game update will bring them" in " ".join(output(ui).split())
+    # Without the limit (another engine runs the model, or a developer copy): it's offered as usual.
+    search = setup_flow.find_models(make_ui(Script()), make_specs(), services, engine_limits=False)
+    assert NEWFAM.hf_repo in {f.model.hf_repo for f in search.ranked}
+    services.engine_architectures = lambda: None
+    search = setup_flow.find_models(make_ui(Script()), make_specs(), services)
+    assert NEWFAM.hf_repo in {f.model.hf_repo for f in search.ranked}
+
+
+def test_the_menu_left_out_models_the_engine_cant_load_even_when_they_would_rank_high(tmp_path):
+    """Several trusted, popular new-architecture models: none reaches the short list or "more" list."""
+    new = [dataclasses.replace(NEWFAM, key=f"unsloth/NewFam9-{b}B-GGUF", hf_repo=f"unsloth/NewFam9-{b}B-GGUF",
+                               params_b=float(b)) for b in (1, 4, 8)]
+    services = make_services(FakeFactory(tmp_path), models=MODELS + new)
+    services.engine_architectures = lambda: ENGINE_ARCHS
+    ui = make_ui(Script("more", "quit"))
+    run_setup(ui, Settings(), args=parse(), services=services)
+    assert "the rest follow" in output(ui)  # (the "more" list really was shown)
+    assert "NewFam9" not in output(ui)
+
+
+def test_a_built_game_warns_before_downloading_a_custom_model_its_engine_cant_load(tmp_path):
+    services = make_services(FakeFactory(tmp_path), custom=NEWFAM)
+    services.engine_architectures = lambda: ENGINE_ARCHS
+    ui = make_ui(Script("custom", "unsloth/NewFam9-4B-GGUF", "", "quit"))  # Enter = "no, don't download it"
+    assert run_setup(ui, Settings(), args=parse(), services=services) is None
+    said = " ".join(output(ui).split())
+    assert "newer design ('newfam9') that the game's built-in llama.cpp engine doesn't know yet" in said
+    # With --model the player asked for it by name: warned, then tried anyway.
+    services = make_services(FakeFactory(tmp_path), custom=NEWFAM)
+    services.engine_architectures = lambda: ENGINE_ARCHS
+    ui = make_ui(Script(""))
+    result = run_setup(ui, Settings(), args=parse("--model", "unsloth/NewFam9-4B-GGUF"), services=services)
+    assert result.entry.hf_repo == NEWFAM.hf_repo
+    assert "doesn't know yet" in " ".join(output(ui).split())
+    # ...and with Ollama chosen, the game's engine doesn't matter.
+    services = make_services(FakeFactory(tmp_path), custom=NEWFAM)
+    services.engine_architectures = lambda: ENGINE_ARCHS
+    flow_ui = make_ui(Script())
+    flow = setup_flow._SetupFlow(flow_ui, Settings(), parse("--backend", "ollama"), services)
+    assert flow._engine_lacks(NEWFAM) is None
+
+
+def _full_menu(specs) -> tuple[list, list]:
+    """(the short list, the "more" list) exactly as the model menu numbers them."""
     ranked = catalog.rank_models(specs, MODELS)
-    index = next(i for i, f in enumerate(ranked) if i > 0 and f.verdict != "no" and (f.est_tokens_per_s or 0) >= 3)
+    search = setup_flow.ModelSearch(discovery=None, ranked=ranked,  # type: ignore[arg-type]
+                                    shortlist=catalog.pick_shortlist(ranked, setup_flow.SHORTLIST_SIZE))
+    return search.shortlist, setup_flow._full_list(search)
+
+
+def test_more_shows_every_model_and_accepts_its_numbers(tmp_path):
+    short, full = _full_menu(make_specs())
+    index = next(i for i, f in enumerate(full) if i >= len(short) and f.verdict != "no" and (f.est_tokens_per_s or 0) >= 3)
     ui = make_ui(Script("more", str(index + 1), ""))
     result = run_setup(ui, Settings(), args=parse(), services=make_services(FakeFactory(tmp_path)))
-    assert result.entry == entry_for_fit(ranked[index])
+    assert result.entry == entry_for_fit(full[index])
     assert "Every model I found" in output(ui)
+
+
+@pytest.mark.parametrize("gpu, ram", [(True, 32.0), (False, 16.0), (False, 8.0)])
+def test_a_number_means_the_same_model_in_the_short_list_and_in_more(tmp_path, gpu, ram):
+    """Reading "2 = Qwen3 4B" on the short list, opening More to compare and typing 2 must pick Qwen3 4B."""
+    specs = make_specs(gpu=gpu, ram=ram)
+    short, full = _full_menu(specs)
+    assert len(short) >= 2
+    assert [(f.model.key, f.quant) for f in full[:len(short)]] == [(f.model.key, f.quant) for f in short]
+    assert len({(f.model.key, f.quant) for f in full}) == len(full)  # no model twice
+    ui = make_ui(Script("more", "2", ""))
+    result = run_setup(ui, Settings(), args=parse(),
+                       services=make_services(FakeFactory(tmp_path), specs_fn=lambda: make_specs(gpu=gpu, ram=ram)))
+    assert result.entry == entry_for_fit(short[1])
+    assert f"1-{len(short)} are the short list" in output(ui)
 
 
 def test_picking_a_model_that_wont_fit_asks_first(tmp_path):
     specs = make_specs(gpu=False, ram=8.0)
-    ranked = catalog.rank_models(specs, MODELS)
+    _short, ranked = _full_menu(specs)
     too_big = next(i for i, f in enumerate(ranked) if f.verdict == "no")
     ui = make_ui(Script("more", str(too_big + 1), "n", "back", "quit"))
     services = make_services(FakeFactory(tmp_path), specs_fn=lambda: make_specs(gpu=False, ram=8.0))
@@ -892,6 +1073,22 @@ def test_unknown_model_flag_falls_back_to_the_menu(tmp_path):
     ui = make_ui(Script("quit"))
     assert run_setup(ui, Settings(), args=parse("--model", "nobody/nothing"), services=services) is None
     assert "Let's pick one from the list instead." in output(ui)
+
+
+def test_model_flag_naming_a_not_family_friendly_model_is_refused_plainly(tmp_path):
+    refusal = DownloadError("x/Qwen3-8B-abliterated-GGUF is marked as uncensored, safety-removed or adult content, "
+                            "and Get To Work only plays family-friendly models. Please pick another one.",
+                            "not_family_friendly")
+    services = make_services(FakeFactory(tmp_path), custom=refusal)
+    ui = make_ui(Script("quit"))
+    assert run_setup(ui, Settings(), args=parse("--model", "x/Qwen3-8B-abliterated-GGUF"), services=services) is None
+    text = output(ui)
+    assert "only plays family-friendly models" in text and "Let's pick one from the list instead." in text
+    assert "couldn't find" not in text  # it was found - and refused
+    # The custom pick in the menu shows the same refusal and goes back to the menu.
+    ui = make_ui(Script("custom", "x/Qwen3-8B-abliterated-GGUF", "quit"))
+    assert run_setup(ui, Settings(), args=parse(), services=services) is None
+    assert "only plays family-friendly models" in output(ui)
 
 
 def test_gguf_flag_uses_the_local_file(tmp_path):
@@ -1099,6 +1296,18 @@ def test_a_model_already_on_disk_is_not_marked_wont_fit_on_a_full_disk(tmp_path)
     nearly_full = dataclasses.replace(make_specs(gpu=False, ram=32.0), disk_free_gb=3.0)
     fit = fit_for_quant(nearly_full, qwen, "Q4_K_M")
     assert fit.verdict != "no" and "already downloaded" in fit.reason
+
+
+def test_a_full_disk_menu_says_so_instead_of_too_big_or_too_slow(tmp_path):
+    """Every model is ruled out only by free disk space: the empty menu says that, how much is needed and
+    how to fix it - not "they're all too big or too slow"."""
+    full = lambda: dataclasses.replace(make_specs(gpu=False, ram=16.0), disk_free_gb=0.3)  # noqa: E731
+    ui = make_ui(Script("quit"))
+    assert run_setup(ui, Settings(), args=parse(), services=make_services(FakeFactory(tmp_path), specs_fn=full)) is None
+    said = " ".join(output(ui).split())
+    assert "too big or too slow" not in said and "memory is very tight" not in said
+    assert "Not enough free disk space for any model" in said and "only 0.3 GB is" in said
+    assert "start the game with gettowork --models-dir <folder>" in said
 
 
 def test_shorter_context_is_carried_to_the_engine():
@@ -1361,6 +1570,30 @@ def test_after_a_slow_warm_up_the_menu_shows_the_measured_speed_and_is_honest_ab
     assert all("~2.0 tokens/s" in row and "Recommended" not in row for row in rows)
 
 
+@pytest.mark.parametrize("window, steam, expected", [
+    (False, False, "start the game with gettowork --think to see its thinking anyway"),
+    (True, False, None),
+    (True, True, "add --think to its Launch Options in Steam"),
+])
+def test_the_slow_thinking_note_after_the_warm_up_fits_where_the_game_runs(tmp_path, monkeypatch, window, steam,
+                                                                           expected):
+    for name in ("SteamAppId", "SteamGameId", "SteamClientLaunch"):
+        monkeypatch.delenv(name, raising=False)
+    if steam:
+        monkeypatch.setenv("SteamGameId", "480")
+    factory = FakeFactory(tmp_path, speeds={"managed": [5.0]})
+    ui = UI(console=Console(file=io.StringIO(), width=300), input_fn=Script(""), open_url_fn=lambda url: True,
+            window=window)
+    assert catalog.thinking_mode(QWEN4B) == "switchable"
+    run_setup(ui, saved_managed_settings(factory), args=parse(), services=make_services(factory))
+    text = " ".join(output(ui).split())
+    assert "It can think out loud, but at this speed" in text
+    if expected is None:
+        assert "--think" not in text
+    else:
+        assert expected in text
+
+
 def test_measured_speeds_replace_estimates_and_reorder_the_list():
     cpu_box = make_specs(gpu=False, ram=8.0)
     ranked = catalog.rank_models(cpu_box, MODELS)
@@ -1456,3 +1689,165 @@ def test_onboarding_doesnt_promise_nothing_leaves_this_computer_with_a_remote_ol
         name, host = "ollama", "http://127.0.0.1:11434"
 
     assert _remote_ollama(Remote()) == "gpu-box.lan:11434" and _remote_ollama(Local()) is None
+
+
+# ---------------------------------------------------------------------------
+# The built game: the engine ships inside the game (nothing to download)
+# ---------------------------------------------------------------------------
+
+BUNDLE_ASSETS = {"vulkan": "llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", "cpu": "llama-{tag}-bin-ubuntu-x64.tar.gz",
+                 "metal": "llama-{tag}-bin-macos-arm64.tar.gz"}
+
+
+def built_game(monkeypatch, tmp_path, *variants: str, tag: str = "b7000", downloads: bool = False) -> dict:
+    """A built game whose engine folder holds fake builds; returns {variant: exe}."""
+    engine = tmp_path / "game" / "engine"
+    engine.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("GETTOWORK_ENGINE_DIR", str(engine))
+    monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "1" if downloads else "0")
+    distribution.load(refresh=True)
+    exes = {}
+    for variant in variants:
+        folder = engine / f"{tag}-{variant}"
+        folder.mkdir()
+        (folder / "llama-server").write_bytes(b"#!engine")
+        (folder / "install.json").write_text(json.dumps({
+            "tag": tag, "variant": variant, "exe": "llama-server", "assets": [BUNDLE_ASSETS[variant].format(tag=tag)],
+            "bundled": True}))
+        exes[variant] = folder / "llama-server"
+    return exes
+
+
+def rtx_with_vulkan() -> SystemSpecs:
+    return dataclasses.replace(make_specs(), cpu_flags=["avx", "avx2", "vulkan"])  # plan: cuda-12, vulkan, cpu
+
+
+def built_in_flow(tmp_path, specs) -> "setup_flow._SetupFlow":
+    services = make_services(FakeFactory(tmp_path), runtimes=runtime_install.installed_runtimes())
+    flow = setup_flow._SetupFlow(make_ui(Script()), Settings(), parse(), services)
+    flow.specs = specs
+    return flow
+
+
+def test_the_plan_shows_a_built_in_engine_with_nothing_to_download(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    title, lines, needs = built_in_flow(tmp_path, rtx_with_vulkan())._engine_step(setup_flow._Choice(entry=QWEN4B))
+    assert lines[0] == "Built into the game (llama.cpp b7000, Vulkan + CPU) - nothing to download"
+    assert "MIT" in lines[1] and "THIRD_PARTY_LICENSES.txt" in lines[1]
+    assert needs is False
+    text = " ".join(lines)
+    assert "github.com" not in text and "CUDA" not in text and "MB" not in text
+
+
+def test_the_plan_shows_metal_plus_cpu_on_a_mac(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "metal")
+    mac = dataclasses.replace(make_specs(gpu=False), os_name="Darwin", arch="arm64",
+                              gpus=[GPUInfo(name="Apple M2", vendor="apple", vram_gb=11.2)], unified_memory=True)
+    _title, lines, needs = built_in_flow(tmp_path, mac)._engine_step(setup_flow._Choice(entry=QWEN4B))
+    assert lines[0] == "Built into the game (llama.cpp b7000, Metal + CPU) - nothing to download" and not needs
+
+
+def test_the_plan_shows_the_cpu_build_on_a_computer_without_a_usable_gpu(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    _title, lines, _needs = built_in_flow(tmp_path, make_specs(gpu=False))._engine_step(setup_flow._Choice(entry=QWEN4B))
+    assert lines[0] == "Built into the game (llama.cpp b7000, CPU) - nothing to download"
+
+
+def test_the_plan_says_how_to_repair_a_built_game_whose_engine_is_missing(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path)
+    _title, lines, needs = built_in_flow(tmp_path, make_specs())._engine_step(setup_flow._Choice(entry=QWEN4B))
+    assert "Verify integrity" in lines[0] and needs is False
+
+
+def test_the_plan_names_a_bundled_best_build_even_when_downloads_are_allowed(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "cpu", downloads=True)
+    _title, lines, needs = built_in_flow(tmp_path, make_specs(gpu=False))._engine_step(setup_flow._Choice(entry=QWEN4B))
+    assert lines[0].startswith("Built into the game (llama.cpp b7000, CPU)") and not needs
+    # With a GPU the best build (CUDA) isn't built in, so a developer copy would download it.
+    _title, lines, needs = built_in_flow(tmp_path, make_specs())._engine_step(setup_flow._Choice(entry=QWEN4B))
+    assert "NVIDIA CUDA 12" in lines[0] and needs
+
+
+def test_a_saved_bundled_engine_is_shown_as_built_in(tmp_path, monkeypatch):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    flow = built_in_flow(tmp_path, rtx_with_vulkan())
+    _title, lines, needs = flow._engine_step(setup_flow._Choice(entry=QWEN4B, server_exe=exes["vulkan"]))
+    assert lines[0] == "Built into the game (llama.cpp b7000, Vulkan + CPU) - nothing to download" and not needs
+
+
+def test_a_built_game_confirmation_screen_downloads_only_the_model(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    factory = FakeFactory(tmp_path)
+    services = make_services(factory, specs_fn=rtx_with_vulkan, runtimes=runtime_install.installed_runtimes())
+    ui = make_ui(Script("", ""))
+    result = run_setup(ui, Settings(), args=parse(), services=services)
+    assert result is not None and result.backend.name == "managed"
+    text = output(ui)
+    assert "Built into the game (llama.cpp b7000, Vulkan + CPU) - nothing to download" in text
+    assert "github.com/ggml-org/llama.cpp/releases" not in text
+    assert "https://huggingface.co/" in text  # the model is still downloaded, during the guided setup
+
+
+def test_a_returning_player_whose_game_moved_goes_straight_in(tmp_path, monkeypatch):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    factory = FakeFactory(tmp_path)
+    settings = saved_managed_settings(factory)
+    moved_from = tmp_path / "OldSteamLibrary" / "GetToWork" / "engine" / "b7000-cpu" / "llama-server"
+    settings.server_exe = str(moved_from)
+    script = Script("")
+    services = make_services(factory, runtimes=runtime_install.installed_runtimes())
+    result = run_setup(make_ui(script), settings, args=parse(), services=services)
+    assert "Welcome back" in script.prompts[0]
+    [backend] = factory.prepared()
+    assert backend.kwargs["server_exe"] == exes["cpu"]  # the same build, found in the game's new place
+    assert result is not None and services.calls["discover"] == []
+
+
+def test_a_new_build_swaps_an_older_copys_saved_engine_for_its_own(tmp_path, monkeypatch):
+    """A new test build shares the settings folder with an older copy still on disk: "Welcome back"
+    must start this build's own engine, not the older copy's."""
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    old = tmp_path / "gameOld" / "engine" / "b6900-cpu"
+    old.mkdir(parents=True)
+    (old / "llama-server").write_bytes(b"#!old")
+    (old / "install.json").write_text(json.dumps({"tag": "b6900", "variant": "cpu", "exe": "llama-server",
+                                                  "bundled": True}))
+    factory = FakeFactory(tmp_path)
+    settings = saved_managed_settings(factory)
+    settings.server_exe = str(old / "llama-server")
+    script = Script("")
+    services = make_services(factory, runtimes=runtime_install.installed_runtimes())
+    run_setup(make_ui(script), settings, args=parse(), services=services)
+    assert "Welcome back" in script.prompts[0]
+    [backend] = factory.prepared()
+    assert backend.kwargs["server_exe"] == exes["cpu"]
+
+
+def test_a_returning_player_with_a_lost_engine_still_goes_straight_in_to_the_built_in_one(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "cpu")
+    factory = FakeFactory(tmp_path)
+    settings = saved_managed_settings(factory)
+    settings.server_exe = str(tmp_path / "nowhere" / "llama-server")
+    script = Script("")
+    services = make_services(factory, runtimes=runtime_install.installed_runtimes())
+    run_setup(make_ui(script), settings, args=parse(), services=services)
+    assert "Welcome back" in script.prompts[0]
+    [backend] = factory.prepared()
+    assert backend.kwargs["server_exe"] is None  # the backend picks the built-in engine itself
+
+
+def test_a_built_game_plans_speed_corrections_with_the_build_it_will_really_use(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    assert setup_flow.planned_engine_key(rtx_with_vulkan(), Settings(backend="managed")) == "managed:vulkan"
+    assert setup_flow.planned_engine_key(make_specs(), Settings(backend="managed")) == "managed:cpu"
+    monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "1")
+    distribution.load(refresh=True)
+    assert setup_flow.planned_engine_key(rtx_with_vulkan(), Settings(backend="managed")) == "managed:cuda-12"
+
+
+def test_a_built_game_never_promises_gpu_speed_its_engine_cant_deliver(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    rtx = make_specs()  # NVIDIA without a Vulkan loader: the built-in engine can only use the CPU
+    limited = setup_flow.apply_engine_limits(rtx)
+    assert limited is not rtx and any("planning with the CPU" in n for n in limited.notes)
+    assert setup_flow.apply_engine_limits(rtx_with_vulkan()) == rtx_with_vulkan()

@@ -1,22 +1,57 @@
-# Builds test copies of the game and uploads them as downloadable artifacts:
+# Builds the game players download, checks that it works, and uploads it
+# (each game archive is its own artifact, named after the file):
 #
-#   * gettowork-python-package  - the pip-installable wheel + source archive
-#   * gettowork-<os>-<arch>     - a standalone executable (no Python needed),
-#                                 built with PyInstaller for Windows, macOS
-#                                 and Linux
+#   * GetToWork-<version>-windows-x64.zip
+#   * GetToWork-<version>-linux-x64.tar.gz (also Steam Deck)
+#   * GetToWork-<version>-macos-arm64.zip (Apple Silicon)
+#   * gettowork-python-package - the pip-installable wheel + source archive
 #
-# Every build is smoke-tested before upload (packaging/smoke_test.sh): the
-# info commands run and a whole game is won with the offline "pretend" model.
-# No secrets, network models or GPUs are needed.
+# Each game build is a double-click build: the game's own window, no Python
+# needed, with the llama.cpp engine built in (so players only ever download
+# an AI model, during the game's guided setup). These are the same files that
+# get uploaded to Steam - see packaging/steam/README.md.
 #
-# Find the files on the workflow run's page under "Artifacts". These are
-# unsigned test builds: see the README's "Test builds" section.
+# How one build is made (docs/DISTRIBUTION.md has the details):
+#   fetch_engine.py (the pinned llama.cpp release - packaging/llama_cpp_tag.txt -
+#     official builds, checksums verified)
+#   -> PyInstaller (packaging/gettowork.spec) -> collect_licenses.py
+#   -> Windows, once a certificate is set up: sign_windows.py (code-signs every .exe/.dll)
+#   -> assemble.py (engine + distribution.json + licenses + README -> archive)
+#   -> smoke test of the terminal version and the bundled engine
+#   -> Linux: the engine starts without the system's OpenSSL 3 (as under Steam)
+#   -> GUI self-test (the window plays a scripted game with the pretend model)
+#   -> upload.
+#
+# Every OS job fetches the same pinned llama.cpp release, so the three builds
+# of one commit (and any re-run) ship the same engine.
+#
+# Private-repository budget: GitHub counts macOS minutes 10x and Windows 2x,
+# and artifact storage is small (500 MB on the free plan, and one run's three
+# game builds are a few hundred MB). So pull requests only build when they
+# touch the packaging (and don't upload the big game builds - run this
+# workflow by hand on the branch to get them), pushes that only change docs
+# or tests build nothing, and game builds are kept for 3 days (the wheel for
+# 7). Delete old artifacts on the Actions page if storage still runs low.
 name: build
 
 on:
   push:
     branches: [main]
+    # Docs and tests don't change the game builds: no new (big) artifacts for them.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "tests/**"
+      - "LICENSE"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/live-check.yml"
   pull_request:
+    paths:
+      - "packaging/**"
+      - "src/gettowork/gui/**"
+      - "src/gettowork/launcher.py"
+      - "src/gettowork/distribution.py"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +63,10 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  # Consistent UTF-8 output on every OS (Windows consoles default to a code page).
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
 
 jobs:
   package:
@@ -49,42 +88,80 @@ jobs:
           python -m build
           python -m twine check --strict dist/*
 
+      - name: Check the wheel carries the window icon
+        run: python -m zipfile -l dist/*.whl | grep "gettowork/assets/icon.png"
+
       - name: Install the wheel in a clean virtual environment
         run: |
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/python -m pip install dist/*.whl
 
-      - name: Smoke test the installed game
+      - name: Smoke test the installed game (terminal version)
         run: packaging/smoke_test.sh /tmp/wheel-venv/bin/gettowork
 
+      - name: Make sure Tk (the window toolkit) and a virtual screen are available
+        run: |
+          if ! python -c "import tkinter; tkinter.Tcl()" 2>/dev/null || ! command -v xvfb-run >/dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends xvfb libtk8.6
+          fi
+
+      - name: Self-test the installed game's window
+        env:
+          # A folder that outlives the self-test, so a crash report can be shown below.
+          GETTOWORK_HOME: ${{ runner.temp }}/wheel-selftest-home
+        run: xvfb-run -a /tmp/wheel-venv/bin/gettowork-gui --gui-selftest
+
+      - name: Show the window self-test's crash reports (if any)
+        if: failure()
+        env:
+          SELFTEST_HOME: ${{ runner.temp }}/wheel-selftest-home
+        run: cat "$SELFTEST_HOME"/logs/*.txt 2>/dev/null || echo "(no crash report was written)"
+
       - name: Upload the package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gettowork-python-package
           path: dist/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   standalone:
-    name: Standalone ${{ matrix.target }}
+    name: Game build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      # "true" once the repository has Windows code signing set up (see the signing step below).
+      HAS_WINDOWS_SIGNING: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT != '' || secrets.WINDOWS_SIGNING_PFX_BASE64 != '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: linux-x64
-            exe: gettowork
-          - os: windows-latest
-            target: windows-x64
-            exe: gettowork.exe
-          - os: macos-latest
-            target: macos-arm64
-            exe: gettowork
+          - target: windows-x64
+            os: windows-latest
+            platform: windows
+            arch: x64
+            # The official Vulkan build already contains the CPU backends; the
+            # plain CPU build is the fallback for computers without Vulkan drivers.
+            engines: vulkan,cpu
+          - target: linux-x64
+            # Deliberately the older Ubuntu: a program built here needs glibc 2.35
+            # or newer, so it runs on more Linux systems (SteamOS 3.5+, Ubuntu
+            # 22.04+, Fedora 36+). llama.cpp builds its Linux x64 releases
+            # (CPU and Vulkan) on ubuntu-22.04 too, so the engine needs nothing newer.
+            os: ubuntu-22.04
+            platform: linux
+            arch: x64
+            engines: vulkan,cpu
+          - target: macos-arm64
+            os: macos-latest
+            platform: macos
+            arch: arm64
+            # The official Apple Silicon build (Metal; also runs on the CPU with --device none).
+            engines: metal
     defaults:
       run:
-        # Git Bash on Windows, so one smoke-test script works everywhere.
+        # Git Bash on Windows, so the same scripts work everywhere.
         shell: bash
     steps:
       - name: Check out the code
@@ -97,34 +174,138 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install the game and PyInstaller
+      - name: Install the game, PyInstaller and Pillow (for the icon)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . pyinstaller
+          python -m pip install . pyinstaller pillow
 
-      - name: Build the standalone executable
-        # rich loads some modules dynamically, and truststore/certifi supply the
-        # HTTPS certificate checks used for downloads - bundle them explicitly.
-        run: >
-          pyinstaller --onefile --console --noconfirm --clean
-          --name gettowork
-          --collect-submodules rich
-          --collect-submodules truststore
-          --collect-data certifi
-          packaging/gettowork_entry.py
-
-      - name: Smoke test the executable
-        run: packaging/smoke_test.sh "./dist/${{ matrix.exe }}"
-
-      - name: Gather the executable with its license and notices
+      - name: Make sure Tk (the window toolkit) and a virtual screen are available
+        if: runner.os == 'Linux'
         run: |
-          mkdir -p "out/gettowork-${{ matrix.target }}"
-          cp "dist/${{ matrix.exe }}" LICENSE NOTICE.md README.md "out/gettowork-${{ matrix.target }}/"
+          if ! python -c "import tkinter; tkinter.Tcl()" 2>/dev/null || ! command -v xvfb-run >/dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends xvfb libtk8.6
+          fi
+          python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
-      - name: Upload the executable
-        uses: actions/upload-artifact@v4
+      - name: Fetch the llama.cpp engine that ships inside the game
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          ENGINES: ${{ matrix.engines }}
+        # --tag pinned: the release in packaging/llama_cpp_tag.txt - the same, tested engine on every OS
+        # and in every re-run (the weekly live check says when a newer one is worth moving to).
+        run: >
+          python packaging/fetch_engine.py --os "$PLATFORM" --arch "$ARCH" --variants "$ENGINES"
+          --dest build/engine --tag pinned --verify
+
+      - name: Build the game with PyInstaller
+        run: pyinstaller packaging/gettowork.spec --noconfirm --clean
+
+      - name: Gather the third-party license texts
+        # --app-dir: also every native library PyInstaller copied into the game (fails on one with no license entry).
+        run: >
+          python packaging/collect_licenses.py --engine-dir build/engine --app-dir dist/GetToWork
+          --out build/THIRD_PARTY_LICENSES.txt
+
+      - name: Code-sign the Windows programs (once signing is set up)
+        # Windows 11's Smart App Control blocks unsigned programs outright - even ones Steam installed - and
+        # that includes the bundled llama-server.exe. With Azure Trusted Signing's secrets (or a .pfx
+        # certificate's) in the repository, every game build is signed; without them this is skipped and the
+        # build stays unsigned. Pull requests never see the secrets. See packaging/steam/README.md.
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request'
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if [ -n "$AZURE_TRUSTED_SIGNING_ACCOUNT" ]; then
+            # Microsoft's signing library for signtool (Azure.CodeSigning.Dlib.dll).
+            nuget install Microsoft.Trusted.Signing.Client -OutputDirectory "$RUNNER_TEMP/trusted-signing" -NonInteractive
+          fi
+          python packaging/sign_windows.py dist/GetToWork build/engine --trusted-signing-dir "$RUNNER_TEMP/trusted-signing"
+
+      - name: Add the engine, licenses and README, then pack the archive
+        id: assemble
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: >
+          python packaging/assemble.py --dist dist --engine-dir build/engine
+          --os "$PLATFORM" --arch "$ARCH" --out out --licenses build/THIRD_PARTY_LICENSES.txt
+
+      - name: Smoke test the terminal version and the bundled engine
+        env:
+          CLI: ${{ steps.assemble.outputs.cli }}
+          ENGINE: ${{ steps.assemble.outputs.engine }}
+        run: packaging/smoke_test.sh --engine-dir "$ENGINE" "$CLI"
+
+      - name: Check the Linux engine starts without the system's OpenSSL 3 (as under Steam)
+        # Steam's Linux runtime (Debian 10/11 based) has no OpenSSL 3 and hides this computer's /usr, while
+        # ubuntu-22.04 has it: so the bundled builds are started in a container without it.
+        if: runner.os == 'Linux'
+        env:
+          ENGINE: ${{ steps.assemble.outputs.engine }}
+        run: packaging/engine_isolation_check.sh "$ENGINE"
+
+      - name: Self-test the game window (plays a scripted game)
+        timeout-minutes: 5
+        env:
+          GUI: ${{ steps.assemble.outputs.gui }}
+          GETTOWORK_SELFTEST_OUT: ${{ runner.temp }}/gui-selftest.txt
+          # A folder that outlives the self-test (it would otherwise use a throwaway one), so the
+          # crash report of a window that couldn't open - often the only clue on Windows and macOS - is shown below.
+          GETTOWORK_HOME: ${{ runner.temp }}/selftest-home
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a "$GUI" --gui-selftest
+          else
+            "$GUI" --gui-selftest
+          fi
+
+      - name: Show the window self-test transcript
+        if: always()
+        env:
+          TRANSCRIPT: ${{ runner.temp }}/gui-selftest.txt
+          SELFTEST_HOME: ${{ runner.temp }}/selftest-home
+        run: |
+          cat "$TRANSCRIPT" 2>/dev/null || echo "(no transcript was written)"
+          for report in "$SELFTEST_HOME"/logs/*crash*.txt; do
+            [ -f "$report" ] || continue
+            echo "--- $report ---"
+            cat "$report"
+          done
+
+      - name: Check the built game can search Hugging Face
+        # A Hugging Face outage only gives a warning (below); a crash of the built game fails the build.
+        env:
+          CLI: ${{ steps.assemble.outputs.cli }}
+        run: |
+          GETTOWORK_HOME="$(mktemp -d)"
+          export GETTOWORK_HOME
+          out="$("$CLI" --list-models 2>&1)" || true
+          printf '%s\n' "$out"
+          if grep -qiE "traceback|no module named" <<<"$out"; then
+            echo "::error::the built game crashed while searching Hugging Face"
+            exit 1
+          fi
+          grep -qE "Found [0-9]+ models? on Hugging Face" <<<"$out" || echo "::warning::the built game couldn't reach Hugging Face"
+
+      - name: Upload the game
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
         with:
-          name: gettowork-${{ matrix.target }}
-          path: out/gettowork-${{ matrix.target }}
+          # archive: false uploads the game archive itself, not zipped again: the download is
+          # GetToWork-<version>-<os>-<arch>.zip / .tar.gz (the artifact takes the file's name),
+          # one layer to unpack. The archive keeps the file permissions and the Mac app's signature.
+          path: ${{ steps.assemble.outputs.archive }}
+          archive: false
           if-no-files-found: error
-          retention-days: 14
+          # Short: the newest build is the one to test, and three builds a run fill the storage fast.
+          retention-days: 3

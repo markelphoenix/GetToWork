@@ -49,3 +49,22 @@ def _no_huge_files_in_tmp_path(request):
             "even a truncate()d file really takes up that much disk.",
             pytrace=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _never_open_a_real_browser(monkeypatch):
+    """Tests must never launch the machine's web browser (one once left Chromium
+    running on a CI runner). Anything that reaches the real ``webbrowser`` is
+    recorded here instead; tests that care inject their own opener."""
+    import webbrowser
+
+    opened: list[str] = []
+
+    def record(url, *args, **kwargs):
+        opened.append(url)
+        return True
+
+    for name in ("open", "open_new", "open_new_tab"):
+        monkeypatch.setattr(webbrowser, name, record)
+    return opened
+

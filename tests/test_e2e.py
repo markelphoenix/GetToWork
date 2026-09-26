@@ -427,3 +427,95 @@ def test_managed_engine_is_stopped_when_the_game_is_terminated(managed_engine):
     assert code == EXIT_INTERRUPTED
     assert pid_file.exists() and server_gone(pid_file)
     assert signal.getsignal(signal.SIGTERM) == before  # main() puts the old handler back
+
+
+# ---------------------------------------------------------------------------
+# Play again: a second morning with the same model and the same Jev client
+# ---------------------------------------------------------------------------
+
+
+def test_play_again_reuses_the_model_and_jev_for_a_second_game(tmp_path, monkeypatch, isolated_home):
+    fake = FakeJev()
+    monkeypatch.setattr(jev, "urllib_transport", fake)
+    monkeypatch.setenv("TYPESAFE_API_KEY", KEY)
+    closed: list[str] = []
+    from gettowork.backends.mock import MockBackend
+
+    monkeypatch.setattr(MockBackend, "close", lambda self: closed.append("closed"))
+    player = Player({
+        "Press Enter": [""] * 60,  # a person is playing: pauses between the long stretches of text
+        "Use it?": ["use"],
+        "Jev request & response": ["n", "n"],
+        "reasoning (chain-of-thought)": ["n", "n"],
+        "Save a transcript": ["n", "n"],
+        "Play again?": ["y", "n"],
+    }, plans=PLANS * 2)
+    ui = UI(console=Console(file=io.StringIO(), width=80), input_fn=player,
+            secret_fn=lambda prompt: pytest.fail("the key should come from the environment"),
+            open_url_fn=lambda url: True, pauses=True)
+
+    code = main(["--mock", "--export-dir", str(tmp_path / "exports")], ui=ui, services=services())
+
+    assert code == EXIT_OK
+    text = output(ui)
+    assert "Before you play" in text  # the first-launch note about AI-written content...
+    assert sum("Press Enter to start" in p for p in player.prompts) == 1  # ...shown once, with a pause
+    assert text.count("Behind the scenes") == 2  # two games, two reviews
+    assert text.count("Here comes a brand-new morning!") == 1
+    assert text.count("Jev's verdict") == 10  # five rounds per game, all judged by Jev
+    # The key is checked once; the same Jev client referees both games.
+    assert [c[1].rsplit("/", 1)[-1] for c in fake.calls] == ["models"] + ["systemone"] * 10
+    assert sum("Play again?" in p for p in player.prompts) == 2
+    assert closed == ["closed"]  # the model is stopped once, at the very end
+    from gettowork.config import Settings
+
+    assert Settings.load().extra.get("ai_notice_seen") is True
+    for haystack in (text, "\n".join(player.prompts)):
+        assert KEY not in haystack
+
+
+# ---------------------------------------------------------------------------
+# The game's own window: the --gui-selftest that CI runs on every build
+# ---------------------------------------------------------------------------
+
+
+def _skip_without_a_window() -> None:
+    try:
+        import tkinter
+    except ImportError:
+        pytest.skip("this Python has no tkinter")
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        pytest.skip("no display (run under xvfb-run)")
+    try:
+        root = tkinter.Tk()
+    except tkinter.TclError as exc:
+        pytest.skip(f"Tk can't open a window: {exc}")
+    root.destroy()
+
+
+def test_gui_selftest_plays_the_real_game_in_its_window(tmp_path, monkeypatch, isolated_home):
+    """What double-clicking the built game (or Steam) runs, with the self-test player at the keyboard."""
+    import gc
+
+    from gettowork import launcher
+    from gettowork.config import Settings
+
+    _skip_without_a_window()
+    out = tmp_path / "selftest.txt"
+    monkeypatch.setenv("GETTOWORK_SELFTEST_OUT", str(out))
+    monkeypatch.delenv("GETTOWORK_SELFTEST_TIMEOUT", raising=False)
+    gc.collect()
+    try:
+        code = launcher.gui_main(["--gui-selftest"])
+    finally:
+        gc.collect()  # free leftover Tk objects here, on the main thread
+
+    transcript = out.read_text(encoding="utf-8")
+    assert code == 0, transcript[-2000:]
+    assert "Before you play" in transcript  # the first-launch AI note, with its pause...
+    assert "Press Enter to start" in transcript
+    assert "How do you plan to get to work?" in transcript
+    assert "YOU GOT TO WORK" in transcript
+    assert "Play again?" in transcript  # ...the self-test says no...
+    assert "Thanks for playing" in transcript  # ...and the game ends normally
+    assert Settings.load().extra.get("ai_notice_seen") is True  # (GETTOWORK_HOME was set: that folder is used)

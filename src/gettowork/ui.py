@@ -2,7 +2,10 @@
 
 All user interaction goes through the `UI` class so the game can be driven by
 scripted input in tests: pass `input_fn` / `secret_fn` / `open_url_fn` and a
-`Console(record=True)` or `Console(file=io.StringIO())`.
+`Console(record=True)` or `Console(file=io.StringIO())`. The game's own window
+(`gui/app.py`) plugs in the same way, plus `choices_fn` (menu buttons),
+`hides_input` (it masks secrets itself) and `window` (no command line there, so
+hints are worded for the window).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -28,10 +32,12 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
+from rich.spinner import Spinner
 from rich.table import Column, Table
 from rich.text import Text
 
 InputFn = Callable[[str], str]
+ChoicesFn = Callable[[list[tuple[str, str]]], None]  # shows a menu's (key, label) options as buttons
 
 # Terminal control sequences: ANSI "CSI" (cursor moves, clearing lines...),
 # "OSC" (window titles, hyperlinks, clipboard writes...) and other ESC codes,
@@ -67,6 +73,59 @@ def safe_text(text: Any) -> str:
     cleaned = str(text if text is not None else "").replace("\r\n", "\n")
     cleaned = _ESCAPE_SEQUENCE_RE.sub("", cleaned)
     return _CONTROL_CHARS_RE.sub("", cleaned)
+
+
+# One unbroken run of letters and digits, mixing both, at least this long: what an API key
+# or access token has and a plan, a model name or a file name doesn't (their words are short).
+_SECRET_RUN = 16
+_SECRET_MIN_LENGTH = 20
+_SECRET_RUN_RE = re.compile(r"[A-Za-z0-9]{%d,}" % _SECRET_RUN)
+
+
+def looks_like_secret(text: Any) -> bool:
+    """Does this answer look like an API key or token pasted into the wrong box?
+
+    True when a word in it (no ``/`` - so never a web address or a Hugging
+    Face model name) has 20+ characters including a run of 16+ letters and
+    digits mixing both, e.g. ``tsk_live_9f8e7d6c5b4a3210abcd`` (also inside
+    ``Bearer ...`` or a plan). Plans, model names
+    (``Qwen3-4B-Instruct-2507-Q4_K_M.gguf``) and ordinary words don't: their
+    letter/digit runs are short.
+    """
+    for token in str(text or "").split():
+        if len(token) < _SECRET_MIN_LENGTH or "/" in token or "\\" in token:
+            continue
+        if any(re.search(r"[A-Za-z]", run) and re.search(r"[0-9]", run) for run in _SECRET_RUN_RE.findall(token)):
+            return True
+    return False
+
+
+STEAM_ENV_VARIABLES = ("SteamAppId", "SteamGameId", "SteamClientLaunch")  # set by Steam for the games it starts
+
+
+def launched_from_steam(env: Optional[Any] = None) -> bool:
+    """Did Steam start this game? (Then its Launch Options are how a player adds a command-line option.)"""
+    import os
+
+    env = os.environ if env is None else env
+    return any(str(env.get(name) or "").strip() for name in STEAM_ENV_VARIABLES)
+
+
+def option_hint(ui: Any, option: str, *, env: Optional[Any] = None, markup: bool = True) -> Optional[str]:
+    """How this player can start the game with a command-line `option` - or None if they can't.
+
+    In a terminal: "start the game with gettowork --think". In the game's
+    window started by Steam: its Launch Options. In the window otherwise (a
+    double-clicked test build) there's no command line at all, so no hint.
+    """
+    if not getattr(ui, "in_window", False):
+        from .config import command_name
+
+        command = f"{command_name()} {option}"
+        return f"start the game with [bold]{command}[/bold]" if markup else f"start the game with {command}"
+    if launched_from_steam(env):
+        return f"add {option} to its Launch Options in Steam (right-click Get To Work > Properties > General)"
+    return None
 
 
 def plain(text: Any) -> str:
@@ -155,6 +214,17 @@ class UserQuit(Exception):
     """Raised when the player presses Ctrl+C / Ctrl+D at a prompt."""
 
 
+class WindowClosed(UserQuit):
+    """The player closed the game's window while a question was waiting.
+
+    A :class:`UserQuit`, so everything that stops politely on Ctrl+C stops on
+    it too - but code that treats Ctrl+C as "skip this step and carry on"
+    (the optional Jev setup, the review) must let it through: nobody is
+    watching any more, so nothing more should happen (above all, no more
+    model calls behind a hidden window).
+    """
+
+
 class UserChoseQuit(UserQuit):
     """The player *typed* "quit" (or "exit") at a yes/no question.
 
@@ -174,11 +244,23 @@ class UI:
         open_url_fn: Optional[Callable[[str], bool]] = None,
         *,
         pauses: Optional[bool] = None,
+        choices_fn: Optional[ChoicesFn] = None,
+        hides_input: bool = False,
+        window: bool = False,
     ) -> None:
         self.console = console or Console()
+        # True in the game's own window (gui/app.py), where the player has no command
+        # line: hints then talk about the window (buttons, Steam's launch options)
+        # instead of options typed after a command.
+        self.in_window = bool(window)
         self._input = input_fn or (lambda prompt: self.console.input(prompt))
         self._secret = secret_fn or getpass.getpass
         self._custom_secret = secret_fn is not None
+        # The game's own window (gui/app.py) masks secret input itself.
+        self._hides_input = bool(hides_input)
+        # The window also shows menu options as buttons: told about each menu
+        # before its question, and told [] once it's answered. (None in a terminal.)
+        self._choices_fn = choices_fn
         self._open_url = open_url_fn or webbrowser.open
         # Pauses ("Press Enter to continue") only make sense when a person is
         # reading a real terminal and typing into it: piped or redirected runs
@@ -229,7 +311,8 @@ class UI:
         """
         if not self._interactive:
             return
-        self.ask(f"[dim]{prompt}[/dim]", default="")
+        with self._offering([("", "Continue")]):  # a button in the game's window (Steam Deck, touch)
+            self.ask(f"[dim]{prompt}[/dim]", default="")
 
     def table(self, title: Optional[str], columns: Sequence[str], rows: Iterable[Sequence[str]]) -> None:
         t = Table(title=title, show_lines=False)
@@ -259,7 +342,16 @@ class UI:
         ``update(text)``, which changes the label mid-wait (e.g. "asking again...").
         """
         label = _Elapsed(safe_text(text), self._clock, show_elapsed_after_s)
-        with self.console.status(label):
+        if not self.in_window:
+            with self.console.status(label):
+                yield label.update
+            return
+        # In the game's window, stdout/stderr are left alone: rich's live display would
+        # otherwise swap them for its own proxies, and a window closed mid-spinner (the
+        # game thread still waiting on the model) would leave them swapped for good.
+        spinner = Spinner("dots", text=label, style="status.spinner")
+        with Live(spinner, console=self.console, refresh_per_second=12.5, transient=True,
+                  redirect_stdout=False, redirect_stderr=False):
             yield label.update
 
     @contextmanager
@@ -275,6 +367,9 @@ class UI:
             TimeRemainingColumn(table_column=Column(no_wrap=True)),
             console=self.console,
             expand=True,
+            # (the game's window keeps stdout/stderr as they are - see status())
+            redirect_stdout=not self.in_window,
+            redirect_stderr=not self.in_window,
         )
         with progress:
             task = progress.add_task(description, total=total_bytes)
@@ -288,7 +383,7 @@ class UI:
             try:
                 raw = self._input(f"[bold]{prompt}[/bold]{suffix} > ")
             except (EOFError, KeyboardInterrupt) as exc:
-                raise UserQuit() from exc
+                raise self._quit_for(exc) from exc
             except UnicodeDecodeError:
                 self.warn("I couldn't read that text (an unusual character?) - please type it again.")
                 continue
@@ -297,40 +392,73 @@ class UI:
 
     def confirm(self, prompt: str, default: bool = False) -> bool:
         hint = "Y/n" if default else "y/N"
-        while True:
-            # The backslash stops rich reading "[y/N]" as a (bogus) style tag and hiding it.
-            ans = self.ask(f"{prompt} \\[{hint}]").lower()
-            if not ans:
-                return default
-            if ans in ("y", "yes"):
-                return True
-            if ans in ("n", "no") or ans in _CONFIRM_NO_WORDS:
-                return False
-            if ans in _CONFIRM_QUIT_WORDS:
-                raise UserChoseQuit()  # a UserQuit, so every caller already handles it politely
-            self.warn("Please answer y or n (or quit).")
+        with self._offering([("y", "Yes"), ("n", "No")]):
+            while True:
+                # The backslash stops rich reading "[y/N]" as a (bogus) style tag and hiding it.
+                ans = self.ask(f"{prompt} \\[{hint}]").lower()
+                if not ans:
+                    return default
+                if ans in ("y", "yes"):
+                    return True
+                if ans in ("n", "no") or ans in _CONFIRM_NO_WORDS:
+                    return False
+                if ans in _CONFIRM_QUIT_WORDS:
+                    raise UserChoseQuit()  # a UserQuit, so every caller already handles it politely
+                self.warn("Please answer y or n (or quit).")
 
     def choose(self, prompt: str, options: Sequence[tuple[str, str]], default: Optional[str] = None, *,
-               aliases: Optional[dict[str, str]] = None) -> str:
+               aliases: Optional[dict[str, str]] = None,
+               accept: Optional[Callable[[str], bool]] = None) -> str:
         """Menu. `options` is [(key, label)]; returns the chosen key.
 
         The player may type the key or the 1-based number of the option.
         `aliases` maps other words to a key (e.g. {"back": "no"}), so the
         escape words the game teaches ("back", "quit"...) work here too.
+        An answer that matches no option but that ``accept(answer)`` approves
+        is returned as typed (e.g. an API key pasted straight into the menu).
         """
         keys = [k for k, _ in options]
         extra = {str(k).lower(): v for k, v in (aliases or {}).items() if v in keys}
-        while True:
-            for i, (k, label) in enumerate(options, 1):
-                marker = " [dim](default)[/dim]" if k == default else ""
-                self.console.print(f"  [bold cyan]{i}[/bold cyan]) [bold]{k}[/bold] - {label}{marker}", highlight=False)
-            ans = self.ask(prompt, default=default)
-            picked = _match_option(ans, keys)
-            if picked is None:
-                picked = extra.get(ans.strip().lower())
-            if picked is not None:
-                return picked
-            self.warn("Pick one of the options above (number or name).")
+        with self._offering(list(options)):
+            while True:
+                for i, (k, label) in enumerate(options, 1):
+                    marker = " [dim](default)[/dim]" if k == default else ""
+                    self.console.print(f"  [bold cyan]{i}[/bold cyan]) [bold]{k}[/bold] - {label}{marker}", highlight=False)
+                ans = self.ask(prompt, default=default)
+                picked = _match_option(ans, keys)
+                if picked is None:
+                    picked = extra.get(ans.strip().lower())
+                if picked is not None:
+                    return picked
+                if accept is not None and ans and accept(ans):
+                    return ans
+                self.warn("Pick one of the options above (number or name).")
+
+    @contextmanager
+    def _offering(self, options: list[tuple[str, str]]) -> Iterator[None]:
+        """Tell the game's window (if any) which buttons to show while a question waits.
+
+        ``choices_fn(options)`` before asking, ``choices_fn([])`` once it's
+        answered (or abandoned). A window problem never breaks the question.
+        """
+        self._offer(options)
+        try:
+            yield
+        finally:
+            self._offer([])
+
+    def _offer(self, options: list[tuple[str, str]]) -> None:
+        if self._choices_fn is None:
+            return
+        try:
+            self._choices_fn(options)
+        except Exception:
+            pass
+
+    def _quit_for(self, exc: BaseException) -> UserQuit:
+        """What an interrupted question raises: :class:`WindowClosed` when the game's window
+        closed under it (the window's input ends with EOFError), else :class:`UserQuit`."""
+        return WindowClosed() if self.in_window and isinstance(exc, EOFError) else UserQuit()
 
     def can_hide_input(self) -> bool:
         """Can :meth:`secret` really keep typed text off the screen?
@@ -340,7 +468,7 @@ class UI:
         back to *showing* what is typed - so callers check this first and
         never promise "hidden" when it isn't.
         """
-        if self._custom_secret:
+        if self._hides_input or self._custom_secret:
             return True
         return _isatty(sys.stdin)
 
@@ -349,7 +477,7 @@ class UI:
         try:
             return safe_text(self._secret(f"{prompt}: ") or "").strip()
         except (EOFError, KeyboardInterrupt) as exc:
-            raise UserQuit() from exc
+            raise self._quit_for(exc) from exc
         except UnicodeDecodeError:
             self.warn("I couldn't read that text (an unusual character?) - let's go back a step.")
             return ""

@@ -7,18 +7,20 @@ of llama-server's /health and /v1/chat/completions endpoints.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
-from gettowork import runtime_install
+from gettowork import distribution, runtime_install
 from gettowork.backends import llamaserver as ls
 from gettowork.backends.base import RETRY_WITHOUT_THINKING_NOTICE, BackendError
 from gettowork.backends.llamaserver import (
@@ -343,6 +345,14 @@ def linux_host(monkeypatch, tmp_path, posix_file_locks):
     return registered
 
 
+@pytest.fixture(autouse=True)
+def developer_copy(monkeypatch):
+    """Every test starts as a developer copy (downloads on, no built-in engine), whatever the shell has set."""
+    for var in ("GETTOWORK_DISTRIBUTION", "GETTOWORK_ENGINE_DIR", "GETTOWORK_ALLOW_ENGINE_DOWNLOAD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(distribution, "_cache", distribution.Distribution())
+
+
 def make_backend(tmp_path, *, popen=None, http=None, specs=None, installer=None, downloader=None,
                  clock=None, entry=ENTRY, **kwargs):
     clock = clock or FakeClock()
@@ -409,6 +419,83 @@ def test_server_env_per_platform(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ls.platform, "system", lambda: "Darwin")
     assert server_env(exe, {"PATH": "/bin"}) == {"PATH": "/bin"}
+
+
+class _FakeKernel32:
+    """ctypes.windll.kernel32 as far as windows_system_dll_search uses it."""
+
+    def __init__(self, dll_directory: str = "", fail: bool = False) -> None:
+        self.dll_directory, self.fail, self.calls = dll_directory, fail, []
+
+    def GetDllDirectoryW(self, size, buffer):  # noqa: N802 - the Windows name
+        if self.fail:
+            raise OSError("no such function")
+        buffer.value = self.dll_directory
+        return len(self.dll_directory)
+
+    def SetDllDirectoryW(self, value):  # noqa: N802
+        self.calls.append(value)
+        return 1
+
+
+def _pretend_built_game_on_windows(monkeypatch, kernel32) -> None:
+    import ctypes
+
+    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(kernel32=kernel32), raising=False)
+    monkeypatch.setattr(ls.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+
+def test_a_built_game_on_windows_starts_the_engine_with_the_normal_dll_search(monkeypatch):
+    # PyInstaller's SetDllDirectory(_internal) would be inherited by llama-server.exe.
+    kernel32 = _FakeKernel32(r"C:\Games\GetToWork\_internal")
+    _pretend_built_game_on_windows(monkeypatch, kernel32)
+    with ls.windows_system_dll_search():
+        kernel32.calls.append("the engine starts")
+    assert kernel32.calls == [None, "the engine starts", r"C:\Games\GetToWork\_internal"]
+
+    kernel32.calls.clear()
+    with pytest.raises(OSError):
+        with ls.windows_system_dll_search():
+            raise OSError("the engine couldn't start")
+    assert kernel32.calls == [None, r"C:\Games\GetToWork\_internal"]  # put back even then
+
+
+def test_the_dll_search_is_left_alone_when_there_is_nothing_to_undo(monkeypatch):
+    kernel32 = _FakeKernel32("")  # no DLL directory set
+    _pretend_built_game_on_windows(monkeypatch, kernel32)
+    with ls.windows_system_dll_search():
+        pass
+    assert kernel32.calls == []
+
+    broken = _FakeKernel32(fail=True)
+    _pretend_built_game_on_windows(monkeypatch, broken)
+    with ls.windows_system_dll_search():  # never raises
+        pass
+    assert broken.calls == []
+
+
+@pytest.mark.parametrize("system, frozen", [("Windows", False), ("Linux", True), ("Darwin", True)])
+def test_the_dll_search_is_only_touched_in_a_built_game_on_windows(monkeypatch, system, frozen):
+    kernel32 = _FakeKernel32(r"C:\Games\GetToWork\_internal")
+    _pretend_built_game_on_windows(monkeypatch, kernel32)
+    monkeypatch.setattr(ls.platform, "system", lambda: system)
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    with ls.windows_system_dll_search():
+        pass
+    assert kernel32.calls == []
+
+
+def test_the_engine_is_started_inside_the_normal_dll_search(monkeypatch, tmp_path):
+    kernel32 = _FakeKernel32(r"C:\Games\GetToWork\_internal")
+    events = []
+    kernel32.SetDllDirectoryW = lambda value: events.append(("dll dir", value)) or 1  # type: ignore[method-assign]
+    backend = make_backend(tmp_path, popen=lambda args, **kw: events.append(("start", args[0])) or FakeProcess())
+    _pretend_built_game_on_windows(monkeypatch, kernel32)
+    backend._launch(tmp_path / "llama-server", tmp_path / "m.gguf", cpu_only=False, minimal=False)
+    assert [e[0] for e in events] == ["dll dir", "start", "dll dir"]
+    assert events[0][1] is None and events[2][1] == r"C:\Games\GetToWork\_internal"
+    backend._close_log()
 
 
 @pytest.mark.parametrize(
@@ -1378,6 +1465,22 @@ def test_an_exe_the_system_cant_execute_is_reported_clearly(tmp_path):
         backend.prepare(make_ui())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a shell-script stand-in for llama-server (Linux/macOS)")
+def test_the_engine_checks_run_a_relative_engine_path_by_its_full_path(tmp_path, monkeypatch):
+    """GETTOWORK_ENGINE_DIR=game/engine: the checks run with the engine's folder as the working directory,
+    where Linux and macOS would look for the relative path - a false "can't run here", remembered for good."""
+    folder = tmp_path / "game" / "engine" / "b7000-cpu"
+    folder.mkdir(parents=True)
+    exe = folder / "llama-server"
+    exe.write_text("#!/bin/sh\necho 'Available devices:'\necho 'version: 7000 (fake)'\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    backend = make_backend(tmp_path, runner=subprocess.run)
+    relative = Path("game") / "engine" / "b7000-cpu" / "llama-server"
+    assert backend._probe_engine(relative) is None  # it ran fine
+    assert backend._probe_devices(relative) is not None  # and listed its devices
+
+
 def test_an_unclear_engine_check_result_doesnt_block_the_start(tmp_path):
     runner = FakeRunner({"cpu": subprocess.TimeoutExpired("llama-server", 15)})
     backend = make_backend(tmp_path, runner=runner)
@@ -1443,6 +1546,76 @@ def test_a_gpu_crash_mid_game_switches_to_cpu_mode_and_answers(tmp_path):
     assert result.text == "The goose bows."
     assert backend.cpu_only and popen.args[-1][-4:] == ["--device", "none", "-ngl", "0"]
     assert any("CPU mode" in n for n in notices)
+
+
+def test_closing_mid_answer_never_starts_a_new_engine(tmp_path, linux_host):
+    """The window closed while the model was writing: the game quits, atexit runs
+    close() while the game's thread is still waiting for the answer. Its request
+    then fails - that must not look like a GPU crash that starts a CPU-mode engine
+    nobody would ever stop (macOS has no parent-death signal)."""
+    popen = FakePopen(("offloaded 37/37 layers to GPU\n", FakeProcess()))
+    backend, http, popen = gpu_backend(tmp_path, popen=popen, chat=[ConnectionResetError("reset"), chat_reply("x")])
+    assert backend.variant.gpu and not backend.cpu_only
+    http.on_chat = backend.close  # the quit arrives while the answer is being written
+    with pytest.raises(BackendError):
+        backend.chat([{"role": "user", "content": "hi"}])
+    assert len(popen.calls) == 1  # no second engine
+    assert popen.processes[0].terminate_calls == 1
+    assert backend._proc is None and backend.close not in linux_host
+
+
+def test_a_closed_backend_refuses_to_start_or_restart_the_engine(tmp_path):
+    backend, http, popen = gpu_backend(tmp_path, chat=[chat_reply("a")])
+    backend.close()
+    with pytest.raises(BackendError, match="closing"):
+        backend.chat([{"role": "user", "content": "hi"}])
+    assert not backend._switch_after_crash(None, "gpu")
+    with pytest.raises(BackendError, match="closing"):
+        backend._launch(backend.server_exe, backend.model_path, cpu_only=True, minimal=False)
+    assert backend.benchmark() is None
+    assert len(popen.calls) == 1
+    backend.prepare(make_ui())  # prepare() starts afresh
+    assert len(popen.calls) == 2 and backend.chat([{"role": "user", "content": "hi"}]).text == "a"
+    backend.close()
+
+
+def test_close_racing_a_launch_on_another_thread_leaves_no_engine(tmp_path):
+    """close() from the main thread while the game thread is inside Popen: close()
+    waits for the launch to finish, then stops the engine it started (a launch
+    after close() is refused - see the test above)."""
+    import threading as _threading
+
+    backend, http, popen = gpu_backend(tmp_path, chat=[])
+    entered, release = _threading.Event(), _threading.Event()
+    real_call = popen.__call__
+
+    def slow_popen(args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return real_call(args, **kwargs)
+
+    backend._stop_process()  # the game thread is about to relaunch (as after a crash)
+    backend._popen = slow_popen
+    errors: list = []
+
+    def relaunch():
+        try:
+            backend._launch(backend.server_exe, backend.model_path, cpu_only=True, minimal=False)
+        except BackendError as exc:
+            errors.append(exc)
+
+    worker = _threading.Thread(target=relaunch)
+    worker.start()
+    assert entered.wait(5)
+    closer = _threading.Thread(target=backend.close)
+    closer.start()
+    release.set()
+    worker.join(5)
+    closer.join(5)
+    assert backend._proc is None and backend._owner_file is None
+    assert len(popen.processes) == 2  # prepare's engine, then the racing relaunch...
+    assert all(p.returncode is not None for p in popen.processes)  # ...and every one was stopped
+    assert errors == []  # the launch won the race here; close() then stopped what it started
 
 
 def test_a_repeated_idle_stop_switches_setup_instead_of_reloading_forever(tmp_path):
@@ -1719,6 +1892,40 @@ def test_a_missing_linux_library_gets_a_linux_fix_not_windows_advice(tmp_path):
     assert "libgomp1" in str(err.value) and "Visual C++" not in str(err.value)
 
 
+@pytest.mark.parametrize("winerror, words", [(4551, "Smart App Control"), (1260, "Smart App Control"),
+                                              (225, "antivirus"), (226, "antivirus")])
+def test_windows_refusing_to_start_the_engine_is_explained(tmp_path, winerror, words):
+    """Smart App Control blocks unsigned programs outright (WinError 4551, no "Run anyway"), even ones Steam
+    installed; an antivirus quarantine is WinError 225. Say which, and what still works."""
+    exc = OSError(22, "An Application Control policy has blocked this file")
+    exc.winerror = winerror
+    assert words in ls.windows_block_message(exc)
+    assert ls.windows_block_message(OSError(2, "No such file")) is None
+
+    def popen(*args, **kwargs):
+        raise exc
+
+    backend = make_backend(tmp_path, popen=popen)
+    with pytest.raises(BackendError) as err:
+        backend.prepare(make_ui())
+    assert words in str(err.value) and "Ollama" in str(err.value)
+
+
+def test_steam_players_are_never_told_to_apt_install_a_library(monkeypatch):
+    """SteamOS is read-only, and Steam runs the game in its own Linux runtime, which never sees the computer's
+    libraries: a missing library there means Steam's file check, not a package."""
+    text = "./llama-server: error while loading shared libraries: libssl.so.3: cannot open shared object file"
+    steam = ls.missing_library_hint(text, "Linux", env={"SteamAppId": "480"})
+    assert "apt" not in steam and "Verify integrity of game files" in steam and "libssl.so.3" in steam
+    # The built-in engine ships its own OpenSSL: missing, it means an incomplete download of the game.
+    bundled = ls.missing_library_hint(text, "Linux", env={}, bundled=True)
+    assert "apt" not in bundled and "comes with the game" in bundled
+    # A developer copy's downloaded engine on a desktop Linux: the package is the fix.
+    assert "sudo apt install libssl3" in ls.missing_library_hint(text, "Linux", env={})
+    gomp = "error while loading shared libraries: libgomp.so.1: cannot open shared object file"
+    assert "libgomp1" in ls.missing_library_hint(gomp, "Linux", env={}, bundled=True)
+
+
 def test_a_newer_engine_that_cant_run_here_is_explained_and_the_old_one_kept(tmp_path):
     """A model needs a newer engine; the newest build needs a newer Linux. Only that
     install is marked, and the player hears the real reason."""
@@ -1746,3 +1953,442 @@ def test_disk_reads_of_a_real_process_can_be_measured():
     value = ls._process_read_bytes(Me())
     assert value is None or value >= 0
     assert ls._process_read_bytes(object()) is None
+
+
+# ---------------------------------------------------------------------------
+# The built game: the engine ships inside the game and is never downloaded
+# ---------------------------------------------------------------------------
+
+AMD = GPUInfo(name="AMD Radeon RX 7800 XT", vendor="amd", vram_gb=16.0)
+APPLE = GPUInfo(name="Apple M2", vendor="apple", vram_gb=11.2)
+VULKAN_CRASH_LOG = "ggml_vulkan: Found 1 Vulkan devices:\nggml_vulkan: vk::Device::createComputePipeline: ErrorDeviceLost\n"
+METAL_CRASH_LOG = "ggml_metal_init: error: failed to create command queue\n"
+BUNDLE_ASSETS = {"vulkan": "llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz", "cpu": "llama-{tag}-bin-ubuntu-x64.tar.gz",
+                 "metal": "llama-{tag}-bin-macos-arm64.tar.gz"}
+
+
+def built_game(monkeypatch, tmp_path, *variants: str, tag: str = "b7000") -> dict:
+    """A built game (downloads off) whose engine folder holds fake builds; returns {variant: exe}."""
+    engine = tmp_path / "game" / "engine"
+    engine.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("GETTOWORK_ENGINE_DIR", str(engine))
+    monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "0")
+    distribution.load(refresh=True)
+    exes = {}
+    for variant in variants:
+        folder = engine / f"{tag}-{variant}"
+        folder.mkdir()
+        (folder / "llama-server").write_bytes(b"#!engine")
+        asset = BUNDLE_ASSETS[variant].format(tag=tag)
+        (folder / "install.json").write_text(json.dumps({"tag": tag, "variant": variant, "exe": "llama-server",
+                                                         "assets": [asset], "bundled": True}))
+        exes[variant] = folder / "llama-server"
+    return exes
+
+
+@pytest.fixture
+def no_engine_downloads(monkeypatch):
+    """Fail the test if the engine installer tries to reach GitHub."""
+    def refuse(*args, **kwargs):
+        raise AssertionError("a built game must never download the engine")
+
+    monkeypatch.setattr(runtime_install, "UrllibHttp", refuse)
+    monkeypatch.setattr(runtime_install, "fetch_releases", refuse)
+    monkeypatch.setattr(runtime_install, "fetch_release", refuse)
+
+
+def test_built_game_vulkan_crash_falls_back_to_the_bundled_cpu_build(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    before = (exes["vulkan"].parent / "install.json").read_bytes()
+    specs = make_specs(gpus=[AMD], flags=["vulkan"])  # plan: vulkan, cpu
+    popen = FakePopen((VULKAN_CRASH_LOG, FakeProcess(dies_with=1)), ("", FakeProcess()))
+    backend = make_backend(tmp_path, popen=popen, specs=specs, installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    backend.prepare(ui)
+
+    first, second = popen.args
+    assert Path(first[0]).resolve() == exes["vulkan"].resolve() and "-ngl" not in first
+    assert Path(second[0]).resolve() == exes["cpu"].resolve() and second[-4:] == ["--device", "none", "-ngl", "0"]
+    assert backend.variant is CPU and backend.cpu_only
+    text = " ".join(output(ui).split())
+    assert "built-in llama.cpp engine (b7000, Vulkan build)" in text
+    assert "graphics-driver hiccup" in text
+    # A driver hiccup isn't a permanent verdict, and the game's own files are never changed.
+    assert (exes["vulkan"].parent / "install.json").read_bytes() == before
+    assert not (tmp_path / "home" / "runtime" / runtime_install.BUNDLED_UNUSABLE_FILE).exists()
+    backend.close()
+
+
+def test_built_game_metal_crash_uses_cpu_mode_on_the_same_build(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "metal")
+    mac = make_specs("Darwin", "arm64", gpus=[APPLE])  # plan: metal, cpu
+    popen = FakePopen((METAL_CRASH_LOG, FakeProcess(dies_with=1)), ("", FakeProcess()))
+    backend = make_backend(tmp_path, popen=popen, specs=mac, installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    backend.prepare(ui)
+    first, second = popen.args
+    assert Path(first[0]).resolve() == Path(second[0]).resolve() == exes["metal"].resolve()
+    assert "--device" not in first
+    assert second[-4:] == ["--device", "none", "-ngl", "0"]  # the Metal build, on the processor
+    assert backend.variant is CPU and backend.cpu_only
+    assert "Apple Metal build, in CPU mode" in " ".join(output(ui).split())
+    backend.close()
+
+
+def test_built_game_gpu_crash_on_the_warm_up_moves_to_the_bundled_cpu_build(tmp_path, monkeypatch,
+                                                                           no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    popen = FakePopen(("offloaded 37/37 layers to GPU\n", FakeProcess()), ("", FakeProcess()))
+    http = FakeServerHttp(health=(200,), chat=[ConnectionResetError("reset"),
+                                               chat_reply("1, 2, 3", timings={"predicted_per_second": 9.0})])
+    backend = make_backend(tmp_path, popen=popen, http=http, specs=make_specs(gpus=[AMD], flags=["vulkan"]),
+                           installer=runtime_install.ensure_llama_server)
+    backend.prepare(make_ui())
+    assert backend.variant is VULKAN
+    http.on_chat = lambda: popen.processes[0].crash(-6) if len(http.chat_bodies) == 1 else None
+    assert backend.benchmark(make_ui()) == 9.0
+    assert Path(popen.args[1][0]).resolve() == exes["cpu"].resolve()
+    assert backend.variant is CPU and backend.cpu_only
+    backend.close()
+
+
+def test_built_game_gpu_crash_mid_game_switches_to_cpu_mode_without_downloading(tmp_path, monkeypatch,
+                                                                              no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    notices: list[str] = []
+    popen = FakePopen(("offloaded 37/37 layers to GPU\n", FakeProcess()))
+    http = FakeServerHttp(health=(200,), chat=[ConnectionResetError("reset"), chat_reply("The goose bows.")])
+    backend = make_backend(tmp_path, popen=popen, http=http, specs=make_specs(gpus=[AMD], flags=["vulkan"]),
+                           installer=runtime_install.ensure_llama_server)
+    backend.prepare(make_ui())
+    backend.on_notice = notices.append
+    http.on_chat = lambda: popen.processes[0].crash(-6) if len(http.chat_bodies) == 1 else None
+    assert backend.chat([{"role": "user", "content": "hi"}]).text == "The goose bows."
+    assert backend.cpu_only and Path(popen.args[-1][0]).resolve() == exes["vulkan"].resolve()
+    assert popen.args[-1][-4:] == ["--device", "none", "-ngl", "0"]
+    assert any("CPU mode" in n for n in notices)
+    backend.close()
+
+
+def test_built_game_with_its_engine_missing_says_how_to_repair_it(tmp_path, monkeypatch, no_engine_downloads):
+    built_game(monkeypatch, tmp_path)  # an empty engine folder
+    ok, why = make_backend(tmp_path).is_available()
+    assert not ok and why == runtime_install.ENGINE_MISSING_MESSAGE
+    downloader = FakeDownloader(tmp_path)
+    backend = make_backend(tmp_path, installer=runtime_install.ensure_llama_server, downloader=downloader)
+    with pytest.raises(BackendError, match="Verify integrity"):
+        backend.prepare(make_ui())
+    assert downloader.calls == []  # the model isn't downloaded for an engine that isn't there
+
+
+def test_built_game_is_available_names_the_built_in_engine(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path, "cpu")
+    ok, why = make_backend(tmp_path).is_available()
+    assert ok and "built-in llama.cpp engine is ready (b7000, cpu)" in why
+
+
+def test_built_game_permanent_failure_is_noted_outside_the_game(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    before = (exes["vulkan"].parent / "install.json").read_bytes()
+    runner = FakeRunner({"b7000-vulkan": GLIBC_FAIL})
+    popen = FakePopen()
+    backend = make_backend(tmp_path, popen=popen, specs=make_specs(gpus=[AMD], flags=["vulkan"]),
+                           installer=runtime_install.ensure_llama_server, runner=runner)
+    backend.prepare(make_ui())
+    assert Path(popen.args[0][0]).resolve() == exes["cpu"].resolve()
+    assert (exes["vulkan"].parent / "install.json").read_bytes() == before
+    notes = json.loads((tmp_path / "home" / "runtime" / runtime_install.BUNDLED_UNUSABLE_FILE).read_text())
+    assert notes["builds"]["b7000-vulkan"]["reason"] == "glibc"
+    # Next launch: the Vulkan build is skipped straight away.
+    assert [e for e, _t, _v in runtime_install.installed_runtimes()] == [exes["cpu"]]
+    backend.close()
+
+
+def test_a_saved_engine_from_a_moved_game_is_found_again(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    old = tmp_path / "OldLibrary" / "steamapps" / "common" / "GetToWork" / "engine" / "b7000-cpu" / "llama-server"
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    installer = FakeInstaller(tmp_path, fail={"cpu", "vulkan", "cuda-12"})  # must not be needed
+    popen = FakePopen()
+    backend = make_backend(tmp_path, popen=popen, installer=installer, server_exe=old, model_path=model)
+    ui = make_ui()
+    backend.prepare(ui)
+    assert installer.calls == []
+    assert backend.server_exe == exes["cpu"] and backend.variant is CPU
+    text = " ".join(output(ui).split())
+    assert "The game has moved since last time" in text and "gone missing" not in text
+    backend.close()
+
+
+def test_a_lost_saved_engine_in_a_built_game_uses_the_built_in_one(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "cpu")
+    backend = make_backend(tmp_path, installer=runtime_install.ensure_llama_server,
+                           server_exe=tmp_path / "gone" / "llama-server")
+    ui = make_ui()
+    backend.prepare(ui)
+    assert backend.server_exe == exes["cpu"]
+    text = " ".join(output(ui).split())
+    assert "let me find the game's built-in one" in text and "fetch a fresh copy" not in text
+    backend.close()
+
+
+def test_a_model_too_new_for_the_built_in_engine_never_triggers_an_update(tmp_path, monkeypatch, no_engine_downloads):
+    built_game(monkeypatch, tmp_path, "cpu")
+    log = "unknown model architecture: 'qwen99'\nfailed to load model\n"
+    popen = FakePopen((log, FakeProcess(dies_with=1)))
+    backend = make_backend(tmp_path, popen=popen, installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    with pytest.raises(BackendError) as err:
+        backend.prepare(ui)
+    message = str(err.value)
+    assert "game's built-in llama.cpp engine doesn't know yet" in message and "qwen99" in message
+    assert "game updates bring newer engines" in message
+    assert "fetch the newest engine" not in output(ui)
+
+
+VULKAN_LISTING = "Available devices:\n  Vulkan0: AMD Radeon RX 7800 XT (16384 MiB, 15000 MiB free)\n"
+
+
+def _session(tmp_path, *, runner, server_exe=None, specs=None, popen=None):
+    """One launch of a built game: a fresh backend (as setup_flow makes it), prepared."""
+    backend = make_backend(tmp_path, popen=popen or FakePopen(("", FakeProcess())), runner=runner,
+                           specs=specs or make_specs(gpus=[AMD], flags=["vulkan"]), server_exe=server_exe,
+                           installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    backend.prepare(ui)
+    return backend, " ".join(output(ui).split())
+
+
+def test_after_a_driver_fix_a_later_launch_goes_back_to_the_graphics_build(tmp_path, monkeypatch,
+                                                                          no_engine_downloads):
+    """Session 1: the Vulkan build sees no graphics card, so the game switches to its CPU build (and saves it).
+    The player updates the driver. Session 2 (welcome back, same saved engine): the Vulkan build is asked
+    again - it sees the card now - and is used, instead of the CPU build forever."""
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    first, said = _session(tmp_path, runner=DeviceRunner({}))
+    assert first.server_exe == exes["cpu"] and "updating the graphics driver usually fixes this" in said
+    first.close()
+    note = json.loads((tmp_path / "home" / "runtime" / ls.GPU_SWITCH_FILE).read_text())
+    assert note["reason"] == "no_device" and Path(note["from"]) == exes["vulkan"].resolve()
+
+    # Still no card: stays on the CPU build - and says why, every launch.
+    again, said = _session(tmp_path, runner=DeviceRunner({}), server_exe=exes["cpu"])
+    assert again.server_exe == exes["cpu"] and "still can't find your graphics card" in said
+    again.close()
+
+    fixed, said = _session(tmp_path, runner=DeviceRunner({"b7000-vulkan": VULKAN_LISTING}), server_exe=exes["cpu"])
+    assert fixed.server_exe == exes["vulkan"] and fixed.variant is VULKAN and not fixed.cpu_only
+    assert "can see your graphics card again" in said
+    assert not (tmp_path / "home" / "runtime" / ls.GPU_SWITCH_FILE).exists()
+    fixed.close()
+
+
+def _note_switch(tmp_path, backend_exes, reason, *, age_s=60.0, fingerprint=None):
+    from gettowork import __version__
+
+    note = {"from": str(backend_exes["vulkan"].resolve()), "to": str(backend_exes["cpu"].resolve()),
+            "reason": reason, "at": time.time() - age_s,
+            "fingerprint": fingerprint or {"game": __version__, "gpus": [f"{AMD.name}|"]}}
+    path = tmp_path / "home" / "runtime" / ls.GPU_SWITCH_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(note))
+
+
+def test_a_warm_up_crash_switch_is_retried_after_a_driver_change_or_a_while(tmp_path, monkeypatch,
+                                                                           no_engine_downloads):
+    """A one-off VRAM shortage or driver hiccup made the game switch to the CPU build. It isn't retried on
+    every launch (a permanent problem would crash every warm-up), but after a driver or game update - or a
+    week - the graphics build gets another go."""
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    runner = DeviceRunner({"b7000-vulkan": VULKAN_LISTING})
+    _note_switch(tmp_path, exes, "memory")
+    stay, said = _session(tmp_path, runner=runner, server_exe=exes["cpu"])
+    assert stay.server_exe == exes["cpu"] and "ran out of memory" in said and "tries the graphics card again" in said
+    stay.close()
+
+    _note_switch(tmp_path, exes, "crash", age_s=8 * 24 * 3600)
+    retry, said = _session(tmp_path, runner=runner, server_exe=exes["cpu"])
+    assert retry.server_exe == exes["vulkan"] and "It's been a while - trying the graphics card again" in said
+    retry.close()
+
+    driver = dataclasses.replace(AMD, driver_version="24.3.1")
+    _note_switch(tmp_path, exes, "gpu_hang")  # the player chose to leave a hung start: only a change retries
+    stay, _said = _session(tmp_path, runner=runner, server_exe=exes["cpu"],
+                           specs=make_specs(gpus=[AMD], flags=["vulkan"]))
+    assert stay.server_exe == exes["cpu"]
+    stay.close()
+    _note_switch(tmp_path, exes, "gpu_hang", age_s=30 * 24 * 3600)
+    stay, _said = _session(tmp_path, runner=runner, server_exe=exes["cpu"])
+    assert stay.server_exe == exes["cpu"]
+    stay.close()
+    retry, said = _session(tmp_path, runner=runner, server_exe=exes["cpu"],
+                           specs=make_specs(gpus=[driver], flags=["vulkan"]))
+    assert retry.server_exe == exes["vulkan"] and "Your graphics driver or the game has been updated since" in said
+    retry.close()
+
+
+def test_a_crash_during_the_warm_up_notes_the_switch_to_the_cpu_build(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    backend = make_backend(tmp_path, popen=FakePopen(("", FakeProcess()), ("", FakeProcess())),
+                           runner=DeviceRunner({"b7000-vulkan": VULKAN_LISTING}),
+                           specs=make_specs(gpus=[AMD], flags=["vulkan"]), installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    backend.prepare(ui)
+    assert backend.server_exe == exes["vulkan"]
+    assert backend._switch_after_crash(ui, "memory") is True
+    assert backend.server_exe == exes["cpu"]
+    note = json.loads((tmp_path / "home" / "runtime" / ls.GPU_SWITCH_FILE).read_text())
+    assert note["reason"] == "memory" and Path(note["to"]) == exes["cpu"].resolve()
+    backend.close()
+
+
+def test_a_saved_cpu_build_the_player_never_switched_to_stays(tmp_path, monkeypatch, no_engine_downloads):
+    """No note (e.g. a computer without a usable graphics card from the start): nothing is retried."""
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    backend, said = _session(tmp_path, runner=DeviceRunner({"b7000-vulkan": VULKAN_LISTING}),
+                             server_exe=exes["cpu"])
+    assert backend.server_exe == exes["cpu"] and "graphics card again" not in said
+    backend.close()
+
+
+def _other_copys_engine(tmp_path, tag="b7000", variant="cpu"):
+    """An engine inside another (older) copy of the game, still on disk."""
+    folder = tmp_path / "gameOld" / "engine" / f"{tag}-{variant}"
+    folder.mkdir(parents=True)
+    (folder / "llama-server").write_bytes(b"#!old engine")
+    asset = BUNDLE_ASSETS[variant].format(tag=tag)
+    (folder / "install.json").write_text(json.dumps({"tag": tag, "variant": variant, "exe": "llama-server",
+                                                     "assets": [asset], "bundled": True}))
+    return folder / "llama-server"
+
+
+def test_a_new_build_uses_its_own_engine_not_the_one_saved_by_an_older_copy(tmp_path, monkeypatch,
+                                                                            no_engine_downloads):
+    """Welcome back in a newly downloaded build: settings still name the older copy's engine,
+    which is still on disk. The new build must run the engine it ships."""
+    exes = built_game(monkeypatch, tmp_path, "cpu", tag="b7100")
+    old = _other_copys_engine(tmp_path)
+    popen = FakePopen(("", FakeProcess()))
+    backend = make_backend(tmp_path, popen=popen, installer=runtime_install.ensure_llama_server, server_exe=old)
+    ui = make_ui()
+    backend.prepare(ui)
+    assert backend.server_exe == exes["cpu"]
+    assert Path(popen.args[0][0]).resolve() == exes["cpu"].resolve()
+    assert "this copy of the game's own built-in llama.cpp engine" in " ".join(output(ui).split())
+    backend.close()
+
+
+def test_a_model_too_new_for_an_old_saved_engine_tries_the_games_newer_one_offline(tmp_path, monkeypatch,
+                                                                                  no_engine_downloads):
+    """The engine that failed is older than the one this game ships (another copy's, saved last time):
+    the newest build already on disk is tried - no download - before saying "game updates bring newer engines"."""
+    exes = built_game(monkeypatch, tmp_path, "cpu", tag="b7100")
+    old = _other_copys_engine(tmp_path)
+    log = "unknown model architecture: 'qwen9'\nfailed to load model\n"
+    popen = FakePopen((log, FakeProcess(dies_with=1)), ("", FakeProcess()))
+    backend = make_backend(tmp_path, popen=popen, installer=runtime_install.ensure_llama_server)
+    backend.server_exe = old  # (as if it had been kept from last time)
+    backend._ensure_engine = lambda ui: None  # skip the swap above: exercise the fallback on its own
+    backend.variant = CPU
+    ui = make_ui()
+    backend.prepare(ui)
+    assert Path(popen.args[0][0]).resolve() == old.resolve()
+    assert Path(popen.args[1][0]).resolve() == exes["cpu"].resolve()
+    assert backend.server_exe == exes["cpu"]
+    assert "trying the game's built-in engine (b7100) instead" in " ".join(output(ui).split())
+    backend.close()
+
+
+def test_a_newer_engine_that_isnt_the_games_is_never_called_the_games(tmp_path, monkeypatch, no_engine_downloads):
+    """A saved CUDA build from a developer copy (this game ships none) can't load the model; a newer CUDA build
+    the developer copy also downloaded is tried - and named for what it is, not "the newest engine the game has"."""
+    built_game(monkeypatch, tmp_path, "vulkan", "cpu", tag="b7100")
+    home = tmp_path / "home"
+    monkeypatch.setenv("GETTOWORK_HOME", str(home))
+    exes = {}
+    for tag in ("b7000", "b7200"):
+        folder = home / "runtime" / "llama.cpp" / f"{tag}-cuda-12"
+        folder.mkdir(parents=True)
+        (folder / "llama-server").write_bytes(b"#!dev engine")
+        (folder / "install.json").write_text(json.dumps({"tag": tag, "variant": "cuda-12", "exe": "llama-server",
+                                                         "assets": [f"llama-{tag}-bin-ubuntu-cuda-12-x64.tar.gz"]}))
+        exes[tag] = folder / "llama-server"
+    log = "unknown model architecture: 'qwen9'\nfailed to load model\n"
+    popen = FakePopen((log, FakeProcess(dies_with=1)), ("", FakeProcess()))
+    backend = make_backend(tmp_path, popen=popen, specs=make_specs(gpus=[NVIDIA]),
+                           installer=runtime_install.ensure_llama_server)
+    backend.server_exe, backend.variant = exes["b7000"], runtime_install.CUDA12
+    backend._ensure_engine = lambda ui: None
+    ui = make_ui()
+    backend.prepare(ui)
+    assert Path(popen.args[1][0]).resolve() == exes["b7200"].resolve()
+    said = " ".join(output(ui).split())
+    assert "trying another llama.cpp engine already on this computer (b7200) instead" in said
+    assert "the game has" not in said
+    backend.close()
+
+
+def test_when_the_games_newest_engine_is_the_one_that_failed_it_says_game_updates_bring_newer_ones(
+        tmp_path, monkeypatch, no_engine_downloads):
+    built_game(monkeypatch, tmp_path, "cpu", tag="b7100")
+    log = "unknown model architecture: 'qwen9'\n"
+    popen = FakePopen((log, FakeProcess(dies_with=1)))
+    backend = make_backend(tmp_path, popen=popen, installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    with pytest.raises(BackendError) as err:
+        backend.prepare(ui)
+    message = str(err.value)
+    assert "game updates bring newer engines" in message
+    # No line before the error suggesting a newer engine was tried: none was (the same one failed).
+    shown = " ".join(output(ui).split())
+    assert "newest llama.cpp engine in this copy" not in shown and "trying the newest engine" not in shown
+    assert "even the newest" not in message and "when you're online" not in message
+    assert len(popen.calls) == 1
+
+
+def test_a_mac_whose_metal_build_cant_run_isnt_told_to_verify_its_files(tmp_path, monkeypatch):
+    exes = built_game(monkeypatch, tmp_path, "metal")
+    monkeypatch.setattr(ls.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(ls.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(runtime_install, "_macos_version", lambda: (14, 0))
+    runtime_install.mark_unusable(exes["metal"], "cpu_unsupported")
+    ok, why = LlamaServerBackend(ENTRY, log_dir=tmp_path / "logs").is_available()
+    assert not ok and "Verify integrity" not in why and "can't run on this computer" in why
+    ok, why = make_backend(tmp_path, specs=make_specs("Darwin", "arm64", gpus=[APPLE])).is_available()
+    assert not ok and "Verify integrity" not in why
+
+
+def test_the_fallback_list_in_a_built_game_skips_builds_it_doesnt_have(tmp_path, monkeypatch):
+    specs = make_specs(gpus=[NVIDIA], flags=["vulkan"])  # plan: cuda-12, vulkan, cpu
+    backend = make_backend(tmp_path, specs=specs)
+    assert backend._fallback_variants(CUDA12) == [VULKAN, CPU]  # a developer copy can download either
+    built_game(monkeypatch, tmp_path, "cpu")
+    assert backend._fallback_variants(CUDA12) == [CPU]  # no Vulkan build inside the game
+    assert backend._fallback_variants(VULKAN) == [CPU]
+
+
+def test_built_game_picks_vulkan_when_the_plan_starts_with_cuda(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
+    popen = FakePopen((REAL_B11100_LOG + REAL_B11100_READY, FakeProcess()))
+    backend = make_backend(tmp_path, popen=popen, specs=make_specs(gpus=[NVIDIA], flags=["vulkan"]),
+                           installer=runtime_install.ensure_llama_server)
+    backend.prepare(make_ui())
+    assert Path(popen.args[0][0]).resolve() == exes["vulkan"].resolve()
+    assert backend.variant is VULKAN
+    backend.close()
+
+
+def test_a_bundled_engine_in_use_is_never_tidied_away(tmp_path, monkeypatch, no_engine_downloads):
+    exes = built_game(monkeypatch, tmp_path, "cpu")
+    older = tmp_path / "home" / "runtime" / "llama.cpp" / "b6000-cpu"
+    older.mkdir(parents=True)
+    (older / "llama-server").write_bytes(b"x" * 2_000_000)
+    (older / "install.json").write_text(json.dumps({"tag": "b6000", "variant": "cpu", "exe": "llama-server"}))
+    backend = make_backend(tmp_path, installer=runtime_install.ensure_llama_server)
+    ui = make_ui()
+    backend.prepare(ui)
+    assert backend.server_exe == exes["cpu"] and exes["cpu"].exists()
+    assert not older.exists()  # the player's old download is tidied; the game's own copy stays
+    assert "Tidied away 1 engine copy" in output(ui)
+    backend.close()

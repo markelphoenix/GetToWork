@@ -31,6 +31,17 @@ restyle or crash the terminal UI; and it goes through ``ui.safe_text``, which
 removes terminal control codes (which could otherwise retitle the window or
 draw over earlier lines).
 
+Family-friendly filter (``safety.py``): every piece of model text the player
+will see - the opening, each story and challenge, the endings and the
+referee's explanation - is checked first. A reply that doesn't pass is asked
+for once more with a firmer reminder (``prompts.safety_retry_messages``);
+if that fails too, a built-in line takes its place. Swearing is masked
+("d***") before anything is shown. A plan that doesn't pass is refused
+before it reaches the model or Jev, and the player simply tries another one.
+What the filter did is noted in the round record (``RoundRecord.safety_notes``)
+and in ``Game.safety_notes`` - categories only, never the words - and the
+transcript keeps a "hidden" note in place of any blocked reply.
+
 Speed: thinking models only think out loud when they're quick enough (see
 ``catalog.THINKING_MIN_TOKENS_PER_S``), and never for the story narration -
 a 120-word joke doesn't need it - so a turn never hides minutes of silent
@@ -40,7 +51,7 @@ pondering behind a spinner.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from rich.console import Group
 from rich.markdown import Markdown
@@ -52,11 +63,12 @@ from rich.text import Text
 from . import catalog
 from . import jev as jevlib
 from . import prompts
+from . import safety
 from .backends.base import BackendError, LLMBackend, supported_chat_options
 from .jev import JevClient, JevError
 from .prompts import COMMUTE_CHALLENGE
 from .types import GameSummary, JevVerdict, LLMResult, RoundRecord
-from .ui import UI, UserChoseQuit, plain, safe_text
+from .ui import UI, UserChoseQuit, option_hint, plain, safe_text
 
 __all__ = ["Game", "backup_verdict", "progress_meter", "probability_bar"]
 
@@ -90,7 +102,13 @@ SPINNERS = {
     "outcome": "The plot thickens…",
     "victory": "Rolling out the red carpet…",
     "ending_quit": "Writing your excuse note…",
+    "safety_retry": "Asking for a more family-friendly version…",
 }
+
+# What the player is told when the family-friendly filter steps in (see safety.py).
+FAMILY_FRIENDLY_REFUSAL = "Let's keep it family-friendly - try another plan!"
+SAFETY_RETRY_INFO = "That bit didn't pass the family-friendly filter, so I'm asking for a cleaner version…"
+SAFETY_BUILT_IN_INFO = "Still not quite family-friendly, so here's a built-in version instead."
 
 # Used when the model can't (or the player chooses to skip it).
 FALLBACK_INTRO = (
@@ -257,6 +275,22 @@ _BACKUP_REASONS = {
 CLOSE_CALL_LOW, CLOSE_CALL_HIGH = 0.35, 0.65
 
 
+def _screened_raw(value: Any) -> Any:
+    """A backend's raw answer with every piece of text through the family-friendly filter.
+
+    Blocked text becomes the short "hidden" note, milder swearing is masked;
+    numbers, labels and the structure are kept as they were.
+    """
+    if isinstance(value, str):
+        verdict = safety.check_text(value)
+        return safety.soften(value) if verdict.ok else safety.hidden_note(verdict)
+    if isinstance(value, dict):
+        return {key: _screened_raw(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_screened_raw(item) for item in value]
+    return value
+
+
 class _QuitGame(Exception):
     """The player chose "quit" from an error menu."""
 
@@ -309,6 +343,21 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def _first_flag(parts: Iterable[Optional[str]]) -> safety.SafetyVerdict:
+    """The family-friendly filter's verdict on several texts: the first one that doesn't pass, else OK."""
+    for part in parts:
+        verdict = safety.check_text(part)
+        if not verdict.ok:
+            return verdict
+    return safety.SafetyVerdict(ok=True)
+
+
+def _family_label(text: Any) -> str:
+    """A label that came back in Jev's reply: softened, or hidden if it doesn't pass the filter."""
+    cleaned = safe_text(text)
+    return safety.soften(cleaned) if safety.check_text(cleaned).ok else "(hidden)"
+
+
 # ---------------------------------------------------------------------------
 # The game
 # ---------------------------------------------------------------------------
@@ -337,6 +386,11 @@ class Game:
             answer straight away (no visible thinking), so turns stay quick.
         context_tokens: The model's context window, if the fit engine had to
             shorten it; small windows get shorter answers too.
+        taught: The "Learn" panels already shown this session (updated in
+            place), so a second game after "Play again" skips them.
+
+    After a game, ``safety_notes`` lists what the family-friendly filter did
+    (each round's share is also in its ``RoundRecord.safety_notes``).
     """
 
     def __init__(
@@ -353,6 +407,7 @@ class Game:
         secrets: Iterable[str] = (),
         thinking: Optional[str] = None,
         force_think: bool = False,
+        taught: Optional[set[str]] = None,
     ) -> None:
         if int(target) < 1:
             raise ValueError("target must be at least 1")
@@ -370,13 +425,18 @@ class Game:
         self._use_jev = jev is not None  # turned off if the player gives up on Jev after an error
         self._summary = GameSummary(won=False, quit_early=False, progress=0, target=self.target, intro="", ending="")
         self._history: list[str] = []  # one short line per finished round, for prompts and Jev
-        self._taught: set[str] = set()  # which "Learn" panels have been shown
+        # Which "Learn" panels have been shown. cli passes one set for the whole
+        # session, so "Play again" doesn't teach the same lessons a second time.
+        self._taught: set[str] = taught if taught is not None else set()
         self._pending_thought_words: Optional[int] = None  # first exposed reasoning, taught after display
         self._pending_thought_mock = False  # ...and whether it came from the scripted pretend model
         self._fallback_used: set[str] = set()
         self._commute: Optional[str] = None  # how the player said they'd travel (round 1)
         self._challenges_seen = 0  # the number of the obstacle on screen (= steps completed; the commute doesn't count)
         self._last_challenge: Optional[str] = None  # a failed round may show the same obstacle again
+        # Everything the family-friendly filter did this game (categories only, never the words).
+        self.safety_notes: list[str] = []
+        self._refusals: list[str] = []  # refused plans, noted in the next round's record
         small = context_tokens is not None and int(context_tokens) <= SMALL_CONTEXT_TOKENS
         fast = tokens_per_s is None or float(tokens_per_s) >= catalog.THINKING_MIN_TOKENS_PER_S
         self._may_think = (fast or bool(force_think)) and not small
@@ -390,10 +450,11 @@ class Game:
                 why = "its conversation memory had to be kept short to fit this computer"
             else:
                 why = f"it runs at about {float(tokens_per_s or 0):.0f} tokens/s here, and thinking makes each turn much longer"
+            hint = None if small else option_hint(ui, "--think", markup=False)  # (None: no command line to use)
             self.thinking_note = (
                 "Your model can think out loud, but I asked it to answer straight away this game because "
-                f"{why} - so there's no reasoning to show. "
-                + ("" if small else "Start the game with --think to see its thinking anyway (turns take longer).")
+                f"{why} - so there's no reasoning to show."
+                + (f" To see its thinking anyway (turns take longer), {hint}." if hint else "")
             )
         self._chat_options = supported_chat_options(llm)
         # Credentials the player might paste by accident as a plan (e.g. the Jev
@@ -439,6 +500,8 @@ class Game:
                 judge_explanation="",
                 progress_after=summary.progress,
             )
+            record.safety_notes.extend(self._refusals)  # plans refused before this one was accepted
+            self._refusals.clear()
             try:
                 backup_used = self._referee(record)
             except _QuitGame:
@@ -476,6 +539,7 @@ class Game:
         interactive: bool = True,
         think: Optional[bool] = None,
         stop: Optional[list[str]] = None,
+        spinner: Optional[str] = None,
     ) -> Optional[LLMResult]:
         """One local-model call, recorded in ``calls`` as ``(purpose, result)``.
 
@@ -483,8 +547,11 @@ class Game:
         ``skip_label`` is given; returns ``None``) or quit (raises
         ``_QuitGame``). With ``interactive=False`` an error just returns ``None``.
         ``think``/``stop`` are passed on to backends that support them.
+        Any exposed reasoning goes through the family-friendly filter straight
+        away (it's only ever shown in the review); the answer itself is checked
+        by the caller, once it has picked out the parts the player will see.
         """
-        spinner = SPINNERS.get(purpose, "Thinking…")
+        spinner = spinner or SPINNERS.get(purpose, "Thinking…")
         extra: dict[str, Any] = {}
         if think is not None and "think" in self._chat_options:
             extra["think"] = think
@@ -512,6 +579,12 @@ class Game:
                     return None
                 raise _QuitGame() from exc
             calls.append((purpose, result))
+            # The engine's raw answer (kept for the saved transcript) repeats the text and the
+            # thinking word for word: it gets the same filter, so nothing blocked or unmasked
+            # survives there either.
+            result.raw = _screened_raw(result.raw)
+            if result.reasoning and not self._screen_reasoning(purpose, result):
+                return result  # its reasoning was hidden: nothing to teach about
             if result.reasoning and self._pending_thought_words is None and "reasoning" not in self._taught:
                 self._pending_thought_words = len(result.reasoning.split())
                 self._pending_thought_mock = result.backend == "mock"
@@ -553,6 +626,108 @@ class Game:
             limit += ALWAYS_THINKING_EXTRA_TOKENS  # asking it to skip the thinking may not work
         return {"think": False, "max_tokens": limit, "stop": STORY_STOPS}
 
+    # -- the family-friendly filter (safety.py) ------------------------------------
+
+    def _family_friendly(
+        self,
+        purpose: str,
+        messages: list[dict[str, str]],
+        result: Optional[LLMResult],
+        read: Callable[[LLMResult], tuple[str, ...]],
+        *,
+        calls: list[tuple[str, LLMResult]],
+        options: dict[str, Any],
+        what: str,
+        record: Optional[RoundRecord] = None,
+    ) -> Optional[tuple[Optional[str], ...]]:
+        """Check the parts of a story reply the player will see, before they're shown.
+
+        ``read(result)`` picks those parts out of a reply - ``(story,)``, or
+        ``(narration, challenge)``. If any part doesn't pass the filter, the
+        model is asked once more (same request, firmer reminder). Parts that
+        still don't pass come back as ``None``, so the caller can use a
+        built-in line; the rest come back softened. ``None`` overall means
+        there was no reply at all (the player skipped it, or the model failed).
+        """
+        if result is None:
+            return None
+        parts = tuple(read(result))
+        verdict = _first_flag(parts)
+        self._screen_record(result, parts)
+        if verdict.ok:
+            return tuple(safety.soften(p) for p in parts)
+
+        self._safety_note(f"{what}: the model's reply didn't pass the family-friendly filter "
+                          f"({verdict.label}), so it was asked again.", record)
+        self.ui.info(SAFETY_RETRY_INFO)
+        retry = self._call_llm(purpose, prompts.safety_retry_messages(messages), calls=calls, interactive=False,
+                               spinner=SPINNERS["safety_retry"], **options)
+        if retry is not None:
+            parts = tuple(read(retry))
+            verdict = _first_flag(parts)
+            self._screen_record(retry, parts)
+            if verdict.ok:
+                self._safety_note(f"{what}: the second try passed the filter.", record)
+                return tuple(safety.soften(p) for p in parts)
+            self.ui.info(SAFETY_BUILT_IN_INFO)
+        self._safety_note(f"{what}: no family-friendly reply, so a built-in line was used instead.", record)
+        return tuple(safety.soften(p) if safety.check_text(p).ok else None for p in parts)
+
+    def _screen_record(self, result: Optional[LLMResult], parts: Iterable[str] = ()) -> None:
+        """Make the kept copy of a reply safe to show in the review and in saved transcripts.
+
+        A reply that didn't pass the filter (as a whole, or any of the ``parts``
+        picked out of it) is replaced by a short "hidden" note; otherwise its
+        swearing is masked. Call this only *after* reading the reply.
+        """
+        if result is None:
+            return
+        verdict = _first_flag((result.text, *parts))
+        if verdict.ok:
+            result.text = safety.soften(result.text)
+        else:
+            result.text = safety.hidden_note(verdict)
+            result.raw = None  # the engine's raw answer repeats the same text
+
+    def _screen_reasoning(self, purpose: str, result: LLMResult) -> bool:
+        """Filter a reply's exposed reasoning (shown in the review). False if it had to be hidden."""
+        verdict = safety.check_text(result.reasoning)
+        if verdict.ok:
+            result.reasoning = safety.soften(result.reasoning)
+            return True
+        result.reasoning = safety.hidden_note(verdict)
+        result.raw = None  # the engine's raw answer repeats the same thinking
+        self._safety_note(f"The model's reasoning ({purpose}) didn't pass the family-friendly filter "
+                          f"({verdict.label}) and was hidden.")
+        return False
+
+    def _safety_note(self, note: str, record: Optional[RoundRecord] = None) -> None:
+        """Remember what the filter did: for the whole game, and for the round when there is one."""
+        self.safety_notes.append(note)
+        if record is not None:
+            record.safety_notes.append(note)
+
+    def _built_in_story(self, record: RoundRecord) -> str:
+        """A safe, ready-made story line for this round, from the pretend model's script."""
+        from .backends import mock  # the same built-in lines the offline pretend model uses
+
+        plan, n = _clip(record.player_plan, 90), record.number
+        if record.challenge == COMMUTE_CHALLENGE:
+            lines = mock.COMMUTE_SUCCESS if record.made_progress else mock.COMMUTE_FAILURE
+            return lines[n % len(lines)].format(plan=plan)
+        openers = mock.SUCCESS_OPENERS if record.made_progress else mock.FAILURE_OPENERS
+        follow_ups = mock.SUCCESS_TRANSITIONS if record.made_progress else mock.FAILURE_TRANSITIONS
+        return f"{openers[n % len(openers)].format(plan=plan)} {follow_ups[n % len(follow_ups)]}"
+
+    @staticmethod
+    def _built_in_explanation(made_progress: bool, number: int) -> str:
+        """A safe referee explanation, used when the real one didn't pass the filter."""
+        from .backends import mock
+
+        if made_progress:
+            return mock.JUDGE_YES[number % len(mock.JUDGE_YES)]
+        return "That doesn't quite get you past it."
+
     # -- phases -------------------------------------------------------------------
 
     def _welcome(self) -> None:
@@ -581,16 +756,14 @@ class Game:
 
     def _opening(self) -> None:
         """The intro story. (No obstacle yet: round 1 asks how the player will get to work.)"""
-        result = self._call_llm(
-            "intro",
-            prompts.intro_messages(),
-            calls=self._summary.intro_calls,
-            skip_label="Skip it and use a built-in opening",
-            stop=STORY_STOPS,
-            **self._thinking_call(story=True),
-        )
-        narration = prompts.clean_story(result.text) if result is not None else ""
-        self._summary.intro = narration or FALLBACK_INTRO
+        messages = prompts.intro_messages()
+        options: dict[str, Any] = dict(stop=STORY_STOPS, **self._thinking_call(story=True))
+        calls = self._summary.intro_calls
+        result = self._call_llm("intro", messages, calls=calls, skip_label="Skip it and use a built-in opening",
+                                **options)
+        parts = self._family_friendly("intro", messages, result, lambda r: (prompts.clean_story(r.text),),
+                                      calls=calls, options=options, what="The opening story")
+        self._summary.intro = (parts[0] if parts else "") or FALLBACK_INTRO
         self.ui.narrate(plain(self._summary.intro), title="Good morning!")
         self._flush_thought_teach()
 
@@ -615,10 +788,21 @@ class Game:
                 self.ui.warn("That looks like your API key - I haven't used it as a plan or sent it anywhere. "
                              "Type what you do instead.")
                 continue
-            if len(text) > self.max_input_chars:
-                text = text[: self.max_input_chars].rstrip()
+            plan = text[: self.max_input_chars].rstrip() if len(text) > self.max_input_chars else text
+            # The family-friendly filter: a plan that doesn't pass never reaches the model or Jev,
+            # and doesn't use up a round - the player just tries another one.
+            verdict = safety.check_player_input(text)
+            if verdict.ok and plan != text:
+                verdict = safety.check_player_input(plan)  # trimming could leave a different word at the end
+            if not verdict.ok:
+                self.ui.warn(FAMILY_FRIENDLY_REFUSAL)
+                note = f"A plan was refused by the family-friendly filter ({verdict.label}); the player tried again."
+                self._safety_note(note)
+                self._refusals.append(note)
+                continue
+            if plan != text:
                 self.ui.info(f"That's an epic plan! I kept the first {self.max_input_chars} characters.")
-            return text
+            return safety.soften(plan)
 
     def _referee(self, record: RoundRecord) -> bool:
         """Decide whether the plan made progress. Returns True if the backup rule was used."""
@@ -628,9 +812,20 @@ class Game:
                 record.judge = "jev"
                 record.jev = verdict
                 record.made_progress = verdict.made_progress
-                record.judge_explanation = jevlib.explain_verdict(verdict)
+                record.judge_explanation = self._jev_explanation(record, verdict)
                 return False
         return self._judge_locally(record)
+
+    def _jev_explanation(self, record: RoundRecord, verdict: JevVerdict) -> str:
+        """Jev's verdict in words. The game writes the sentence, but the labels in it come from Jev's
+        reply, so it goes through the family-friendly filter too (a built-in line if it doesn't pass)."""
+        text = jevlib.explain_verdict(verdict)
+        checked = safety.check_text(text)
+        if checked.ok:
+            return safety.soften(text)
+        self._safety_note(f"Round {record.number} referee: Jev's answer didn't pass the family-friendly filter "
+                          f"({checked.label}), so a built-in explanation was used.", record)
+        return self._built_in_explanation(verdict.made_progress, record.number)
 
     def _ask_jev(self, record: RoundRecord) -> Optional[JevVerdict]:
         """Ask Jev; on any failure explain, keep the exchange, and return None (local fallback)."""
@@ -686,13 +881,25 @@ class Game:
             **self._thinking_call(story=False),
         )
         record.judge = "local"
-        result = self._call_llm("judge", messages, **options)
         plan = record.player_plan
-        parsed = prompts.parse_judge_json(result.text, plan=plan) if result is not None else None
-        if result is not None and parsed is None:
+
+        def read(reply: Optional[LLMResult]) -> Optional[tuple[bool, str]]:
+            return prompts.parse_judge_json(reply.text, plan=plan) if reply is not None else None
+
+        result = self._call_llm("judge", messages, **options)
+        replies: list[tuple[Optional[LLMResult], Optional[tuple[bool, str]]]] = []  # (reply, its verdict)
+        parsed = read(result)
+        replies.append((result, parsed))
+        # A garbled reply is shown back to the model once - unless it wasn't family-friendly
+        # either: then it isn't repeated, and the filter's retry below asks afresh.
+        if result is not None and parsed is None and safety.check_text(result.text).ok:
             self.ui.info("The referee's answer came out garbled - asking it once more, very clearly…")
             retry = self._call_llm("judge_retry", prompts.judge_retry_messages(messages, result.text), **options)
-            parsed = prompts.parse_judge_json(retry.text, plan=plan) if retry is not None else None
+            parsed = read(retry)
+            replies.append((retry, parsed))
+        parsed = self._family_friendly_verdict(record, messages, options, result, parsed, replies)
+        for reply, verdict in replies:  # the kept copies, made safe for the review and transcripts
+            self._screen_record(reply, (verdict[1],) if verdict is not None else ())
 
         if parsed is None:
             record.made_progress, record.judge_explanation = backup_verdict(
@@ -706,46 +913,90 @@ class Game:
             return True
         made_progress, explanation = parsed
         record.made_progress = made_progress
-        record.judge_explanation = explanation or (
+        record.judge_explanation = safety.soften(explanation) or (
             "That deals with it - progress!" if made_progress else "That doesn't quite get you past it."
         )
         return False
 
+    def _family_friendly_verdict(
+        self,
+        record: RoundRecord,
+        messages: list[dict[str, str]],
+        options: dict[str, Any],
+        first: Optional[LLMResult],
+        parsed: Optional[tuple[bool, str]],
+        replies: list[tuple[Optional[LLMResult], Optional[tuple[bool, str]]]],
+    ) -> Optional[tuple[bool, str]]:
+        """The referee's explanation through the family-friendly filter.
+
+        When the explanation (or an unreadable reply) doesn't pass, the model
+        is asked once more with a firmer reminder. A readable, clean answer
+        replaces the old one; otherwise the verdict stands (a yes/no can't be
+        rude) with a built-in explanation - or, with no verdict at all, the
+        backup rule decides as usual. Every reply is added to ``replies``.
+        """
+        if parsed is not None:
+            flagged = safety.check_text(parsed[1])
+        else:
+            flagged = safety.check_text(first.text) if first is not None else safety.SafetyVerdict(ok=True)
+        if flagged.ok:
+            return parsed
+        what = f"Round {record.number} referee"
+        self._safety_note(f"{what}: the model's answer didn't pass the family-friendly filter "
+                          f"({flagged.label}), so it was asked again.", record)
+        self.ui.info(SAFETY_RETRY_INFO)
+        again_options = {k: v for k, v in options.items() if k not in ("calls", "skip_label")}
+        again = self._call_llm("judge", prompts.safety_retry_messages(messages), calls=record.llm_calls,
+                               interactive=False, spinner=SPINNERS["safety_retry"], **again_options)
+        fresh = prompts.parse_judge_json(again.text, plan=record.player_plan) if again is not None else None
+        replies.append((again, fresh))
+        if fresh is not None and safety.check_text(fresh[1]).ok:
+            self._safety_note(f"{what}: the second try passed the filter.", record)
+            return fresh
+        if parsed is None:
+            self._safety_note(f"{what}: no family-friendly verdict, so the backup rule decided.", record)
+            return None
+        self._safety_note(f"{what}: no family-friendly explanation, so a built-in one was used.", record)
+        return parsed[0], self._built_in_explanation(parsed[0], record.number)
+
     def _outcome(self, record: RoundRecord, earlier_rounds: list[str]) -> str:
         """Narrate the consequences of the plan; returns the next challenge."""
         commute_round = record.challenge == COMMUTE_CHALLENGE
-        result = self._call_llm(
-            "outcome",
-            prompts.outcome_messages(
-                intro=self._summary.intro,
-                challenge=record.challenge,
-                plan=record.player_plan,
-                made_progress=record.made_progress,
-                judge_note=self._judge_note(record),
-                progress=self._summary.progress,
-                target=self.target,
-                history=earlier_rounds,
-                commute=self._commute,
-            ),
-            calls=record.llm_calls,
-            skip_label="Skip the story and carry on with a surprise challenge",
-            **self._story_call(),
+        messages = prompts.outcome_messages(
+            intro=self._summary.intro,
+            challenge=record.challenge,
+            plan=record.player_plan,
+            made_progress=record.made_progress,
+            judge_note=self._judge_note(record),
+            progress=self._summary.progress,
+            target=self.target,
+            history=earlier_rounds,
+            commute=self._commute,
         )
+        options = self._story_call()
+        result = self._call_llm("outcome", messages, calls=record.llm_calls,
+                                skip_label="Skip the story and carry on with a surprise challenge", **options)
+        checked = dict(calls=record.llm_calls, options=options, what=f"Round {record.number} story", record=record)
         if commute_round and not record.made_progress:
             # They haven't set off yet: tell the comic story, then ask again how they'll travel.
-            story = prompts.clean_story(result.text) if result is not None else ""
+            parts = self._family_friendly("outcome", messages, result, lambda r: (prompts.clean_story(r.text),),
+                                          **checked)
+            story = parts[0] if parts else ""
+            if story is None:
+                story = self._built_in_story(record)
             if story:
                 self.ui.narrate(plain(story), title="What happens next")
             self._flush_thought_teach()
             return COMMUTE_CHALLENGE
-        narration, challenge = ("", "")
-        if result is not None:
-            narration, challenge = prompts.parse_challenge(
-                result.text,
-                # After a win the obstacle must be new; after a failure the same one may stay.
-                current=record.challenge if record.made_progress and not commute_round else None,
-                truncated=result.truncated,
-            )
+        # After a win the obstacle must be new; after a failure the same one may stay.
+        current = record.challenge if record.made_progress and not commute_round else None
+        parts = self._family_friendly(
+            "outcome", messages, result,
+            lambda r: prompts.parse_challenge(r.text, current=current, truncated=r.truncated), **checked,
+        )
+        narration, challenge = parts if parts else ("", "")
+        if narration is None:
+            narration = self._built_in_story(record)
         if narration:
             self.ui.narrate(plain(narration), title="What happens next")
         self._flush_thought_teach()
@@ -754,17 +1005,17 @@ class Game:
     def _finish_victory(self, record: RoundRecord) -> GameSummary:
         summary = self._summary
         summary.won = True
+        messages = prompts.victory_messages(intro=summary.intro, history=list(self._history),
+                                            final_plan=record.player_plan)
+        options = self._story_call()
         try:
-            result = self._call_llm(
-                "victory",
-                prompts.victory_messages(intro=summary.intro, history=list(self._history), final_plan=record.player_plan),
-                calls=summary.ending_calls,
-                skip_label="Skip straight to the celebration",
-                **self._story_call(),
-            )
+            result = self._call_llm("victory", messages, calls=summary.ending_calls,
+                                    skip_label="Skip straight to the celebration", **options)
         except _QuitGame:
             result = None  # you won anyway!
-        summary.ending = (prompts.clean_story(result.text) if result is not None else "") or FALLBACK_VICTORY
+        parts = self._family_friendly("victory", messages, result, lambda r: (prompts.clean_story(r.text),),
+                                      calls=summary.ending_calls, options=options, what="The victory story")
+        summary.ending = (parts[0] if parts else "") or FALLBACK_VICTORY
         self.ui.console.print()
         self.ui.console.print(self._meter_line())
         self.ui.console.print(
@@ -778,18 +1029,16 @@ class Game:
         """End early. ``narrate=False`` skips the model (e.g. it just failed)."""
         summary = self._summary
         summary.quit_early = True
-        story = ""
+        story: Optional[str] = ""
         if narrate:
-            result = self._call_llm(
-                "ending_quit",
-                prompts.quit_messages(
-                    intro=summary.intro, history=list(self._history), progress=summary.progress, target=self.target
-                ),
-                calls=summary.ending_calls,
-                interactive=False,
-                **self._story_call(),
+            messages = prompts.quit_messages(
+                intro=summary.intro, history=list(self._history), progress=summary.progress, target=self.target
             )
-            story = prompts.clean_story(result.text) if result is not None else ""
+            options = self._story_call()
+            result = self._call_llm("ending_quit", messages, calls=summary.ending_calls, interactive=False, **options)
+            parts = self._family_friendly("ending_quit", messages, result, lambda r: (prompts.clean_story(r.text),),
+                                          calls=summary.ending_calls, options=options, what="The goodbye story")
+            story = parts[0] if parts else ""
         summary.ending = story or FALLBACK_QUIT
         self.ui.narrate(plain(summary.ending), title="See you tomorrow?")
         self.ui.info(
@@ -921,7 +1170,7 @@ class Game:
         agrees, direction = _OUTCOME_FLAVOUR.get(verdict.outcome, (None, ""))
         creativity = f"rated its creativity {verdict.creativity:.1f} out of 4"
         if agrees == record.made_progress:
-            note = f'Jev filed the outcome under "{verdict.outcome}" and {creativity}.'
+            note = f'Jev filed the outcome under "{_family_label(verdict.outcome)}" and {creativity}.'
             return note + (" " + direction if direction else "")
         return f"Jev {creativity}."
 
@@ -965,10 +1214,10 @@ def _jev_verdict_panel(verdict: JevVerdict) -> Panel:
     grid.add_row("", "", Text("=> that counts as progress!" if made else "=> not enough to count this time", style=f"bold {tone}"))
     grid.add_row("", "", "")
 
-    grid.add_row("Choice", "outcome", Text.assemble((safe_text(verdict.outcome), "bold"), f"  ({_pct(verdict.outcome_confidence)} confident)"))
+    grid.add_row("Choice", "outcome", Text.assemble((_family_label(verdict.outcome), "bold"), f"  ({_pct(verdict.outcome_confidence)} confident)"))
     for label, probability in _ordered_probabilities(verdict.outcome_probabilities):
         marker = ">" if label == verdict.outcome else " "
-        grid.add_row("", "", Text.assemble(f"{marker} {safe_text(label):<9} ", (f"[{probability_bar(probability, 12)}]", "cyan"), f" {_pct(probability):>4}"))
+        grid.add_row("", "", Text.assemble(f"{marker} {_family_label(label):<9} ", (f"[{probability_bar(probability, 12)}]", "cyan"), f" {_pct(probability):>4}"))
     grid.add_row("", "", "")
 
     top = _score_top(verdict)
@@ -984,14 +1233,14 @@ def _jev_verdict_panel(verdict: JevVerdict) -> Panel:
     )
     nearest = _nearest_level(verdict)
     if nearest:
-        grid.add_row("", "", Text(f'nearest level: "{safe_text(nearest)}"', style="dim"))
+        grid.add_row("", "", Text(f'nearest level: "{_family_label(nearest)}"', style="dim"))
 
     parts: list[Any] = [grid]
     agrees = _OUTCOME_FLAVOUR.get(verdict.outcome, (None, ""))[0]
     if agrees is not None and agrees != made:
         # The two answers point different ways: worth explaining, not a bug. Only a
         # Noul near 50% is a close call; otherwise the questions simply disagree.
-        outcome = safe_text(verdict.outcome)
+        outcome = _family_label(verdict.outcome)
         if CLOSE_CALL_LOW <= p_yes <= CLOSE_CALL_HIGH:
             note = (f"Only the Noul decides progress. Here the Choice leans the other way (\"{outcome}\"), "
                     f"which is a sign of a close call ({_pct(p_yes)} chance of yes).")

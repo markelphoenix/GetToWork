@@ -921,6 +921,8 @@ def _cpu_verdict(specs: SystemSpecs) -> str:
 
     runnable = [f for f in catalog.rank_models(specs) if f.verdict != "no"]
     if not runnable:
+        if catalog.disk_space_needed(specs) is not None:
+            return "there's plenty of memory, but too little free disk space for any model right now (see below)."
         return "memory is very tight, so I'll look for the tiniest model that still fits (there may not be one)."
     comfortable = [f for f in runnable if (f.est_tokens_per_s or 0.0) >= _COMFORTABLE_TOKENS_PER_S]
     if not comfortable:
@@ -989,8 +991,38 @@ def friendly_summary(specs: SystemSpecs) -> str:
         text = f"You've got {ram} of RAM and {why}, so models will run on {cpu} — {_cpu_verdict(specs)}"
 
     if 0 <= specs.disk_free_gb < 10:
-        text += (
-            f" Heads up: only about {specs.disk_free_gb:.0f} GB of disk space is free, "
-            "so we'll favour smaller downloads."
-        )
+        from . import catalog
+
+        need = catalog.disk_space_needed(specs)
+        if need is not None:
+            text += " " + disk_space_advice(specs.disk_free_gb, need)
+        else:
+            text += (
+                f" Heads up: only about {specs.disk_free_gb:.0f} GB of disk space is free, "
+                "so we'll favour smaller downloads."
+            )
     return text
+
+
+MODELS_DIR_HINT = "--models-dir <folder>"
+
+
+def _gb_text(value: float) -> str:
+    return f"{value:.1f}" if value < 10 else f"{value:.0f}"
+
+
+_DEFAULT_MODELS_DIR_HOW = f"start the game with {MODELS_DIR_HINT} (on Steam: add it to the game's Launch Options)"
+
+
+def disk_space_advice(free_gb: float, need_gb: float, *, how: Optional[str] = _DEFAULT_MODELS_DIR_HOW) -> str:
+    """"Not enough free disk space for any model..." with the ways out, as plain text.
+
+    `how` says how this player can start the game with ``--models-dir``
+    (see :func:`gettowork.ui.option_hint`); None when they can't (a
+    double-clicked build has no command line): then freeing space is the way.
+    """
+    text = (f"Not enough free disk space for any model: the smallest needs about {_gb_text(need_gb)} GB free, and "
+            f"only {_gb_text(max(free_gb, 0.0))} GB is.")
+    if how is None:
+        return text + " Free up some space, then start the game again."
+    return text + f" Free up some space, or keep models on another drive - {how} (the game remembers it)."

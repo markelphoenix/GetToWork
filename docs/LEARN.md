@@ -637,12 +637,16 @@ CUDA 13 leaves out older NVIDIA cards (GTX 9xx/10xx and Titan V - "compute
 capability" below 7.5), so on those the game goes straight to CUDA 12, even
 with driver 580.
 
-It finds the right archive on the GitHub releases page by matching file
-names with forgiving patterns (names change slightly over time), checks the
-download's size and SHA-256 fingerprint against what GitHub reports, and
-unpacks it into the game's own folder. If a GPU build crashes on start-up,
-the game reads the engine's log, explains the problem, and moves on to the
-next build.
+Run from source, the game finds the right archive on the GitHub releases
+page by matching file names with forgiving patterns (names change slightly
+over time), checks the download's size and SHA-256 fingerprint against what
+GitHub reports, and unpacks it into the game's own folder. The Steam and
+test builds skip the download: they carry official builds inside the game
+(Vulkan and CPU on Windows and Linux, Metal on a Mac), checked the same way
+when the game was built, and pick the best one from the table that's there -
+a PC whose list starts with CUDA uses the built-in Vulkan build. Either way,
+if a GPU build crashes on start-up, the game reads the engine's log, explains
+the problem, and moves on to the next build.
 
 > **A security lesson hiding in the installer.** An archive can contain file
 > names like `../../somewhere/else`. A naive unzip would write outside the
@@ -952,7 +956,20 @@ simple defences, all visible in [`prompts.py`](../src/gettowork/prompts.py) and
    the window or draw over earlier lines either.
 
 These defences *reduce* the risk; they don't eliminate it. Clever injections
-sometimes work anyway, especially on small models. That's one more argument
+sometimes work anyway, especially on small models.
+
+There's one more guard, on the way *out*. Because the story is written live,
+nobody checks it before you read it - so the game does.
+[`safety.py`](../src/gettowork/safety.py) checks everything the model writes
+(and every plan you type) for things that don't belong in a family game. It
+first *normalises* the text - lower case, accents removed, leetspeak such as
+`h3ll0` read as letters, `s p a c e d` letters joined - and then matches
+whole words only, which is why "Scunthorpe" and "classic" never trip it. A
+reply that fails is requested again with a firmer reminder, and replaced by a
+pre-written line if it fails twice; mild swearing is just masked (`d***`).
+Word lists like this are blunt tools that miss things and need care to avoid
+false alarms, which is why the game uses them *as well as* good prompts, not
+instead of them. That's one more argument
 for typed answers: a Noul can only ever return a probability, so even a fooled
 judge can't slip extra instructions into your program. The golden rule: never
 give an AI's output more power than it needs.
@@ -963,7 +980,8 @@ give an AI's output more power than it needs.
 
 ## Part 12: Try this
 
-Hands-on exercises, roughly easiest first.
+Hands-on exercises, roughly easiest first. (Playing a Steam or test build?
+Type `gettowork-cli` wherever these say `gettowork`.)
 
 1. **Meet your hardware.** Run `gettowork --specs`. Which is faster, your RAM
    or your graphics card's memory, and by how much?
@@ -992,7 +1010,8 @@ Hands-on exercises, roughly easiest first.
    Find the exact messages sent to your local model and the full Jev exchange.
    Can you find your API key anywhere? (You shouldn't!)
 10. **Talk to the engine yourself.** Find `llama-server` (`llama-server.exe`
-    on Windows) in the game's `runtime/llama.cpp/` folder and a model in
+    on Windows) in the game's `runtime/llama.cpp/` folder (in a Steam or test
+    build: the `engine/` folder inside the game) and a model in
     `models/`, then run `llama-server -m <model.gguf> --port 8080` from inside
     that folder (on Linux you may need `LD_LIBRARY_PATH=. ./llama-server ...`)
     and open `http://127.0.0.1:8080` in your browser for llama.cpp's own chat

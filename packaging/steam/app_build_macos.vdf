@@ -1,0 +1,25 @@
+// SteamPipe app build: uploads the macOS depot of Get To Work.
+//
+// 1. Replace <APP_ID> and <DEPOT_ID_MAC> with the numbers from Steamworks
+//    (App Admin > SteamPipe > Depots) and <VERSION> with the game's version.
+// 2. Put this folder's .vdf files in ContentBuilder/scripts/ and unpack the
+//    macOS build archive into ContentBuilder/content/macos/ (see README.md).
+// 3. From ContentBuilder/, with the SDK's SteamCMD (builder_osx/steamcmd.sh on a Mac, builder_linux/steamcmd.sh
+//    on Linux; an installed steamcmd works too):
+//    ./builder_osx/steamcmd.sh +login <builder account> +run_app_build "$PWD/scripts/app_build_macos.vdf" +quit
+//
+// Paths are relative to this file. The build is uploaded but not made live:
+// set it live on a branch on the Builds page (or put a branch name in SetLive).
+"AppBuild"
+{
+	"AppID" "<APP_ID>"
+	"Desc" "Get To Work <VERSION> (macOS)"
+	"ContentRoot" "../content/"
+	"BuildOutput" "../output/"
+	"Preview" "0"
+	"SetLive" ""
+	"Depots"
+	{
+		"<DEPOT_ID_MAC>" "depot_build_macos.vdf"
+	}
+}

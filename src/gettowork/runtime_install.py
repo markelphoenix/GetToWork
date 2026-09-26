@@ -19,6 +19,15 @@ ready-made build the llama.cpp team publishes on GitHub for every release:
 Everything lives in ``config.runtime_dir()/llama.cpp/<tag>-<variant>/``.
 Deleting that folder uninstalls it: no admin rights, nothing system-wide.
 
+**The built game (Steam, or a double-clicked download)** ships the engine
+*inside* the game instead - one ``<tag>-<variant>/`` folder per build in its
+``engine`` folder, found through :mod:`gettowork.distribution` - and never
+downloads programs while you play. Those built-in builds are read-only: they
+are listed by :func:`installed_runtimes` like any other install, but never
+tidied away or changed (a note that one can't run on this computer goes into
+``config.runtime_dir()/bundled-unusable.json`` instead), and
+:func:`ensure_llama_server` picks from them without touching the network.
+
 The HTTP layer is a tiny wrapper around the standard library
 (``urllib.request``) so you can see exactly what is sent; tests swap in a fake.
 """
@@ -35,6 +44,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tarfile
 import tempfile
 import time
@@ -48,7 +58,7 @@ from typing import Any, Mapping, Optional
 
 from rich.markup import escape
 
-from . import __version__, config
+from . import __version__, config, distribution
 from .tls import CERTIFICATE_HELP, https_context, is_certificate_error
 from .types import SystemSpecs
 from .ui import UI
@@ -69,17 +79,37 @@ __all__ = [
     "plan_variants",
     "select_assets",
     "pick_release",
+    "releases_newest_first",
     "fetch_releases",
+    "fetch_release",
+    "download_asset",
+    "unpack_archive",
+    "finish_unpacked",
+    "install_marker",
     "ensure_llama_server",
     "installed_runtimes",
     "install_info",
+    "downloads_allowed",
+    "is_bundled",
+    "find_installed",
+    "choose_installed",
+    "relocate_engine",
+    "own_build_instead",
+    "own_builds_first",
+    "engine_architectures",
+    "other_engines_hint",
+    "llama_cpp_python_possible",
+    "engine_summary",
+    "ENGINE_MISSING_MESSAGE",
     "mark_unusable",
     "unusable_variants",
     "unusable_reasons",
     "unusable_message",
     "usable_plan",
+    "available_plan",
     "prune_old_installs",
     "engine_problem",
+    "bundled_builds_problem",
     "platform_problem",
     "engine_can_use_gpu",
     "license_text",
@@ -88,6 +118,8 @@ __all__ = [
     "UrllibHttp",
     "HttpResponse",
     "RUNTIME_EXPLAINER",
+    "RUNTIME_EXPLAINER_BUILT_IN",
+    "runtime_explainer",
 ]
 
 LLAMA_CPP_REPO = "ggml-org/llama.cpp"
@@ -99,6 +131,14 @@ GITHUB_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 
 INSTALL_MARKER = "install.json"
+# Notes about built-in (bundled) builds that can't run on this computer live in
+# the player's own data folder: the game's folder is read-only (and on a Mac,
+# writing into the app would break its signature).
+BUNDLED_UNUSABLE_FILE = "bundled-unusable.json"
+ENGINE_MISSING_MESSAGE = (
+    "The game's built-in engine is missing. On Steam: right-click Get To Work → Properties → Installed Files → "
+    "Verify integrity. Otherwise re-download the game."
+)
 SERVER_NAMES = ("llama-server", "llama-server.exe")
 PROJECT_URL = "https://github.com/markelphoenix/GetToWork"  # who is making these requests (User-Agent)
 USER_AGENT = f"GetToWork/{__version__} (+{PROJECT_URL})"
@@ -352,24 +392,21 @@ def platform_problem(os_name: str, arch: str, *, glibc: Optional[tuple[int, int]
     """
     os_key, arch_key = _os_key(os_name), _arch_key(arch)
     if os_key is None or arch_key is None:
-        return (f"There's no official prebuilt llama.cpp engine for {os_name} on {arch}. "
-                "Ollama or llama-cpp-python may still work.")
+        return f"There's no official prebuilt llama.cpp engine for {os_name} on {arch}. " + other_engines_hint("may still work")
     if os_key == "linux":
         glibc = glibc if glibc is not None else (_glibc_version() if live else None)
         need = LINUX_MIN_GLIBC[arch_key]
         if glibc is not None and glibc < need:
             return (f"The official llama.cpp engine needs a newer Linux than this one (glibc {_fmt_version(need)} "
-                    f"or newer; this computer has {_fmt_version(glibc)}), so it couldn't start here. Ollama "
-                    f"({OLLAMA_DOWNLOAD_URL}) or `pip install llama-cpp-python` (which builds the engine on "
-                    "your computer) should still work.")
+                    f"or newer; this computer has {_fmt_version(glibc)}), so it couldn't start here. "
+                    + other_engines_hint())
     if os_key == "darwin":
         macos = macos if macos is not None else (_macos_version() if live else None)
         if macos == (10, 16):
             macos = None  # Apple's compatibility answer to old-SDK programs, never a real version
         if macos is not None and macos < MACOS_MIN_VERSION:
             return (f"The official llama.cpp engine needs macOS {_fmt_version(MACOS_MIN_VERSION)} or newer "
-                    f"(this Mac has {_fmt_version(macos)}). Ollama ({OLLAMA_DOWNLOAD_URL}) or "
-                    "`pip install llama-cpp-python` may still work.")
+                    f"(this Mac has {_fmt_version(macos)}). " + other_engines_hint("may still work"))
     return None
 
 
@@ -468,7 +505,11 @@ def engine_can_use_gpu(specs: SystemSpecs) -> bool:
     engine can't deliver.
     """
     try:
-        return any(v.gpu for v in usable_plan(specs))  # builds known not to run here don't count
+        plan = usable_plan(specs)  # builds known not to run here don't count
+        if not downloads_allowed():
+            # A built game can only use the builds it ships with (e.g. Vulkan, not CUDA).
+            return any(v.gpu and find_installed(v, specs) is not None for v in plan)
+        return any(v.gpu for v in plan)
     except Exception:
         return True  # unsure: don't hide the GPU
 
@@ -575,16 +616,21 @@ def _tag_number(tag: str) -> int:
     return int(m.group(1)) if m else -1
 
 
-def pick_release(
-    releases: list[dict], variant: RuntimeVariant, os_name: str, arch: str
-) -> Optional[tuple[dict, list[dict]]]:
-    """The newest release that has a build for `variant`, with its assets."""
+def releases_newest_first(releases: list[dict]) -> list[dict]:
+    """The published (non-draft) releases, newest first (by date, then tag number)."""
     candidates = [r for r in releases or [] if isinstance(r, dict) and not r.get("draft")]
     candidates.sort(
         key=lambda r: (str(r.get("published_at") or r.get("created_at") or ""), _tag_number(str(r.get("tag_name", "")))),
         reverse=True,
     )
-    for release in candidates:
+    return candidates
+
+
+def pick_release(
+    releases: list[dict], variant: RuntimeVariant, os_name: str, arch: str
+) -> Optional[tuple[dict, list[dict]]]:
+    """The newest release that has a build for `variant`, with its assets."""
+    for release in releases_newest_first(releases):
         chosen = select_assets(release.get("assets") or [], variant, os_name, arch)
         if chosen:
             return release, chosen
@@ -706,17 +752,13 @@ def _github_headers(*, use_token: bool = True) -> dict[str, str]:
     return headers
 
 
-def fetch_releases(*, http: Any = None, limit: int = 8, ui: Optional[UI] = None) -> list[dict]:
-    """List the newest llama.cpp releases from the GitHub API (newest first).
+def _github_get(http: Any, url: str, ui: Optional[UI]) -> tuple[int, bytes]:
+    """GET a GitHub API address; returns ``(status, body)``.
 
-    Uses ``GET /repos/ggml-org/llama.cpp/releases?per_page=N`` rather than
-    ``/releases/latest``, because llama.cpp publishes builds as prereleases.
     If GitHub rejects an old or mistyped ``GITHUB_TOKEN`` (HTTP 401 - it does
-    that even for public data), we ask once more without it.
-    Raises RuntimeInstallError with a friendly message on any failure.
+    that even for public data), we ask once more without it. Network trouble
+    and GitHub's rate limit raise RuntimeInstallError with a friendly message.
     """
-    http = http or UrllibHttp()
-    url = f"{GITHUB_RELEASES_API}?per_page={max(1, min(int(limit), 100))}"
 
     def ask(use_token: bool) -> tuple[int, bytes, Optional[str]]:
         try:
@@ -751,18 +793,59 @@ def fetch_releases(*, http: Any = None, limit: int = 8, ui: Optional[UI] = None)
             "limit). Please try again a bit later - or set a GITHUB_TOKEN environment variable "
             f"to raise the limit, or use Ollama ({OLLAMA_DOWNLOAD_URL})."
         )
+    return status, raw or b""
+
+
+def _json_body(raw: bytes) -> Any:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeInstallError("GitHub sent back something I couldn't understand. Please try again later.") from exc
+
+
+def fetch_releases(*, http: Any = None, limit: int = 8, ui: Optional[UI] = None) -> list[dict]:
+    """List the newest llama.cpp releases from the GitHub API (newest first).
+
+    Uses ``GET /repos/ggml-org/llama.cpp/releases?per_page=N`` rather than
+    ``/releases/latest``, because llama.cpp publishes builds as prereleases.
+    If GitHub rejects an old or mistyped ``GITHUB_TOKEN`` (HTTP 401 - it does
+    that even for public data), we ask once more without it.
+    Raises RuntimeInstallError with a friendly message on any failure.
+    """
+    http = http or UrllibHttp()
+    url = f"{GITHUB_RELEASES_API}?per_page={max(1, min(int(limit), 100))}"
+    status, raw = _github_get(http, url, ui)
     if status != 200:
         raise RuntimeInstallError(
             f"GitHub answered with an unexpected status (HTTP {status}) when I asked for the "
             "llama.cpp releases. Please try again later, or use Ollama instead."
         )
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except ValueError as exc:
-        raise RuntimeInstallError("GitHub sent back something I couldn't understand. Please try again later.") from exc
+    data = _json_body(raw)
     if not isinstance(data, list):
         raise RuntimeInstallError("GitHub's release list looked unusual. Please try again later.")
     return [r for r in data if isinstance(r, dict)]
+
+
+def fetch_release(tag: str, *, http: Any = None, ui: Optional[UI] = None) -> dict:
+    """One llama.cpp release by its tag (e.g. ``"b7000"``), via ``GET /releases/tags/<tag>``.
+
+    Used by ``packaging/fetch_engine.py`` to bundle an exact, pinned release.
+    Raises RuntimeInstallError with a friendly message on any failure.
+    """
+    http = http or UrllibHttp()
+    url = f"{GITHUB_RELEASES_API}/tags/{urllib.parse.quote(str(tag), safe='')}"
+    status, raw = _github_get(http, url, ui)
+    if status == 404:
+        raise RuntimeInstallError(f"There's no llama.cpp release called {tag!r} on GitHub.")
+    if status != 200:
+        raise RuntimeInstallError(
+            f"GitHub answered with an unexpected status (HTTP {status}) when I asked for the "
+            f"llama.cpp release {tag}. Please try again later."
+        )
+    data = _json_body(raw)
+    if not isinstance(data, dict):
+        raise RuntimeInstallError("GitHub's answer about that release looked unusual. Please try again later.")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -858,6 +941,18 @@ def _download_asset(http: Any, asset: dict, folder: Path, ui: UI, description: s
         with contextlib.suppress(OSError):
             part.unlink()
         raise
+
+
+def download_asset(http: Any, asset: dict, folder: Path, ui: Any, description: str = "llama.cpp engine") -> Path:
+    """Download one release file (a GitHub asset dict) into `folder`, checked, and return its path.
+
+    The size and SHA-256 fingerprint GitHub publishes are verified before the
+    file appears under its real name; anything that fails is deleted. `ui`
+    only needs a ``download_progress(description, total_bytes)`` context
+    manager yielding ``advance(n)`` (a :class:`~gettowork.ui.UI` has one).
+    Raises RuntimeInstallError with a friendly message.
+    """
+    return _download_asset(http, asset, Path(folder), ui, description)
 
 
 # ---------------------------------------------------------------------------
@@ -1085,6 +1180,56 @@ def find_server_executable(folder: Path) -> Optional[Path]:
     return min(hits, key=lambda p: (len(p.relative_to(folder).parts), str(p)))
 
 
+def unpack_archive(archive: Path, payload: Path, scratch: Path) -> None:
+    """Safely unpack one engine archive into `scratch`, then merge it into `payload`.
+
+    Tarballs wrap everything in ``llama-<tag>/``; that wrapper is dropped, so
+    every archive of a build (e.g. CUDA + its runtime) ends up side by side
+    in one folder, next to ``llama-server``.
+    """
+    safe_extract(archive, scratch)
+    _merge_tree(_single_top_dir(Path(scratch)), Path(payload))
+
+
+def finish_unpacked(payload: Path) -> Path:
+    """Make the unpacked programs executable and return ``llama-server`` (or raise)."""
+    _make_executable(payload)
+    exe = find_server_executable(payload)
+    if exe is None:
+        raise RuntimeInstallError(
+            "The downloaded engine didn't contain llama-server, which is unusual. "
+            "Please try again later (the llama.cpp team may be mid-release)."
+        )
+    return exe
+
+
+def install_marker(release: dict, assets: list[dict], variant: RuntimeVariant, rel_exe: str, *,
+                   bundled: bool = False, license_files: Optional[list[str]] = None) -> dict:
+    """The ``install.json`` note written next to every engine build.
+
+    It records where the build came from (release tag, archives, licenses)
+    and where ``llama-server`` is inside the folder. ``bundled=True`` marks a
+    build that ships inside the game (read-only, never tidied away).
+    """
+    tag = str(release.get("tag_name") or "unknown")
+    marker: dict[str, Any] = {
+        "tag": tag,
+        "variant": variant.name,
+        "label": variant.display,
+        "assets": [a["name"] for a in assets],
+        "exe": rel_exe,
+        "source": str(release.get("html_url") or f"{LLAMA_CPP_URL}/releases/tag/{tag}"),
+        "license": LLAMA_CPP_LICENSE,  # llama.cpp itself
+        "licenses": {a["name"]: _asset_license(a) for a in assets},  # per downloaded archive
+        "installed_at": int(time.time()),
+    }
+    if license_files:
+        marker["license_files"] = list(license_files)
+    if bundled:
+        marker["bundled"] = True
+    return marker
+
+
 # ---------------------------------------------------------------------------
 # Installed runtimes
 # ---------------------------------------------------------------------------
@@ -1102,31 +1247,368 @@ def _read_marker(folder: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def installed_runtimes(runtime_root: Optional[Path] = None) -> list[tuple[Path, str, str]]:
-    """Engines installed earlier, newest first, as ``(exe, tag, variant_name)``.
+def downloads_allowed() -> bool:
+    """May the game download llama.cpp builds? False in a built game (see :mod:`gettowork.distribution`)."""
+    try:
+        return bool(distribution.load().engine_downloads)
+    except Exception:
+        return True
 
-    Only complete installs count: each has an ``install.json`` marker and its
-    ``llama-server`` executable still exists. Builds marked unusable on this
-    computer (see :func:`mark_unusable`) are left out.
+
+def llama_cpp_python_possible() -> bool:
+    """Could the player switch to the ``llama-cpp-python`` package? Not in a built game.
+
+    A built game (Steam, the double-click builds) has no ``pip``, PyInstaller
+    builds only see the packages frozen into them, and the build leaves
+    ``llama_cpp`` out - so advice to ``pip install llama-cpp-python`` could
+    never work there.
+    """
+    return not getattr(sys, "frozen", False) and downloads_allowed()
+
+
+def other_engines_hint(verb: str = "should still work") -> str:
+    """What else can run a model when llama.cpp's own engine can't, in one sentence.
+
+    Ollama always; ``pip install llama-cpp-python`` only where that is possible
+    (see :func:`llama_cpp_python_possible`).
+    """
+    if llama_cpp_python_possible():
+        return (f"Ollama ({OLLAMA_DOWNLOAD_URL}) or `pip install llama-cpp-python` (which builds the engine on your "
+                f"computer) {verb}.")
+    return (f"The free Ollama app ({OLLAMA_DOWNLOAD_URL}) {verb}: install it and start it, and the game will use it "
+            "the next time you pick a model.")
+
+
+def _engine_dirs() -> tuple[Path, ...]:
+    """The folders holding the builds that ship inside the game (none in a developer copy)."""
+    try:
+        return tuple(Path(d) for d in distribution.load().engine_dirs)
+    except Exception:
+        return ()
+
+
+def _marker_exe(folder: Path, marker: dict) -> Optional[Path]:
+    """Where a marker says ``llama-server`` is inside `folder` (None if it names no file that exists)."""
+    rel = marker.get("exe")
+    if not isinstance(rel, str) or not rel:
+        return None
+    exe = folder / Path(*PurePosixPath(rel).parts)
+    try:
+        return exe if exe.is_file() else None
+    except OSError:
+        return None
+
+
+def _bundled_builds() -> list[tuple[Path, dict, Path]]:
+    """Every engine build shipped inside the game, as ``(folder, marker, exe)``.
+
+    Each engine folder holds one ``<tag>-<variant>/`` sub-folder per build
+    (an engine folder that holds an ``install.json`` itself also counts, for
+    testing). Builds noted as unusable here are included - see
+    :func:`installed_runtimes` for the ones that can run.
+    """
+    found: list[tuple[Path, dict, Path]] = []
+    seen: set[str] = set()
+    for root in _engine_dirs():
+        try:
+            if not root.is_dir():
+                continue
+            if (root / INSTALL_MARKER).is_file():
+                folders = [root]
+            else:
+                folders = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        except OSError:
+            continue
+        for folder in folders:
+            marker = _read_marker(folder)
+            exe = _marker_exe(folder, marker) if marker else None
+            if marker is None or exe is None:
+                continue  # not a complete build
+            key = os.path.normcase(os.path.realpath(exe))
+            if key not in seen:
+                seen.add(key)
+                found.append((folder, marker, exe))
+    return found
+
+
+def engine_architectures() -> Optional[frozenset[str]]:
+    """The model architectures a built game's own engine can load; None = not limited (or not known).
+
+    A built game can't update its engine, so a model of an architecture its
+    llama.cpp release doesn't know yet ("unknown model architecture") can
+    never run there. ``packaging/fetch_engine.py`` records the names that
+    release knows in each bundled build's ``install.json``
+    (``architectures``: "qwen3", "gpt-oss", ...). None in a copy that
+    downloads engines (it gets a newer one for a new architecture) and for a
+    build that recorded no list. Never raises.
+    """
+    try:
+        if downloads_allowed():
+            return None
+        names: set[str] = set()
+        for _folder, marker, _exe in _bundled_builds():
+            listed = marker.get("architectures")
+            if isinstance(listed, list):
+                names.update(a.strip().lower() for a in listed if isinstance(a, str) and a.strip())
+        return frozenset(names) or None
+    except Exception:
+        return None
+
+
+def _inside_engine_dirs(path: Path) -> bool:
+    """Is `path` inside one of the game's own (read-only) engine folders?"""
+    try:
+        real = os.path.normcase(os.path.realpath(path))
+        for root in _engine_dirs():
+            base = os.path.normcase(os.path.realpath(root))
+            if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def is_bundled(exe: Path) -> bool:
+    """Is `exe` part of the engine that ships inside the game? (Those builds are read-only.)"""
+    try:
+        info = install_info(Path(exe))
+        if info is not None and info.get("bundled") is True:
+            return True
+        return _inside_engine_dirs(Path(exe))
+    except Exception:
+        return False
+
+
+def _bundled_key(tag: Any, variant: Any) -> str:
+    """How a built-in build is named in ``bundled-unusable.json``: ``"<tag>-<variant>"``."""
+    return f"{tag or ''}-{variant or ''}"
+
+
+def _bundled_notes_path(runtime_root: Optional[Path]) -> Path:
+    return Path(runtime_root if runtime_root is not None else config.runtime_dir()) / BUNDLED_UNUSABLE_FILE
+
+
+def _file_fingerprint(exe: Path) -> Optional[dict]:
+    """Size and modification time of an engine program (None if it can't be read)."""
+    try:
+        info = Path(exe).stat()
+    except OSError:
+        return None
+    return {"size": info.st_size, "mtime_ns": info.st_mtime_ns}
+
+
+def _bundled_note_applies(note: dict, exe: Path) -> bool:
+    """Does a "can't run here" note still describe this built-in build's program?
+
+    The note records the program's size and modification time: a repaired
+    file (Steam's "Verify integrity of game files", a re-extracted test build)
+    or another copy of the game with the same engine release gets a fresh
+    check instead of inheriting the verdict. (Notes from before this was
+    recorded apply by release and build type alone.)
+    """
+    recorded = note.get("file")
+    if not isinstance(recorded, dict):
+        return True
+    current = _file_fingerprint(exe)
+    return current is not None and all(recorded.get(key) == value for key, value in current.items())
+
+
+def _bundled_notes(runtime_root: Optional[Path]) -> dict[str, dict]:
+    """{"<tag>-<variant>": note} for built-in builds known not to run here ({} if none / unreadable)."""
+    try:
+        data = json.loads(_bundled_notes_path(runtime_root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    builds = data.get("builds") if isinstance(data, dict) else None
+    if not isinstance(builds, dict):
+        return {}
+    return {k: v for k, v in builds.items() if isinstance(k, str) and isinstance(v, dict)}
+
+
+def installed_runtimes(runtime_root: Optional[Path] = None, *, bundled: bool = True) -> list[tuple[Path, str, str]]:
+    """Engines on this computer, newest first, as ``(exe, tag, variant_name)``.
+
+    Lists the builds installed earlier (in ``runtime_root``) and - unless
+    ``bundled=False`` - the builds that ship inside the game. Only complete
+    builds count: each has an ``install.json`` marker and its ``llama-server``
+    executable still exists. Builds marked unusable on this computer (see
+    :func:`mark_unusable`) are left out. For the same release and build, the
+    game's own copy comes first.
     """
     root = _llama_root(runtime_root)
-    found: list[tuple[Path, str, str]] = []
+    found: list[tuple[Path, str, str, bool]] = []
     try:
         folders = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
     except OSError:
-        return []
+        folders = []
     for folder in folders:
         marker = _read_marker(folder)
         if not marker or marker.get("unusable"):
             continue  # unfinished, or known not to run on this computer
-        rel = marker.get("exe")
-        if not isinstance(rel, str):
-            continue
-        exe = folder / Path(*PurePosixPath(rel).parts)
-        if exe.is_file():
-            found.append((exe, str(marker.get("tag", "")), str(marker.get("variant", ""))))
-    found.sort(key=lambda t: (_tag_number(t[1]), t[2]), reverse=True)
-    return found
+        exe = _marker_exe(folder, marker)
+        if exe is not None:
+            found.append((exe, str(marker.get("tag", "")), str(marker.get("variant", "")), False))
+    if bundled:
+        notes = _bundled_notes(runtime_root)
+        known = {os.path.normcase(os.path.realpath(exe)) for exe, *_rest in found}
+        for _folder, marker, exe in _bundled_builds():
+            note = notes.get(_bundled_key(marker.get("tag"), marker.get("variant")))
+            if marker.get("unusable") or (note is not None and _bundled_note_applies(note, exe)):
+                continue  # can't run on this computer
+            if os.path.normcase(os.path.realpath(exe)) in known:
+                continue  # (an engine folder that is also the install folder: listed once)
+            found.append((exe, str(marker.get("tag", "")), str(marker.get("variant", "")), True))
+    found.sort(key=lambda t: (_tag_number(t[1]), t[2], t[3]), reverse=True)
+    return [(exe, tag, name) for exe, tag, name, _bundled in found]
+
+
+def _serves_as(name: str, assets: Any, variant: RuntimeVariant, os_name: str, arch: str) -> bool:
+    """Can an installed build (its variant name + archive names) do the job of `variant`?
+
+    Yes for the same build type - and also when the build was made from the
+    very archive(s) `variant` would download here: on an Apple Silicon Mac the
+    Metal build *is* the CPU build (llama-server runs on the processor with
+    ``--device none``).
+    """
+    if name == variant.name:
+        return True
+    names = [a for a in assets if isinstance(a, str)] if isinstance(assets, list) else []
+    if not names:
+        return False
+    chosen = select_assets([{"name": n} for n in names], variant, os_name, arch)
+    return bool(chosen) and all(a["name"] in names for a in chosen)
+
+
+def find_installed(variant: RuntimeVariant, specs: SystemSpecs, *, runtimes: Optional[list] = None,
+                   runtime_root: Optional[Path] = None) -> Optional[tuple[Path, str]]:
+    """A build already on this computer (installed or built into the game) that can serve as
+    `variant`, as ``(exe, tag)`` - the newest one of exactly that build first. None if there isn't one."""
+    runtimes = installed_runtimes(runtime_root) if runtimes is None else runtimes
+    for exe, tag, name in runtimes:
+        if name == variant.name:
+            return exe, tag
+    for exe, tag, name in runtimes:
+        info = install_info(exe) or {}
+        if _serves_as(name, info.get("assets"), variant, specs.os_name, specs.arch):
+            return exe, tag
+    return None
+
+
+def _made_for(exe: Path, specs: SystemSpecs) -> bool:
+    """Was this build made for this computer's OS and processor? (True when its archives aren't recorded.)"""
+    names = (install_info(exe) or {}).get("assets")
+    if not isinstance(names, list) or not any(isinstance(n, str) for n in names):
+        return True
+    return any(_serves_as("", names, v, specs.os_name, specs.arch) for v in KNOWN_VARIANTS.values())
+
+
+def own_builds_first(runtimes: list) -> list[list]:
+    """The groups of builds to choose an engine from, in order (empty groups left out).
+
+    In a built game (no engine downloads), this copy's own builds come before
+    every other install of any type or release - another copy of the game,
+    or the downloads of a developer copy sharing the settings folder (usually
+    of a newer llama.cpp, or a CUDA build the game doesn't ship) - so the
+    engine that ships is the one that runs, and is tested. Other installs
+    only count when none of this copy's own builds will do. A copy that
+    downloads engines has one group: everything, newest first.
+    """
+    runtimes = list(runtimes)
+    if downloads_allowed():
+        return [runtimes] if runtimes else []
+    own = [r for r in runtimes if _inside_engine_dirs(r[0])]
+    others = [r for r in runtimes if not _inside_engine_dirs(r[0])]
+    return [group for group in (own, others) if group]
+
+
+def choose_installed(plan: list[RuntimeVariant], specs: SystemSpecs, *, runtimes: Optional[list] = None,
+                     runtime_root: Optional[Path] = None) -> Optional[tuple[Path, str, RuntimeVariant]]:
+    """The best build in `plan` (best first) that is already here, as ``(exe, tag, variant)``, or None.
+
+    This is the choice a built game makes: if the plan's first builds (say
+    NVIDIA CUDA) aren't built in, the best one that is (Vulkan) is used - and
+    its own builds win over any other install (see :func:`own_builds_first`).
+    """
+    runtimes = installed_runtimes(runtime_root) if runtimes is None else runtimes
+    for group in own_builds_first(runtimes):
+        for variant in plan:
+            hit = find_installed(variant, specs, runtimes=group)
+            if hit is not None:
+                return hit[0], hit[1], variant
+    return None
+
+
+def _build_from_path(path: Path) -> Optional[tuple[str, str]]:
+    """``(tag, variant)`` from an engine path's ``<tag>-<variant>`` folder name, if it has one."""
+    names = sorted(KNOWN_VARIANTS, key=len, reverse=True)  # "cuda-12" is tried before shorter names
+    for folder in list(Path(path).parents)[:3]:
+        for name in names:
+            if folder.name.endswith("-" + name) and len(folder.name) > len(name) + 1:
+                return folder.name[: -len(name) - 1], name
+    return None
+
+
+def relocate_engine(saved_exe: Path, *, runtime_root: Optional[Path] = None) -> Optional[Path]:
+    """Find the engine a saved path pointed at, after the game moved. Never raises.
+
+    Settings remember the full path of the engine that worked last time. A
+    built game's engine lives inside the game, so that path changes when the
+    game moves (another Steam library, the app dragged to a new folder...).
+    The same build (``<tag>-<variant>`` folder) is looked up among
+    :func:`installed_runtimes` - or else the newest build of the same type.
+
+    A built game (no engine downloads) always prefers its *own* engine: when
+    the saved engine still exists but belongs somewhere else - an older copy
+    of the game still on disk, or a developer copy sharing the same settings
+    folder - this copy's build of the same type is returned instead, so the
+    engine that ships is the one that runs (see :func:`own_build_instead`).
+
+    Returns the path unchanged if it still exists (and nothing of this game's
+    own should replace it), or None if nothing fits.
+    """
+    try:
+        saved = Path(saved_exe)
+        if saved.is_file():
+            return own_build_instead(saved, runtime_root=runtime_root) or saved
+        wanted = _build_from_path(saved)
+        if wanted is None:
+            return None
+        tag, variant = wanted
+        runtimes = [r for group in own_builds_first(installed_runtimes(runtime_root)) for r in group]
+        same = [exe for exe, t, v in runtimes if v == variant and t == tag]
+        similar = [exe for exe, _t, v in runtimes if v == variant]
+        if not downloads_allowed():  # a built game: its own build of that type, before any other copy's
+            own = [exe for exe in similar if _inside_engine_dirs(exe)]
+            same = [exe for exe in same if _inside_engine_dirs(exe)] or ([] if own else same)
+            similar = own or similar
+        return (same or similar or [None])[0]
+    except Exception:
+        return None
+
+
+def own_build_instead(saved_exe: Path, *, runtime_root: Optional[Path] = None) -> Optional[Path]:
+    """In a built game: this copy's own build to use instead of `saved_exe`, or None. Never raises.
+
+    None when the game downloads engines (a developer copy), when `saved_exe`
+    is already one of this game's own builds, when it is an engine the player
+    set up themselves (no ``install.json``), or when the game has no build of
+    that type. Otherwise the same release and build of this game's own, else
+    its newest build of the same type.
+    """
+    try:
+        saved = Path(saved_exe)
+        if downloads_allowed() or _inside_engine_dirs(saved):
+            return None
+        info = install_info(saved)
+        if not info:
+            return None  # the player's own llama-server: never swapped behind their back
+        variant, tag = str(info.get("variant") or ""), str(info.get("tag") or "")
+        own = [(exe, t, v) for exe, t, v in installed_runtimes(runtime_root) if _inside_engine_dirs(exe)]
+        same = [exe for exe, t, v in own if v == variant and t == tag]
+        similar = [exe for exe, _t, v in own if v == variant]
+        return (same or similar or [None])[0]
+    except Exception:
+        return None
 
 
 def install_info(exe: Path) -> Optional[dict]:
@@ -1149,13 +1631,18 @@ def install_info(exe: Path) -> Optional[dict]:
 PERMANENT_FAILURES = ("glibc", "cpu_unsupported", "cant_execute", "gpu_arch")
 
 
-def mark_unusable(exe: Path, reason: str) -> bool:
+def mark_unusable(exe: Path, reason: str, *, runtime_root: Optional[Path] = None) -> bool:
     """Remember that the installed build containing `exe` can't run on this computer.
 
-    Written into its ``install.json`` (so deleting the folder forgets it).
-    Returns True if the note was saved. Never raises.
+    Written into its ``install.json`` (so deleting the folder forgets it) -
+    except for a build that ships inside the game, which is never changed:
+    its note goes into ``runtime_dir()/bundled-unusable.json``, keyed by
+    release and build type, so a game update with a newer engine gets a
+    fresh chance. Returns True if the note was saved. Never raises.
     """
     try:
+        if is_bundled(Path(exe)):
+            return _mark_bundled_unusable(Path(exe), reason, runtime_root)
         folder = Path(exe).parent
         for candidate in (folder, *list(folder.parents)[:2]):
             marker = _read_marker(candidate)
@@ -1166,6 +1653,32 @@ def mark_unusable(exe: Path, reason: str) -> bool:
     except Exception:
         pass
     return False
+
+
+def _mark_bundled_unusable(exe: Path, reason: str, runtime_root: Optional[Path]) -> bool:
+    """Note (in the player's data folder) that a built-in build can't run here."""
+    marker = install_info(exe) or {}
+    tag, variant = marker.get("tag"), marker.get("variant")
+    if not isinstance(variant, str) or not variant:
+        found = _build_from_path(exe)  # no readable marker: fall back to the "<tag>-<variant>" folder name
+        if found is None:
+            return False
+        tag, variant = found
+    notes = _bundled_notes(runtime_root)
+    note: dict[str, Any] = {
+        "tag": str(tag or ""), "variant": variant, "reason": str(reason), "at": int(time.time()),
+        "exe": str(Path(os.path.abspath(exe))),
+    }
+    fingerprint = _file_fingerprint(exe)
+    if fingerprint is not None:
+        note["file"] = fingerprint  # a repaired or different copy of the file gets a fresh check
+    notes[_bundled_key(tag, variant)] = note
+    path = _bundled_notes_path(runtime_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps({"schema": 1, "builds": notes}, indent=2), encoding="utf-8")
+    os.replace(temp, path)  # all at once: a half-written note can't confuse the next launch
+    return True
 
 
 # A build marked unusable stops being downloaded again - but only for this
@@ -1192,10 +1705,32 @@ def unusable_reasons(runtime_root: Optional[Path] = None, *, now: Optional[float
     try:
         folders = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
     except OSError:
+        folders = []  # nothing installed (a built game may still have notes about its own builds)
+    bundled_notes = _bundled_notes(runtime_root)
+    if not folders and not bundled_notes:
         return reasons
     working = {name for _exe, _tag, name in installed_runtimes(runtime_root)}
     now = time.time() if now is None else now
     notes: list[tuple[int, str, str]] = []
+    if bundled_notes:
+        # Built-in builds: a note only counts while that very build still ships
+        # with the game (an update brings a new one, which gets a fresh chance).
+        # When the game can't download engines, there is no newer release to
+        # wait for, so the note doesn't expire.
+        present: dict[str, list[Path]] = {}
+        for _f, m, exe in _bundled_builds():
+            present.setdefault(_bundled_key(m.get("tag"), m.get("variant")), []).append(exe)
+        expires = downloads_allowed()
+        for key, note in bundled_notes.items():
+            variant = note.get("variant")
+            if not isinstance(variant, str) or variant in working or key not in present:
+                continue
+            if not any(_bundled_note_applies(note, exe) for exe in present[key]):
+                continue  # the program was repaired or replaced since: it gets a fresh chance
+            at = note.get("at")
+            if expires and isinstance(at, (int, float)) and now - at > UNUSABLE_RETRY_DAYS * 86400:
+                continue
+            notes.append((_tag_number(str(note.get("tag", ""))), variant, str(note.get("reason") or "unknown")))
     for folder in folders:
         marker = _read_marker(folder)
         reason = _unusable_reason(marker)
@@ -1232,14 +1767,21 @@ _UNUSABLE_WORDS = {
 }
 
 
-def unusable_message(variant_names: Mapping[str, str]) -> str:
-    """Plain English for "every build we could use already failed here for good"."""
+def unusable_message(variant_names: Mapping[str, str], *, downloads: Optional[bool] = None) -> str:
+    """Plain English for "every build we could use already failed here for good".
+
+    `downloads` says whether this copy of the game downloads engines
+    (default: ask :func:`downloads_allowed`); a built game talks about its
+    built-in engine instead of downloads.
+    """
     parts = [f"the {(variant_by_name(name) or RuntimeVariant(name, ())).display} build "
              f"{_UNUSABLE_WORDS.get(reason, 'already failed to start here')}"
              for name, reason in sorted(variant_names.items())]
+    if not (downloads_allowed() if downloads is None else downloads):
+        return ("The game's built-in llama.cpp engine can't run on this computer - " + "; ".join(parts) + ". "
+                + other_engines_hint())
     return ("The official llama.cpp engine can't run on this computer - " + "; ".join(parts) + ". So I won't "
-            f"download it again. Ollama ({OLLAMA_DOWNLOAD_URL}) or `pip install llama-cpp-python` (which builds "
-            "the engine on your computer) should still work.")
+            "download it again. " + other_engines_hint())
 
 
 def newer_engine_unusable_message(variant: RuntimeVariant, tag: str, reason: str) -> str:
@@ -1257,6 +1799,20 @@ def usable_plan(specs: SystemSpecs, runtime_root: Optional[Path] = None) -> list
     return [v for v in plan_variants(specs) if v.name not in broken]
 
 
+def available_plan(specs: SystemSpecs, runtime_root: Optional[Path] = None) -> list[RuntimeVariant]:
+    """The builds the game would really try here, best first (for display, e.g. ``--specs``).
+
+    Like :func:`usable_plan`, but a built game only counts the builds it
+    ships with (CPU stays last: a CPU build, or CPU mode on a graphics build).
+    """
+    plan = usable_plan(specs, runtime_root)
+    if downloads_allowed():
+        return plan
+    groups = own_builds_first(installed_runtimes(runtime_root))
+    here = groups[0] if groups else []  # its own builds (other installs only when it has none)
+    return [v for v in plan if v.name == CPU.name or find_installed(v, specs, runtimes=here) is not None]
+
+
 def engine_problem(specs: SystemSpecs, runtime_root: Optional[Path] = None) -> Optional[str]:
     """Why the built-in engine can't be used here at all (before any download), or None."""
     problem = platform_problem(specs.os_name, specs.arch)
@@ -1264,7 +1820,26 @@ def engine_problem(specs: SystemSpecs, runtime_root: Optional[Path] = None) -> O
         return problem
     if not usable_plan(specs, runtime_root):
         return unusable_message(unusable_reasons(runtime_root))
-    return None
+    return bundled_builds_problem(runtime_root)
+
+
+def bundled_builds_problem(runtime_root: Optional[Path] = None) -> Optional[str]:
+    """A built game whose every built-in build is noted as unable to run here: why, else None.
+
+    The builds are all there - they just can't run on this computer (on a Mac
+    the one Metal build is also the CPU build) - so "the engine is missing,
+    verify the game's files" would be the wrong advice: this says what
+    happened and what else can run a model instead.
+    """
+    if downloads_allowed():
+        return None
+    try:
+        if not _bundled_builds() or installed_runtimes(runtime_root):
+            return None
+        reasons = unusable_reasons(runtime_root)
+    except Exception:
+        return None
+    return unusable_message(reasons, downloads=False) if reasons else None
 
 
 def _folder_size(folder: Path) -> int:
@@ -1300,7 +1875,8 @@ def prune_old_installs(keep_exe: Path, *, runtime_root: Optional[Path] = None,
     * Builds marked unusable here keep only their ``install.json`` note (so
       they're never downloaded again); the rest of their files are deleted.
 
-    Returns ``(folders tidied, bytes freed)``. Never raises.
+    Builds that ship inside the game are never touched. Returns ``(folders
+    tidied, bytes freed)``. Never raises.
     """
     try:
         root = _llama_root(runtime_root)
@@ -1314,6 +1890,8 @@ def prune_old_installs(keep_exe: Path, *, runtime_root: Optional[Path] = None,
             marker = _read_marker(folder)
             if not marker:
                 continue
+            if marker.get("bundled") is True or _inside_engine_dirs(folder):
+                continue  # part of the game itself: read-only, never tidied away
             if any(folder.resolve() in b.parents for b in busy):
                 continue  # running right now (or the one we keep)
             if _unusable_reason(marker) is not None:
@@ -1467,32 +2045,14 @@ def _install_into(ui: UI, http: Any, release: dict, assets: list[dict], variant:
     for index, asset in enumerate(assets):
         archive = _download_asset(http, asset, staging / "downloads", ui, _describe_asset(asset))
         with ui.status("Unpacking and checking the files..."):
-            unpacked = staging / f"unpacked-{index}"
-            safe_extract(archive, unpacked)
-            _merge_tree(_single_top_dir(unpacked), payload)
+            unpack_archive(archive, payload, staging / f"unpacked-{index}")
         # Tidy as we go (a CUDA runtime archive is big), but a lock on it -
         # an antivirus scan - doesn't matter: the staging folder goes anyway.
         with contextlib.suppress(OSError):
             archive.unlink()
-    _make_executable(payload)
-    exe = find_server_executable(payload)
-    if exe is None:
-        raise RuntimeInstallError(
-            "The downloaded engine didn't contain llama-server, which is unusual. "
-            "Please try again later (the llama.cpp team may be mid-release)."
-        )
+    exe = finish_unpacked(payload)
     rel_exe = exe.relative_to(payload).as_posix()
-    marker = {
-        "tag": tag,
-        "variant": variant.name,
-        "label": variant.display,
-        "assets": [a["name"] for a in assets],
-        "exe": rel_exe,
-        "source": str(release.get("html_url") or f"{LLAMA_CPP_URL}/releases/tag/{tag}"),
-        "license": LLAMA_CPP_LICENSE,  # llama.cpp itself
-        "licenses": {a["name"]: _asset_license(a) for a in assets},  # per downloaded archive
-        "installed_at": int(time.time()),
-    }
+    marker = install_marker(dict(release, tag_name=tag), assets, variant, rel_exe)
     (payload / INSTALL_MARKER).write_text(json.dumps(marker, indent=2), encoding="utf-8")
     if final_dir.exists():
         existing = _existing_install(final_dir)
@@ -1539,6 +2099,13 @@ def ensure_llama_server(
     With ``update=True`` the newest published release is fetched and
     installed unless it is already here - used when a model needs a newer
     engine (e.g. "unknown model architecture").
+
+    In a built game (:func:`downloads_allowed` is False) the network is never
+    touched: the choice is made from the builds already here - the ones
+    shipped inside the game, plus any installed earlier - in plan order. If
+    the plan's first builds (e.g. CUDA) aren't built in, the best one that is
+    (Vulkan / Metal) is used, and the CPU build - or CPU mode on a graphics
+    build - is the fallback.
     Raises RuntimeInstallError with a friendly message.
     """
     llama_root = _llama_root(runtime_root)
@@ -1556,6 +2123,8 @@ def ensure_llama_server(
         candidates = [v for v in plan_variants(specs) if v.name not in broken]
         if not candidates:
             raise RuntimeInstallError(unusable_message(broken))
+    if not downloads_allowed():
+        return _use_builds_here(ui, specs, candidates, variant, llama_root.parent, update=update)
     if update:
         return _update_engine(ui, specs, candidates[0], http or UrllibHttp(), llama_root)
 
@@ -1565,7 +2134,7 @@ def ensure_llama_server(
 
     def reuse(v: RuntimeVariant) -> tuple[Path, RuntimeVariant]:
         exe, tag = installed[v.name]
-        ui.success(f"The llama.cpp engine is already installed ({escape(tag)}, {escape(v.display)}) - no download needed.")
+        _say_already_here(ui, exe, tag, v)
         return exe, v
 
     if candidates[0].name in installed:
@@ -1596,15 +2165,67 @@ def ensure_llama_server(
         release, assets = picked
         same = _find_install_with_assets(llama_root, [a["name"] for a in assets])
         if same is not None:
-            ui.success(f"The llama.cpp engine is already installed ({escape(same[1])}, {escape(cand.display)}) - no download needed.")
+            _say_already_here(ui, same[0], same[1], cand)
             return same[0], cand
         return _install(ui, http, release, assets, cand, llama_root), cand
 
     wanted = " / ".join(v.display for v in candidates)
     raise RuntimeInstallError(
         f"Sorry - I couldn't find an official prebuilt llama.cpp engine ({wanted}) for "
-        f"{specs.os_name} on {specs.arch}. Ollama ({OLLAMA_DOWNLOAD_URL}) or "
-        "`pip install llama-cpp-python` may still work on this computer."
+        f"{specs.os_name} on {specs.arch}. " + other_engines_hint("may still work on this computer")
+    )
+
+
+def _say_already_here(ui: UI, exe: Path, tag: str, variant: RuntimeVariant) -> None:
+    """Tell the player which engine build is being used, with nothing to download."""
+    if not is_bundled(exe):
+        ui.success(f"The llama.cpp engine is already installed ({escape(tag)}, {escape(variant.display)}) - "
+                   "no download needed.")
+        return
+    built = variant_by_name((install_info(exe) or {}).get("variant"))
+    what = (f"{variant.display} build" if built is None or built.name == variant.name
+            else f"{built.display} build, in {variant.display} mode")
+    ui.success(f"Using the game's built-in llama.cpp engine ({escape(tag)}, {escape(what)}) - nothing to download.")
+
+
+def _use_builds_here(ui: UI, specs: SystemSpecs, candidates: list[RuntimeVariant],
+                     requested: Optional[RuntimeVariant], runtime_root: Path, *,
+                     update: bool = False) -> tuple[Path, RuntimeVariant]:
+    """Pick an engine from the builds already on this computer, without touching the network.
+
+    Used when this copy of the game doesn't download engines (a built game
+    ships its own). `candidates` are tried in plan order; with ``update=True``
+    the newest build of the first candidate that is here is returned, quietly
+    (a newer one can only come with a game update): the caller knows whether
+    that is the engine that just failed or a newer one worth mentioning.
+    """
+    runtimes = installed_runtimes(runtime_root)
+    if not runtimes:
+        raise RuntimeInstallError(bundled_builds_problem(runtime_root) or ENGINE_MISSING_MESSAGE)
+    groups = own_builds_first(runtimes)  # this copy's own builds before any other install
+    for group in groups:
+        for cand in candidates:
+            hit = find_installed(cand, specs, runtimes=group)
+            if hit is not None:
+                exe, tag = hit
+                if not update:
+                    _say_already_here(ui, exe, tag, cand)
+                return exe, cand
+    usable_here = [r for group in groups for r in group if _made_for(r[0], specs)]
+    if usable_here and any(c.name == CPU.name for c in candidates):
+        # No separate CPU build here - but every official build also runs on the
+        # processor alone (the backend starts it with --device none -ngl 0).
+        order = {v.name: i for i, v in enumerate(plan_variants(specs))}
+        own = {id(r) for r in (groups[0] if len(groups) > 1 else [])}
+        exe, tag, _name = min(usable_here, key=lambda r: (id(r) not in own, order.get(r[2], len(order))))
+        _say_already_here(ui, exe, tag, CPU)
+        return exe, CPU
+    if not usable_here:
+        raise RuntimeInstallError(bundled_builds_problem(runtime_root) or ENGINE_MISSING_MESSAGE)
+    wanted = requested or candidates[0]
+    raise RuntimeInstallError(
+        f"The {wanted.display} build of the llama.cpp engine isn't built into this copy of the game "
+        "(and it doesn't download engines)."
     )
 
 
@@ -1658,3 +2279,66 @@ remove it.
 If a GPU build can't start (for example because of an old driver), the game
 quietly falls back to the next option, ending with the CPU build.
 """
+
+RUNTIME_EXPLAINER_BUILT_IN = """\
+**llama.cpp** is a free, open-source (MIT) program that runs AI language models
+on ordinary computers. Its **llama-server** tool loads a model file (a *GGUF*)
+and answers chat requests at a private address on *your own* machine
+(`http://127.0.0.1:<port>`). Nothing you type is sent to the internet by
+the local model. (Jev, if you switch it on, is the one exception: it's an
+online service.)
+
+**Where does it come from?** Building llama.cpp from source needs developer
+tools, so the llama.cpp team publishes ready-made builds for every release.
+This copy of the game carries the official builds for your kind of computer
+inside its own folder: nothing is downloaded or installed to run them, and no
+admin rights are needed. The only download is the AI model itself, during
+setup. Game updates bring newer engines.
+
+**Which build?**
+- **Vulkan** - a graphics standard supported by AMD, Intel *and* NVIDIA drivers
+  (Windows and Linux).
+- **Metal** - Apple's GPU technology on Apple Silicon Macs (M1, M2, M3...), where
+  the GPU shares the Mac's memory ("unified memory").
+- **CPU** - works on every computer, just slower.
+
+If the graphics-card build can't start (for example because of an old driver),
+the game quietly falls back to the CPU.
+"""
+
+
+def runtime_explainer() -> str:
+    """The "how the engine works" Learn page for this copy of the game.
+
+    A built game ships its engine and never downloads one, so it gets its own
+    page (no downloads, no CUDA builds); a developer copy gets
+    :data:`RUNTIME_EXPLAINER`.
+    """
+    return RUNTIME_EXPLAINER if downloads_allowed() else RUNTIME_EXPLAINER_BUILT_IN
+
+
+def engine_summary() -> str:
+    """Where this copy's llama.cpp engine comes from, in one line (``--specs``).
+
+    A built game says which release and builds it carries - read from its
+    ``distribution.json`` and engine folder - so a build check can confirm it
+    really uses its built-in engine (``packaging/smoke_test.sh``)::
+
+        built into the game: llama.cpp b7000 (CPU, Vulkan); engine downloads off
+    """
+    if downloads_allowed():
+        return "downloaded from the official llama.cpp releases when needed; engine downloads on"
+    try:
+        tag = distribution.load().llama_cpp_tag
+    except Exception:
+        tag = None
+    names: list[str] = []
+    for _folder, marker, _exe in _bundled_builds():
+        variant = str(marker.get("variant") or "")
+        name = (variant_by_name(variant) or RuntimeVariant(variant or "unknown", ())).display
+        if name not in names:
+            names.append(name)
+    release = f"llama.cpp {tag}" if tag else "llama.cpp (release unknown - distribution.json not found)"
+    if not names:
+        return f"built into the game, but no engine builds were found ({release}); engine downloads off"
+    return f"built into the game: {release} ({', '.join(names)}); engine downloads off"

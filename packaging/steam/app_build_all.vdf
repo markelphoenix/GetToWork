@@ -1,0 +1,25 @@
+// SteamPipe app build: uploads all three depots of Get To Work in one go.
+//
+// Run it on macOS or Linux (not Windows), so the Linux and macOS programs keep
+// their "executable" permission and the Mac app keeps its symbolic links -
+// see README.md. Replace the <...> placeholders first, then from ContentBuilder/ run the SDK's SteamCMD
+// (builder_osx/steamcmd.sh on a Mac, builder_linux/steamcmd.sh on Linux; an installed steamcmd works too):
+//   ./builder_osx/steamcmd.sh +login <builder account> +run_app_build "$PWD/scripts/app_build_all.vdf" +quit
+//
+// Paths are relative to this file. The build is uploaded but not made live:
+// set it live on a branch on the Builds page (or put a branch name in SetLive).
+"AppBuild"
+{
+	"AppID" "<APP_ID>"
+	"Desc" "Get To Work <VERSION>"
+	"ContentRoot" "../content/"
+	"BuildOutput" "../output/"
+	"Preview" "0"
+	"SetLive" ""
+	"Depots"
+	{
+		"<DEPOT_ID_WIN>" "depot_build_windows.vdf"
+		"<DEPOT_ID_MAC>" "depot_build_macos.vdf"
+		"<DEPOT_ID_LINUX>" "depot_build_linux.vdf"
+	}
+}

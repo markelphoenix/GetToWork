@@ -6,6 +6,8 @@ downloads. Everything else is automatic and explained as it happens:
 
 1. **Welcome back.** Returning players whose model and engine are still on
    disk get a single "Play with Qwen3 4B again? [Y/n]" and go straight in.
+   (A player who turned Jev down earlier also gets a "jev" choice there: the
+   game window has no command line to pass ``--jev`` on.)
 2. **Hardware check** (``specs.py`` + ``perf.py``): a warm one-line summary,
    a compact table and a short "Learn" panel on why memory size *and* speed
    matter.
@@ -16,7 +18,8 @@ downloads. Everything else is automatic and explained as it happens:
    where, under which license, and where it will be stored.
 5. **Automatic install + start** with fallbacks: the managed llama.cpp
    engine -> Ollama (if it's already running) -> retry / pick another /
-   pretend model / quit.
+   pretend model / quit. A built game (Steam, or a double-clicked download)
+   ships the engine inside the game, so only the model is downloaded.
 6. **Warm-up and speed test.** The real tokens/second is measured and fed
    back into the fit engine ("calibration"), so estimates get better the
    more you play. Painfully slow? You're offered a faster pick.
@@ -48,7 +51,7 @@ from .backends import ollama as ollama_backend
 from .backends.base import BackendError, EngineStopped, LLMBackend
 from .config import Settings
 from .types import FitResult, ModelEntry, SystemSpecs, model_entry_from_json
-from .ui import UI
+from .ui import UI, option_hint
 
 __all__ = [
     "SetupResult",
@@ -86,6 +89,7 @@ __all__ = [
 SLOW_TOKENS_PER_S = 3.0  # below this, a story turn takes minutes: offer a faster model
 SHORTLIST_SIZE = 6  # how many picks the menu shows
 FULL_LIST_LIMIT = 40  # the "more" list stops here (the rest are usually far too big)
+MENU_BUTTON_PICKS = 8  # picks shown as buttons in the game's window (the rest: type the number)
 WHY_MAX_FACTS = 3  # the menu's "Why" column stays short; `why N` shows the full working
 WIDE_TABLE_MIN_COLUMNS = 140  # narrower terminals get the compact menu (no "Why" column)
 CALIBRATION_KEY = "speed_calibration"  # where measured-speed corrections live in Settings.extra
@@ -192,6 +196,17 @@ def _badge_labels(sym: Symbols) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+# "Welcome back!" for a player who turned Jev down: the third option is the way back to it. Each label's
+# first part (before " (") is what the game window's button shows, so no two may read alike.
+WELCOME_BACK_JEV_OPTIONS = (
+    ("yes", "Yes, play"),
+    ("no", "Pick a different model"),
+    ("jev", "Play with Jev on this time (the optional AI referee)"),
+)
+_WELCOME_BACK_ALIASES = {"y": "yes", "yeah": "yes", "sure": "yes", "ok": "yes", "n": "no", "nope": "no",
+                         "different": "no", "other": "no", "referee": "jev"}
+
+
 @dataclass
 class SetupResult:
     """What the rest of the game needs once setup is done."""
@@ -201,6 +216,7 @@ class SetupResult:
     specs: SystemSpecs
     fit: Optional[FitResult]  # how the fit engine rated the choice (None if unknown)
     tokens_per_s: Optional[float] = None  # the speed measured during warm-up (None if unknown)
+    ask_jev: bool = False  # the player asked (at "Welcome back") to be offered Jev again
 
 
 def _model_context(entry: Optional[ModelEntry]) -> int:
@@ -261,6 +277,7 @@ class SetupServices:
     make_backend: Callable[..., LLMBackend] = default_backend_factory
     installed_runtimes: Callable[[], list] = runtime_install.installed_runtimes
     custom_entry: Callable[..., ModelEntry] = download.custom_entry
+    engine_architectures: Callable[[], Optional[frozenset]] = runtime_install.engine_architectures
 
 
 @dataclass
@@ -444,6 +461,12 @@ def planned_engine_key(specs: SystemSpecs, settings: Optional[Settings] = None, 
         plan = runtime_install.usable_plan(specs)
     except Exception:
         return None
+    if plan and not runtime_install.downloads_allowed():
+        # A built game uses the best build it ships with (say Vulkan, where the plan starts with CUDA).
+        with contextlib.suppress(Exception):
+            chosen = runtime_install.choose_installed(plan, specs)
+            if chosen is not None:
+                return f"managed:{chosen[2].name}"
     return f"managed:{plan[0].name}" if plan else None
 
 
@@ -697,11 +720,16 @@ def find_models(
     offline: bool = False,
     allow_all_licenses: bool = False,
     offline_reason: Optional[str] = None,
+    engine_limits: bool = True,
 ) -> ModelSearch:
     """Discover models (live, cached or curated), rank them for `specs`, report in one line.
 
     `offline_reason` explains *why* we're not searching when it isn't that
-    the player is offline (e.g. pretend-model mode).
+    the player is offline (e.g. pretend-model mode). With `engine_limits`
+    (the game's own llama.cpp engine will run the model), a built game
+    leaves out models whose architecture its engine doesn't know yet - it
+    can't update its engine, so they could never run (see
+    :func:`models_for_engine`).
     """
     svc = services or SetupServices()
     sym = symbols_for(ui)
@@ -713,6 +741,8 @@ def find_models(
     extra: dict[str, Any] = {"offline_reason": offline_reason} if offline_reason else {}
     with ui.status(message):
         result = svc.discover_models(refresh=refresh, offline=offline, allow_all_licenses=allow_all_licenses, **extra)
+    if engine_limits:
+        result = models_for_engine(result, svc)
     models = list(result.models) or list(catalog.MODEL_CATALOG)
     ranked = catalog.rank_models(specs, models, downloaded=downloaded_checker())
     shortlist = catalog.pick_shortlist(ranked, SHORTLIST_SIZE)
@@ -720,8 +750,56 @@ def find_models(
     for note in result.notes:
         if _FOUND_NOTE_RE.match(note):
             continue  # the summary line above already says how many were found
+        if getattr(ui, "in_window", False):  # no command line in the window: no option hints
+            note = note.replace(hf_discovery.ALL_LICENSES_HINT, "")
         ui.say(f"  [dim]{escape(note)}[/dim]")
     return ModelSearch(discovery=result, ranked=ranked, shortlist=shortlist)
+
+
+def disk_space_warning(ui: UI, specs: Optional[SystemSpecs], models: Optional[list[ModelEntry]] = None
+                       ) -> Optional[str]:
+    """When a full disk - not memory - is why no model fits: what to do about it (plain text), else None."""
+    if specs is None:
+        return None
+    need = catalog.disk_space_needed(specs, models or None)
+    if need is None:
+        return None
+    from .ui import option_hint
+
+    return specs_module.disk_space_advice(specs.disk_free_gb, need,
+                                          how=option_hint(ui, specs_module.MODELS_DIR_HINT, markup=False))
+
+
+def engine_lacks_message(entry: ModelEntry, architecture: str) -> str:
+    """Why the game's built-in engine can't run `entry` (plain text)."""
+    return (f"{entry.display_name} is built on a newer design ('{architecture}') that the game's built-in "
+            "llama.cpp engine doesn't know yet, so it can't run here - a game update will bring a newer engine.")
+
+
+def models_for_engine(result: hf_discovery.DiscoveryResult,
+                      services: Optional[SetupServices] = None) -> hf_discovery.DiscoveryResult:
+    """`result` without the models the game's built-in engine can't load, with a note saying so.
+
+    Only a built game limits this (its engine is fixed until a game update);
+    models whose architecture isn't known are kept. If nothing would be
+    left, the curated picks (all of which the engine runs) stand in.
+    """
+    svc = services or SetupServices()
+    try:
+        architectures = svc.engine_architectures()
+    except Exception:
+        architectures = None
+    kept, left_out = catalog.runnable_by_engine(list(result.models), architectures)
+    if not left_out:
+        return result
+    if not kept:
+        kept, _ = catalog.runnable_by_engine(list(catalog.MODEL_CATALOG), architectures)
+    names = sorted({m.architecture or "?" for m in left_out})
+    count = len(left_out)
+    note = (f"Left out {count} model{'s' if count != 1 else ''} built on a newer design "
+            f"({', '.join(names[:3])}{', ...' if len(names) > 3 else ''}) that the game's built-in engine doesn't "
+            "know yet - a game update will bring them.")
+    return dataclasses.replace(result, models=kept, notes=list(result.notes) + [note])
 
 
 def _speed_cell(fit: FitResult, *, short: bool = False) -> str:
@@ -807,7 +885,7 @@ def show_model_table(ui: UI, fits: list[FitResult], *, title: Optional[str] = No
     if compact and interactive:
         ui.say("[dim](Estimated speeds. Type [bold]why 1[/bold] to see why I rated pick 1 that way.)[/dim]")
     elif compact:
-        ui.say("[dim](Estimated speeds. Run [bold]gettowork[/bold] and type [bold]why N[/bold] at the model menu "
+        ui.say(f"[dim](Estimated speeds. Run [bold]{config.command_name()}[/bold] and type [bold]why N[/bold] at the model menu "
                "to see how I rated a pick.)[/dim]")
 
 
@@ -823,6 +901,18 @@ _BACK, _MOCK, _QUIT = "back", "mock", "quit"
 _EXPECTED_ERRORS = (BackendError, runtime_install.RuntimeInstallError, download.DownloadError, OSError)
 
 _WHY_RE = re.compile(r"^(?:why|explain|\?)\s*#?\s*(\d{1,6})$")
+
+
+def _every_model(search: ModelSearch) -> list[FitResult]:
+    """The short list first, then every other model found, best first (no model twice)."""
+    seen = {(f.model.key, f.quant) for f in search.shortlist}
+    return list(search.shortlist) + [f for f in search.ranked if (f.model.key, f.quant) not in seen]
+
+
+def _full_list(search: ModelSearch) -> list[FitResult]:
+    """The "more" list. Its first numbers are the short list's, in the same order, so a number
+    read on one screen picks the same model on the other (typing is how many players choose)."""
+    return _every_model(search)[:max(FULL_LIST_LIMIT, len(search.shortlist))]
 
 
 @dataclass
@@ -845,6 +935,18 @@ class _Choice:
         if self.gguf is not None:
             return self.gguf.name
         return "your model"
+
+
+def _failure_cause(exc: BaseException) -> str:
+    """Why starting a model failed: ``"download"`` (the model file never arrived) or ``"engine"``."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, download.DownloadError) or str(current).startswith("The model download didn't work"):
+            return "download"
+        current = current.__cause__ or current.__context__
+    return "engine"
 
 
 class _StartFailed(Exception):
@@ -883,6 +985,7 @@ class _SetupFlow:
         self.specs: Optional[SystemSpecs] = None
         self.search: Optional[ModelSearch] = None
         self._last_model_file: Optional[Path] = None  # what the built-in engine had downloaded before it failed
+        self._last_failure_cause: Optional[str] = None  # "download" / "engine": why the last start failed
         # {placement: factor} of the speed corrections folded into self.specs so far
         # (saved ones applied at start-up, then any learned this session).
         self._specs_factors: dict[str, float] = {}
@@ -966,8 +1069,11 @@ class _SetupFlow:
             return None
         exe = Path(s.server_exe).expanduser() if s.server_exe else None
         if kind == "managed":
-            if exe is not None and not exe.is_file():
-                exe = None
+            if exe is not None:
+                # The game moved since last time (another Steam library, a new folder): its
+                # built-in engine moved with it. Find the same build again rather than giving up.
+                # (A built game also swaps another copy's engine for its own.)
+                exe = runtime_install.relocate_engine(exe)
             if exe is None and not self._installed_runtimes():
                 return None
         return kind, _Choice(entry=entry, gguf=path, server_exe=exe)
@@ -982,7 +1088,17 @@ class _SetupFlow:
         last_speed = extra.get("last_tokens_per_s")
         if isinstance(last_speed, (int, float)) and last_speed > 0:
             self.ui.say(f"[dim]Last time it talked at {format_speed(last_speed)}. Say n to pick a different model.[/dim]")
-        if not self.ui.confirm(f"Welcome back! Play with {escape(str(name))} again?", default=True):
+        question = f"Welcome back! Play with {escape(str(name))} again?"
+        ask_jev = False
+        if self.settings.jev_enabled is False:
+            # Jev was turned down last time, and isn't asked about again - so here is the way
+            # back to it (the game's window has no command line to add --jev to).
+            pick = self.ui.choose(question, list(WELCOME_BACK_JEV_OPTIONS), default="yes",
+                                  aliases=_WELCOME_BACK_ALIASES)
+            again, ask_jev = pick != "no", pick == "jev"
+        else:
+            again = self.ui.confirm(question, default=True)
+        if not again:
             self.ui.info("Sure thing - let's find you a model.")
             return None
 
@@ -995,7 +1111,10 @@ class _SetupFlow:
         except _StartFailed:
             self.ui.info("No worries - let's set things up again from the top.")
             return None
-        return outcome if isinstance(outcome, SetupResult) else None
+        if not isinstance(outcome, SetupResult):
+            return None
+        outcome.ask_jev = ask_jev
+        return outcome
 
     # -- step 2: hardware -----------------------------------------------------------
 
@@ -1031,6 +1150,7 @@ class _SetupFlow:
             offline=user_offline if offline is None else offline,
             allow_all_licenses=bool(self._opt("all_licenses")),
             offline_reason=None if user_offline else offline_reason,
+            engine_limits=(self._opt("backend", "auto") or "auto") in ("auto", "managed"),
         )
         return self.search
 
@@ -1039,7 +1159,7 @@ class _SetupFlow:
         if self.search is None or self.specs is None:
             return
         ranked = catalog.rank_models(self.specs, list(self.search.discovery.models) or list(catalog.MODEL_CATALOG),
-                                     downloaded=downloaded_checker())
+                                     downloaded=downloaded_checker())  # (already limited to what the engine runs)
         ranked = _with_measured_speeds(ranked, self._measured)
         self.search = ModelSearch(self.search.discovery, ranked, catalog.pick_shortlist(ranked, SHORTLIST_SIZE))
 
@@ -1055,7 +1175,8 @@ class _SetupFlow:
             ui.say(
                 f"[bold]For a real game on this computer I'd recommend:[/bold] {escape(rec.model.display_name)} "
                 f"({format_size(rec.download_gb)}, {format_speed(rec.est_tokens_per_s)}) - "
-                "just run [bold]gettowork[/bold] without --mock whenever you're ready."
+                + ("just start the game without --mock whenever you're ready." if getattr(ui, "in_window", False)
+                   else f"just run [bold]{config.command_name()}[/bold] without --mock whenever you're ready.")
             )
         return self._start_mock()
 
@@ -1078,12 +1199,15 @@ class _SetupFlow:
         redraw = True
         while True:
             search = self.search or search
-            fits = search.ranked[:FULL_LIST_LIMIT] if showing_all else search.shortlist
+            fits = _full_list(search) if showing_all else search.shortlist
             default = self._default_answer(search, fits)
             if redraw:
                 self._show_menu(search, fits, showing_all)
                 redraw = False
-            answer = ui.ask("Your pick", default=default).strip()
+            # The game's window also shows the menu as buttons (touch screens, a Steam Deck's
+            # controller): typing still works for everything, "why 2" and "custom" included.
+            with ui._offering(self._menu_buttons(search, fits, showing_all)):
+                answer = ui.ask("Your pick", default=default).strip()
             word = answer.lower()
 
             if word.isdecimal():
@@ -1144,6 +1268,18 @@ class _SetupFlow:
                 continue
             ui.warn("Type a number from the list, or just press Enter for my recommendation.")
 
+    @staticmethod
+    def _menu_buttons(search: ModelSearch, fits: list[FitResult], showing_all: bool) -> list[tuple[str, str]]:
+        """The model menu as buttons: the picks on show (the first few), then the other choices."""
+        rec = search.recommended
+        buttons: list[tuple[str, str]] = []
+        for i, fit in enumerate(fits[:MENU_BUTTON_PICKS], 1):
+            star = " *" if rec is not None and fit.model.key == rec.model.key and fit.quant == rec.quant else ""
+            buttons.append((str(i), f"{i}. {fit.model.display_name}{star} ({format_size(fit.download_gb)})"))
+        buttons.append(("back", "Fewer models") if showing_all else ("more", "More models"))
+        buttons += [("mock", "Pretend model (offline)"), ("learn", "How I chose"), ("quit", "Quit")]
+        return buttons
+
     def _default_answer(self, search: ModelSearch, fits: list[FitResult]) -> str:
         rec = search.recommended
         for i, fit in enumerate(fits, 1):
@@ -1154,9 +1290,12 @@ class _SetupFlow:
     def _show_menu(self, search: ModelSearch, fits: list[FitResult], showing_all: bool) -> None:
         ui, sym = self.ui, self.sym
         if showing_all:
-            ui.heading("Every model I found, best first")
+            ui.heading("Every model I found")
             show_model_table(ui, fits)
-            hidden = len(search.ranked) - len(fits)
+            if search.shortlist:
+                ui.say(f"[dim]1-{len(search.shortlist)} are the short list (same numbers as before); the rest "
+                       "follow, best first.[/dim]")
+            hidden = len(_every_model(search)) - len(fits)
             if hidden > 0:
                 ui.say(f"[dim]...plus {hidden} more that are far too big for this computer.[/dim]")
             ui.say("[dim]Type a number to choose, [bold]back[/bold] for the short list, or [bold]why N[/bold] "
@@ -1164,9 +1303,13 @@ class _SetupFlow:
             return
         ui.heading("Models that fit your computer")
         if not fits:
-            ui.warn("I couldn't find a model that runs comfortably here - they're all too big or too slow. "
-                    "You can still look at [bold]more[/bold], paste a [bold]custom[/bold] model, or play with "
-                    "the pretend model ([bold]mock[/bold]).")
+            advice = disk_space_warning(ui, self.specs, list(getattr(search.discovery, "models", None) or []))
+            if advice is not None:
+                ui.warn(escape(advice) + " Meanwhile you can play with the pretend model ([bold]mock[/bold]).")
+            else:
+                ui.warn("I couldn't find a model that runs comfortably here - they're all too big or too slow. "
+                        "You can still look at [bold]more[/bold], paste a [bold]custom[/bold] model, or play with "
+                        "the pretend model ([bold]mock[/bold]).")
         else:
             show_model_table(ui, fits)
             if search.recommended is not None:
@@ -1183,7 +1326,7 @@ class _SetupFlow:
         ui.teach("how I check whether a model fits", catalog.MEMORY_FORMULA_EXPLAINER)
         ui.teach("why speed is all about memory bandwidth", perf.SPEED_EXPLAINER)
         ui.teach("where the models come from", hf_discovery.DISCOVERY_EXPLAINER)
-        ui.teach("the engine that runs your model", runtime_install.RUNTIME_EXPLAINER)
+        ui.teach("the engine that runs your model", runtime_install.runtime_explainer())
         ui.say("[dim]Tip: type [bold]why 2[/bold] to see the exact working behind pick number 2.[/dim]")
 
     def _choose_fit(self, fit: FitResult) -> Optional[_Choice]:
@@ -1232,6 +1375,11 @@ class _SetupFlow:
             ui.warn(f"I couldn't look that model up ({escape(str(exc))}).")
             return None
 
+        lacking = self._engine_lacks(entry)
+        if lacking is not None:
+            ui.warn(escape(engine_lacks_message(entry, lacking)))
+            if not ui.confirm("Download it anyway?", default=False):
+                return None
         if catalog.size_unknown(entry):
             self._license_warning(entry)
             ui.warn("I couldn't work out how big this model is, so I can't check whether it fits.")
@@ -1246,6 +1394,17 @@ class _SetupFlow:
         if not self._ok_despite_warnings(fit):
             return None
         return _Choice(entry=entry_for_fit(fit), fit=fit)
+
+    def _engine_lacks(self, entry: ModelEntry) -> Optional[str]:
+        """`entry`'s architecture when the game's built-in engine can't load it (a built game only), else None."""
+        if (self._opt("backend", "auto") or "auto") not in ("auto", "managed"):
+            return None
+        try:
+            architectures = self.svc.engine_architectures()
+        except Exception:
+            return None
+        _kept, left_out = catalog.runnable_by_engine([entry], architectures)
+        return (entry.architecture or "?") if left_out else None
 
     def _license_warning(self, entry: ModelEntry) -> None:
         """The same yellow license warning, however the player named the model
@@ -1281,10 +1440,16 @@ class _SetupFlow:
                 with ui.status(f"Looking up {escape(repo or wanted)} on Hugging Face..."):
                     entry = self.svc.custom_entry(repo or wanted, quant_in_ref or self._opt("quant"))
             except Exception as exc:  # DownloadError is friendly; anything else gets a short note
-                ui.warn(f"I couldn't find the model '{escape(wanted)}': {escape(str(exc))}")
+                if getattr(exc, "kind", None) == "not_family_friendly":
+                    ui.warn(escape(str(exc)))  # found, but refused: "couldn't find" would be wrong
+                else:
+                    ui.warn(f"I couldn't find the model '{escape(wanted)}': {escape(str(exc))}")
                 ui.info("Let's pick one from the list instead.")
                 return None
         quant = self._opt("quant")
+        lacking = self._engine_lacks(entry)
+        if lacking is not None:
+            ui.warn(escape(engine_lacks_message(entry, lacking)) + " I'll give it a go since you asked for it.")
         if catalog.size_unknown(entry):
             ui.say(f"You asked for [bold]{escape(entry.display_name)}[/bold].")
             self._license_warning(entry)
@@ -1349,6 +1514,10 @@ class _SetupFlow:
         """(title, lines, needs a download?) for the llama.cpp engine."""
         title = "The llama.cpp engine - the program that runs the model"
         if choice.server_exe is not None and choice.server_exe.is_file():
+            if runtime_install.is_bundled(choice.server_exe):
+                info = runtime_install.install_info(choice.server_exe) or {}
+                variant = runtime_install.variant_by_name(info.get("variant")) or runtime_install.CPU
+                return title, self._built_in_lines(str(info.get("tag") or ""), variant), False
             return title, ["Already installed - nothing to download."], False
         assert self.specs is not None
         try:
@@ -1356,9 +1525,15 @@ class _SetupFlow:
         except Exception:
             plan = [runtime_install.CPU]
         best = plan[0]
-        installed = {variant: tag for _exe, tag, variant in self._installed_runtimes()}
+        runtimes = self._installed_runtimes()
+        if not runtime_install.downloads_allowed():
+            return self._engine_step_built_in(title, plan, runtimes)
+        installed = {variant: (exe, tag) for exe, tag, variant in reversed(runtimes)}  # the newest wins
         if best.name in installed:
-            return title, [f"Already installed ({escape(installed[best.name])}, {escape(best.display)} build) - "
+            exe, tag = installed[best.name]
+            if runtime_install.is_bundled(exe):
+                return title, self._built_in_lines(tag, best), False
+            return title, [f"Already installed ({escape(tag)}, {escape(best.display)} build) - "
                            "nothing to download."], False
         lines = [
             f"Official {escape(best.display)} build for your computer - {ENGINE_SIZE_HINTS.get(best.name, 'a small download')}, "
@@ -1378,6 +1553,36 @@ class _SetupFlow:
             lines.append(f"[dim]If that build can't start, I'll try the next one instead (and say so): "
                          f"{escape(backups)}[/dim]")
         return title, lines, True
+
+    def _engine_step_built_in(self, title: str, plan: list, runtimes: list) -> tuple[str, list[str], bool]:
+        """The engine step for a built game, which never downloads the engine."""
+        assert self.specs is not None
+        try:
+            chosen = runtime_install.choose_installed(plan, self.specs, runtimes=runtimes)
+        except Exception:
+            chosen = None
+        if chosen is None and runtimes:  # no build from the plan here: CPU mode on one that is (see ensure_llama_server)
+            exe, tag, _name = runtimes[0]
+            chosen = (exe, tag, runtime_install.CPU)
+        if chosen is None:
+            problem = runtime_install.bundled_builds_problem() or runtime_install.ENGINE_MISSING_MESSAGE
+            return title, [f"[yellow]{escape(problem)}[/yellow]"], False
+        exe, tag, variant = chosen
+        if runtime_install.is_bundled(exe):
+            return title, self._built_in_lines(tag, variant), False
+        return title, [f"Already installed ({escape(tag)}, {escape(variant.display)} build) - nothing to download."], False
+
+    @staticmethod
+    def _built_in_lines(tag: str, variant: Any) -> list[str]:
+        """How the confirmation screen shows an engine that ships inside the game."""
+        short = {"metal": "Metal"}.get(variant.name, variant.display)
+        builds = f"{short} + CPU" if variant.gpu else "CPU"
+        version = f"llama.cpp {tag}, " if tag else "llama.cpp, "
+        return [
+            f"Built into the game ({escape(version + builds)}) - nothing to download",
+            f"[dim]llama.cpp is {runtime_install.LLAMA_CPP_LICENSE} licensed; its license text ships with the game "
+            "(THIRD_PARTY_LICENSES.txt).[/dim]",
+        ]
 
     def _model_step(self, choice: _Choice, kind: str) -> tuple[str, list[str], bool]:
         """(title, lines, needs a download?) for the model itself."""
@@ -1479,6 +1684,7 @@ class _SetupFlow:
         tried_ollama = kind == "ollama"
         while True:
             self._last_model_file = None
+            self._last_failure_cause = None
             try:
                 return self._start(kind, choice)
             except _StartFailed:
@@ -1490,7 +1696,7 @@ class _SetupFlow:
                 if ollama_choice is not None:
                     kind, choice = "ollama", ollama_choice
                     continue
-            action = self._failure_menu(kind, after_fallback=kind != first_kind)
+            action = self._failure_menu(kind, after_fallback=kind != first_kind, cause=self._last_failure_cause)
             if action != "retry":
                 return action
             kind, choice, tried_ollama = first_kind, first_choice, first_kind == "ollama"
@@ -1568,6 +1774,7 @@ class _SetupFlow:
             try:
                 backend.prepare(ui, choice.entry)
             except _EXPECTED_ERRORS as exc:
+                self._last_failure_cause = _failure_cause(exc)
                 ui.warn(f"Hmm, that didn't work: {escape(str(exc))}")
                 path = getattr(backend, "model_path", None)
                 self._last_model_file = Path(path) if kind == "managed" and path else None
@@ -1589,30 +1796,46 @@ class _SetupFlow:
         return SetupResult(backend=backend, entry=choice.entry, specs=self.specs or self._detect(), fit=choice.fit,
                            tokens_per_s=tps)
 
-    def _failure_menu(self, kind: Optional[str], *, after_fallback: bool = False) -> str:
+    def _failure_menu(self, kind: Optional[str], *, after_fallback: bool = False,
+                      cause: Optional[str] = None) -> str:
         """Friendly guidance plus retry / pick another / pretend model / quit.
 
         `kind` is the engine that just failed (None = no engine can run here at
         all); `after_fallback` means we'd already switched to it automatically.
+        `cause` is ``"download"`` when the model itself never arrived (then
+        another engine wouldn't help, so none is suggested).
         """
         ui = self.ui
+        pip_possible = runtime_install.llama_cpp_python_possible()  # never in a built game (no pip there)
+        download_trouble = cause == "download" and kind in (None, "managed")
         if kind is None:
             ui.warn("I can't run a real model on this computer automatically.")
         if after_fallback:
             ui.info("Neither the built-in engine nor Ollama could start this model. A smaller model often helps "
                     "(choose 'pick'), or try again in a bit if the internet is being flaky.")
+        elif download_trouble:
+            # The model never arrived (no internet, a full disk, a folder that can't be written):
+            # another engine wouldn't help - the warning above says what went wrong.
+            ui.info("The model didn't finish downloading. Check your internet connection and that there's free "
+                    "space on your disk, then choose 'Try again' - the download picks up where it stopped.")
         elif kind in (None, "managed"):
+            tinkerers = (f" (Tinkerers: '{LLAMACPP_PIP_HINT}', then --backend llamacpp.)" if pip_possible else "")
             ui.info(f"Plan B: the free Ollama app works on most computers - install it from {OLLAMA_DOWNLOAD_URL}, "
-                    "start it, and I'll use it automatically. (Tinkerers: "
-                    f"'{LLAMACPP_PIP_HINT}', then --backend llamacpp.)")
+                    "start it, and I'll use it automatically." + tinkerers)
         elif kind == "ollama":
             ui.info(f"Ollama needs to be installed and running: get it from {OLLAMA_DOWNLOAD_URL}, then start the app "
                     "(or run 'ollama serve'). Without --backend ollama I'd use the built-in engine instead.")
         elif kind == "llamacpp":
-            ui.info(f"This needs the llama-cpp-python package: '{LLAMACPP_PIP_HINT}'. Without --backend llamacpp "
-                    "I'd use the built-in engine instead.")
+            if pip_possible:
+                ui.info(f"This needs the llama-cpp-python package: '{LLAMACPP_PIP_HINT}'. Without --backend llamacpp "
+                        "I'd use the built-in engine instead.")
+            else:
+                ui.info("llama-cpp-python isn't part of this build of the game - without --backend llamacpp I'd use "
+                        "the built-in engine instead.")
+        retry = ("Try again (handy if the internet hiccupped)" if download_trouble
+                 else "Try again (handy if the internet hiccupped or you just started Ollama)")
         options = [
-            ("retry", "Try again (handy if the internet hiccupped or you just started Ollama)"),
+            ("retry", retry),
             ("pick", "Choose a different model"),
             ("mock", "Play now with the pretend model (offline, nothing to download)"),
             ("quit", "Stop for now - anything already downloaded is kept for next time"),
@@ -1649,8 +1872,9 @@ class _SetupFlow:
         ui.say(f"{icon} Your model is talking at [bold]{speed}[/bold] - {mood}")
         entry = choice.entry
         if entry is not None and catalog.thinking_mode(entry) == "switchable" and tps < catalog.THINKING_MIN_TOKENS_PER_S:
+            hint = option_hint(ui, "--think")  # (none in a double-clicked game window: no command line there)
             ui.say("[dim]It can think out loud, but at this speed I'll ask it to answer straight away so turns stay "
-                   "quick (start the game with --think to see its thinking anyway).[/dim]")
+                   f"quick{f' ({hint} to see its thinking anyway)' if hint else ''}.[/dim]")
         if entry is not None:
             self._measured[(entry.key, (entry.quant or "").upper())] = float(tps)
         cpu_only = getattr(backend, "cpu_only", None)

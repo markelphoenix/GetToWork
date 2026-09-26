@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import stat
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import ClassVar, Optional
@@ -57,12 +58,43 @@ def config_dir() -> Path:
     return base / APP_DIR_NAME.lower()
 
 
+_chosen_models_dir: Optional[Path] = None  # set by use_models_dir() (--models-dir, or the saved choice)
+
+
 def models_dir() -> Path:
-    """Where GGUF files downloaded for the llama.cpp backend are stored."""
+    """Where GGUF files downloaded for the llama.cpp backend are stored.
+
+    ``GETTOWORK_MODELS_DIR`` wins; then the folder chosen with ``--models-dir``
+    (remembered in the settings, see :func:`use_models_dir`); else
+    ``<config dir>/models``.
+    """
     override = os.environ.get("GETTOWORK_MODELS_DIR")
     if override:
         return Path(override).expanduser()
+    if _chosen_models_dir is not None:
+        return _chosen_models_dir
     return config_dir() / "models"
+
+
+def use_models_dir(folder: Optional[str | Path]) -> None:
+    """Keep models in `folder` from now on in this run (None = the default place).
+
+    ``cli`` calls it at start-up with the ``--models-dir`` option or the
+    folder remembered in the settings - so a player whose system drive is
+    small can keep multi-GB models on another drive (on Steam for Windows,
+    where launch options can't set environment variables, too).
+    """
+    global _chosen_models_dir
+    _chosen_models_dir = Path(folder).expanduser() if folder else None
+
+
+def command_name() -> str:
+    """What to type to run the game in a terminal.
+
+    ``gettowork`` when run from source (pip), ``gettowork-cli`` in a built game
+    (Steam, the double-click builds), whose terminal program has that name.
+    """
+    return "gettowork-cli" if getattr(sys, "frozen", False) else "gettowork"
 
 
 def runtime_dir() -> Path:
@@ -87,6 +119,7 @@ class Settings:
     # Only stored if the player explicitly opted in. Never shown by repr(), so a
     # stray debug print or traceback can't reveal it.
     jev_api_key: Optional[str] = field(default=None, repr=False)
+    models_dir: Optional[str] = None  # where models are kept, when chosen with --models-dir
     extra: dict = field(default_factory=dict)
     # Set by save(): could the saved key's file be made readable by this user only?
     # (None = no key saved.) Not a setting, so it's never written to the file.
@@ -206,5 +239,6 @@ _FIELD_TYPES: dict[str, type | tuple[type, ...]] = {
     "ollama_model": str,
     "jev_enabled": bool,
     "jev_api_key": str,
+    "models_dir": str,
     "extra": dict,
 }
