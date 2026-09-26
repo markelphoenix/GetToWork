@@ -1004,3 +1004,14 @@ def test_an_unrecognised_fine_tune_never_takes_the_original_models_slot():
     if "Menlo/Jan-nano-gguf" in keys and "qwen3-4b" in keys:
         assert keys.index("qwen3-4b") < keys.index("Menlo/Jan-nano-gguf")
     assert "qwen3-4b" in keys or all(f.model.key != "Menlo/Jan-nano-gguf" for f in picks)
+
+
+def test_runnable_by_engine_leaves_out_only_known_architectures_the_engine_lacks():
+    qwen = catalog.get_model("qwen3-4b")
+    new = dataclasses.replace(qwen, key="x/New-GGUF", architecture="NewFam9")
+    unknown = dataclasses.replace(qwen, key="x/Unknown-GGUF", architecture=None)
+    kept, left_out = catalog.runnable_by_engine([qwen, new, unknown], frozenset({"qwen3"}))
+    assert kept == [qwen, unknown] and left_out == [new]
+    assert catalog.runnable_by_engine([qwen, new], None) == ([qwen, new], [])
+    # Every curated pick runs on the engine the game ships (their architectures are long established).
+    assert all(m.architecture for m in catalog.MODEL_CATALOG)

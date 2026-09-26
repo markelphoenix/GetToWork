@@ -258,6 +258,25 @@ def test_full_game_with_the_offline_mock_model():
     assert "Learn: Chain-of-thought" in text and "YOU GOT TO WORK!" in text
 
 
+@pytest.mark.skipif(MockBackend is None, reason="backends/mock.py not available")
+def test_play_again_doesnt_teach_the_same_lessons_twice():
+    """cli shares one "already taught" set across the games of a session ("Play again")."""
+    taught: set = set()
+    ui, _, console = make_ui(GOOD_PLANS)
+    Game(MockBackend(seed=7), ui, taught=taught).run()
+    first = output(console)
+    assert "Learn: Chain-of-thought" in first and "Learn: How the pretend model referees" in first
+    assert {"reasoning", "local_judge"} <= taught
+    ui2, _, console2 = make_ui(GOOD_PLANS)
+    assert Game(MockBackend(seed=8), ui2, taught=taught).run().won
+    second = output(console2)
+    assert "Learn: Chain-of-thought" not in second and "Learn: How the pretend model referees" not in second
+    # A game on its own (no shared set) still teaches everything.
+    ui3, _, console3 = make_ui(GOOD_PLANS)
+    Game(MockBackend(seed=9), ui3).run()
+    assert "Learn: Chain-of-thought" in output(console3)
+
+
 def test_quit_early_after_one_round():
     llm = ScriptedLLM()
     ui, _, console = make_ui([GOOD_PLANS[0], "quit"])
@@ -1088,6 +1107,22 @@ def test_a_slow_thinking_model_is_told_why_it_didnt_think():
     assert Game(llm, make_ui([])[0], thinking="none", tokens_per_s=5.0).thinking_note is None
 
 
+def test_the_think_hint_fits_where_the_game_runs(monkeypatch):
+    """--think is a command-line option: a double-clicked game window has no command line to add it to."""
+    for name in ("SteamAppId", "SteamGameId", "SteamClientLaunch"):
+        monkeypatch.delenv(name, raising=False)
+    llm = ScriptedLLM()
+
+    def note(window: bool) -> str:
+        ui = UI(console=Console(file=io.StringIO(), width=100), input_fn=lambda p: "quit", window=window)
+        return Game(llm, ui, thinking="switchable", tokens_per_s=9.0).thinking_note or ""
+
+    assert "start the game with gettowork --think" in note(False) and "[bold]" not in note(False)
+    assert "--think" not in note(True) and "9 tokens/s" in note(True)  # a double-clicked window: no hint
+    monkeypatch.setenv("SteamAppId", "480")
+    assert "add --think to its Launch Options in Steam (right-click Get To Work > Properties > General)" in note(True)
+
+
 def test_force_think_lets_a_slow_model_think():
     llm = ScriptedLLM()
     ui, _, _ = make_ui([GOOD_PLANS[0], "quit"])
@@ -1153,3 +1188,337 @@ def test_with_the_pretend_model_the_referee_is_never_called_your_local_model():
     assert "Referee's verdict (the pretend model)" in text
     assert "How the pretend model referees" in text and "simple scripted rule" in text
     assert "Referee: your local model" not in text and "How your local model referees" not in text
+
+
+# ---------------------------------------------------------------------------
+# The family-friendly filter (safety.py) in the game
+# ---------------------------------------------------------------------------
+
+# Blocked words used below: hard drugs and graphic gore (the filter's other
+# categories are tested, scrambled, in test_safety.py).
+UNSAFE_INTRO = "Your neighbour is selling cocaine by the front door."
+UNSAFE_INTRO_2 = "A decapitated gnome waves at you from the lawn."
+
+
+def hidden(category: str) -> str:
+    return f"(hidden by the family-friendly filter: {category})"
+
+
+def test_an_unfriendly_opening_is_asked_for_again_with_a_firmer_reminder():
+    llm = ScriptedLLM(intro=[UNSAFE_INTRO, "Your alarm clock is a duck, and it quacks at 8:41."])
+    ui, _, console = make_ui(["quit"])
+    game = Game(llm, ui)
+    summary = game.run()
+
+    assert summary.intro == "Your alarm clock is a duck, and it quacks at 8:41."
+    intro_calls = calls_for(llm, "intro")
+    assert len(intro_calls) == 2
+    retry = intro_calls[1]["messages"]
+    assert retry[0]["content"].startswith("TASK: intro")  # same job...
+    assert prompts.SAFETY_REMINDER in retry[0]["content"]  # ...with a firmer reminder, at the end
+    assert retry[-1]["content"].rstrip().endswith("clean, gentle and kind.")
+    assert UNSAFE_INTRO not in str(retry)  # the rejected reply isn't shown back to the model
+    # Recorded for the review, but with the rejected reply hidden.
+    assert [(p, r.text) for p, r in summary.intro_calls] == [
+        ("intro", hidden("drugs")), ("intro", "Your alarm clock is a duck, and it quacks at 8:41."),
+    ]
+    assert summary.intro_calls[0][1].raw is None
+    text = flat(console)
+    assert "cocaine" not in text
+    assert "didn't pass the family-friendly filter" in text and "Your alarm clock is a duck" in text
+    assert game.safety_notes == [
+        "The opening story: the model's reply didn't pass the family-friendly filter (drugs), so it was asked again.",
+        "The opening story: the second try passed the filter.",
+    ]
+
+
+def test_an_opening_that_fails_twice_is_replaced_by_the_built_in_one():
+    llm = ScriptedLLM(intro=[UNSAFE_INTRO, UNSAFE_INTRO_2])
+    ui, _, console = make_ui(["quit"])
+    game = Game(llm, ui)
+    summary = game.run()
+    assert summary.intro == FALLBACK_INTRO
+    assert [r.text for _, r in summary.intro_calls] == [hidden("drugs"), hidden("graphic gore")]
+    text = flat(console)
+    assert "cocaine" not in text and "decapitated" not in text
+    assert "Still not quite family-friendly, so here's a built-in version instead." in text
+    assert "a built-in line was used instead" in game.safety_notes[-1]
+
+
+def test_a_backend_error_on_the_safety_retry_uses_the_built_in_line_without_a_menu():
+    llm = ScriptedLLM(intro=[UNSAFE_INTRO, BackendError("the engine fell over")])
+    ui, script, console = make_ui(["quit"])  # no "try again / skip / quit" answers needed
+    summary = Game(llm, ui).run()
+    assert summary.intro == FALLBACK_INTRO
+    assert not script.answers and "What would you like to do?" not in output(console)
+    assert "here's a built-in one" in flat(console)
+
+
+def test_an_unfriendly_challenge_is_replaced_by_a_built_in_one():
+    llm = ScriptedLLM(outcome=[
+        "The geese cheer.\nCHALLENGE: A goose sells heroin at the bus stop.",
+        "The geese cheer again.\nCHALLENGE: A pool of blood blocks the road.",
+    ])
+    ui, _, console = make_ui([GOOD_PLANS[0], GOOD_PLANS[1], "quit"])
+    summary = Game(llm, ui).run()
+    first = summary.rounds[0]
+    assert [p for p, _ in first.llm_calls] == ["judge", "outcome", "outcome"]
+    assert summary.rounds[1].challenge in FALLBACK_CHALLENGES  # the built-in challenge...
+    text = flat(console)
+    assert "The geese cheer again." in text  # ...after the retry's (clean) story
+    assert "heroin" not in text and "pool of blood" not in text
+    assert first.safety_notes == [
+        "Round 1 story: the model's reply didn't pass the family-friendly filter (drugs), so it was asked again.",
+        "Round 1 story: no family-friendly reply, so a built-in line was used instead.",
+    ]
+    assert summary.rounds[1].safety_notes == []
+
+
+def test_an_unfriendly_story_gets_a_built_in_line_from_the_pretend_models_script():
+    from gettowork.backends import mock as script_lines
+
+    llm = ScriptedLLM(outcome=[
+        "The goose was decapitated.\nCHALLENGE: A polite walrus blocks the door.",
+        "Decapitated again.\nCHALLENGE: A second walrus wants a password.",
+    ])
+    ui, _, console = make_ui(["by bike", GOOD_PLANS[1], "quit"])
+    summary = Game(llm, ui).run()
+    assert summary.rounds[1].challenge == "A second walrus wants a password."  # the clean part is kept
+    assert script_lines.COMMUTE_SUCCESS[1].format(plan="by bike") in flat(console)
+    assert "ecapitated" not in output(console)
+
+
+def test_an_unfriendly_failed_commute_story_gets_a_built_in_line():
+    from gettowork.backends import mock as script_lines
+
+    llm = ScriptedLLM(judge=['{"made_progress": false, "explanation": "You stayed home."}'],
+                      outcome=["You stay home and take cocaine.", "More cocaine."])
+    ui, _, console = make_ui(["I stay in bed", "quit"])
+    summary = Game(llm, ui).run()
+    assert not summary.rounds[0].made_progress
+    assert script_lines.COMMUTE_FAILURE[1].format(plan="I stay in bed") in flat(console)
+    assert "cocaine" not in output(console)
+
+
+def test_an_unfriendly_referee_explanation_is_asked_for_again():
+    llm = ScriptedLLM(judge=[
+        '{"made_progress": false, "explanation": "The goose is high on cocaine."}',
+        '{"made_progress": true, "explanation": "Bribing the goose works a treat."}',
+    ])
+    ui, _, console = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(llm, ui).run()
+    record = summary.rounds[0]
+    assert record.made_progress and record.judge_explanation == "Bribing the goose works a treat."
+    assert [p for p, _ in record.llm_calls] == ["judge", "judge", "outcome"]
+    judges = calls_for(llm, "judge")
+    assert judges[1]["json_mode"] is True and prompts.SAFETY_REMINDER in judges[1]["messages"][0]["content"]
+    assert record.llm_calls[0][1].text == hidden("drugs")
+    assert "cocaine" not in output(console)
+    assert len(record.safety_notes) == 2 and "Round 1 referee" in record.safety_notes[0]
+
+
+def test_a_referee_explanation_that_fails_twice_keeps_the_verdict_with_a_built_in_explanation():
+    from gettowork.backends import mock as script_lines
+
+    llm = ScriptedLLM(judge=[
+        '{"made_progress": true, "explanation": "Cocaine makes the goose dance."}',
+        '{"made_progress": false, "explanation": "Still cocaine."}',
+    ])
+    ui, _, console = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(llm, ui).run()
+    record = summary.rounds[0]
+    assert record.made_progress  # a yes/no can't be rude: the first verdict stands
+    assert record.judge_explanation == script_lines.JUDGE_YES[1 % len(script_lines.JUDGE_YES)]
+    assert "cocaine" not in output(console).lower()
+    assert "a built-in one was used" in record.safety_notes[-1]
+
+
+def test_an_unreadable_unfriendly_verdict_is_not_shown_back_to_the_model():
+    llm = ScriptedLLM(judge=["Honestly the goose is on cocaine, no JSON for you",
+                             '{"made_progress": true, "explanation": "Fair enough."}'])
+    ui, _, _ = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(llm, ui).run()
+    assert "judge_retry" not in llm.purposes()  # the garbled-answer retry would quote it back
+    assert all("cocaine" not in str(call["messages"]) for call in llm.calls)
+    assert summary.rounds[0].judge_explanation == "Fair enough."
+
+
+def test_an_unreadable_unfriendly_verdict_twice_falls_back_to_the_backup_rule():
+    llm = ScriptedLLM(judge=["cocaine!", "more cocaine!"])
+    ui, _, console = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(llm, ui).run()
+    record = summary.rounds[0]
+    assert record.judge_explanation.startswith("The referee couldn't give a clear verdict")
+    assert "the backup rule decided" in record.safety_notes[-1]
+    assert "cocaine" not in output(console)
+
+
+def test_mild_swearing_is_masked_before_it_is_shown():
+    llm = ScriptedLLM(
+        intro=["What the hell? Your alarm clock is a duck. Damn."],
+        judge=['{"made_progress": true, "explanation": "Damn good plan."}'],
+        outcome=[("Crap, the geese scatter.\nCHALLENGE: A bloody great walrus sits on the bus.", "Hmm, damn geese.")],
+    )
+    ui, _, console = make_ui(["I damn well sprint past the geese", "quit"])
+    summary = Game(llm, ui).run()
+    record = summary.rounds[0]
+    assert summary.intro == "What the h***? Your alarm clock is a duck. D***."
+    assert record.player_plan == "I d*** well sprint past the geese"
+    assert record.judge_explanation == "D*** good plan."
+    assert summary.rounds[0].llm_calls[1][1].reasoning == "Hmm, d*** geese."
+    assert summary.rounds[0].llm_calls[1][1].text.startswith("C***, the geese scatter.")
+    text = output(console)
+    assert "C***, the geese scatter." in text and "A b***** great walrus" in flat(console)
+    for word in ("hell", "Damn", "damn", "Crap", "bloody"):
+        assert word not in text.replace("hello", "")
+    # The plan the model hears is the softened one; no filter notes for mere swearing.
+    assert "I d*** well sprint" in calls_for(llm, "judge")[0]["messages"][-1]["content"]
+    assert record.safety_notes == []
+
+
+@pytest.mark.skipif(MockBackend is None, reason="backends/mock.py not available")
+def test_a_masked_plan_echoed_by_the_model_keeps_its_stars():
+    ui, _, console = make_ui(["by bike, damn it", "quit"])
+    summary = Game(MockBackend(seed=5), ui).run()
+    assert summary.rounds[0].player_plan == "by bike, d*** it"
+    assert '"by bike, d*** it"' in flat(console)  # not "d* it": the markdown clean-up leaves it alone
+    assert "damn" not in output(console)
+
+
+def test_an_unfriendly_plan_is_refused_and_never_reaches_the_model_or_jev():
+    client, transport = make_jev(ok())
+    llm = ScriptedLLM()
+    ui, script, console = make_ui(["I sell c0caine to the geese", GOOD_PLANS[0], "quit"])
+    game = Game(llm, ui, jev=client)
+    summary = game.run()
+    assert len(summary.rounds) == 1 and summary.rounds[0].player_plan == GOOD_PLANS[0]  # no round was used up
+    assert "Let's keep it family-friendly - try another plan!" in output(console)
+    assert all("c0caine" not in str(call["messages"]) for call in llm.calls)
+    assert all("c0caine" not in json.dumps(call["body"]) for call in transport.calls)
+    note = "A plan was refused by the family-friendly filter (drugs); the player tried again."
+    assert summary.rounds[0].safety_notes == [note] and game.safety_notes == [note]
+    assert [p.count("How do you plan to get to work?") for p in script.prompts] == [1, 1, 0]
+
+
+def test_a_refused_plan_then_quitting_keeps_the_note_on_the_game():
+    ui, _, _ = make_ui(["A decapitated snowman is my ride", "quit"])
+    game = Game(ScriptedLLM(), ui)
+    summary = game.run()
+    assert summary.quit_early and summary.rounds == []
+    assert game.safety_notes == ["A plan was refused by the family-friendly filter (graphic gore); the player "
+                                 "tried again."]
+
+
+def test_a_plan_trimmed_into_an_unfriendly_word_is_refused_too():
+    ui, _, console = make_ui(["I walk past the field of heroines", "quit"])
+    summary = Game(ScriptedLLM(), ui, max_input_chars=len("I walk past the field of heroin")).run()
+    assert summary.rounds == []
+    assert "family-friendly" in output(console) and "epic plan" not in output(console)
+
+
+def test_unfriendly_endings_are_replaced_by_the_built_in_ones():
+    llm = ScriptedLLM(victory=[UNSAFE_INTRO, UNSAFE_INTRO_2])
+    ui, _, console = make_ui([GOOD_PLANS[0]])
+    summary = Game(llm, ui, target=1).run()
+    assert summary.won and summary.ending == FALLBACK_VICTORY
+    assert "YOU GOT TO WORK!" in output(console) and "cocaine" not in output(console)
+
+    llm = ScriptedLLM(ending_quit=[UNSAFE_INTRO, "You go home and have a nice cup of tea."])
+    ui, _, console = make_ui(["quit"])
+    summary = Game(llm, ui).run()
+    assert summary.ending == "You go home and have a nice cup of tea."  # the second try passed
+    assert [r.text for _, r in summary.ending_calls] == [hidden("drugs"), "You go home and have a nice cup of tea."]
+
+    llm = ScriptedLLM(ending_quit=[UNSAFE_INTRO, UNSAFE_INTRO_2])
+    ui, _, _ = make_ui(["quit"])
+    assert Game(llm, ui).run().ending == FALLBACK_QUIT
+
+
+def test_unfriendly_reasoning_is_hidden_and_never_taught():
+    llm = ScriptedLLM(intro=[("You wake up late.", "Let me mention cocaine somewhere.")])
+    ui, _, console = make_ui(["quit"])
+    game = Game(llm, ui)
+    summary = game.run()
+    assert summary.intro == "You wake up late."
+    assert summary.intro_calls[0][1].reasoning == hidden("drugs")
+    assert "Learn: Chain-of-thought" not in output(console)
+    assert "reasoning (intro)" in game.safety_notes[0]
+
+
+def test_safety_retries_are_recorded_like_every_other_call():
+    llm = ScriptedLLM(intro=[UNSAFE_INTRO], outcome=["Heroin.\nCHALLENGE: More heroin."],
+                      judge=['{"made_progress": true, "explanation": "cocaine"}'])
+    ui, _, _ = make_ui(GOOD_PLANS)
+    summary = Game(llm, ui).run()
+    recorded = summary.intro_calls + [c for r in summary.rounds for c in r.llm_calls] + summary.ending_calls
+    assert [p for p, _ in recorded] == llm.purposes()
+    assert summary.won
+
+
+def test_jev_labels_that_fail_the_filter_are_hidden():
+    body = jev_body(choice="cocaine")
+    body["answers"]["outcome"]["probabilities"] = {"cocaine": 0.9, "progress": 0.1}
+    client, _ = make_jev(ok(body))
+    ui, _, console = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(ScriptedLLM(), ui, jev=client).run()
+    record = summary.rounds[0]
+    assert record.judge == "jev" and "cocaine" not in record.judge_explanation
+    text = output(console)
+    assert "cocaine" not in text and "(hidden)" in text
+    assert "Jev's answer didn't pass" in record.safety_notes[0]
+
+
+def test_filtered_games_still_review_and_export_cleanly(tmp_path):
+    from gettowork import review
+
+    llm = ScriptedLLM(intro=[UNSAFE_INTRO], judge=['{"made_progress": true, "explanation": "cocaine"}'])
+    ui, _, _ = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(llm, ui).run()
+    data = review.summary_to_dict(summary)
+    markdown = review.summary_to_markdown(summary)
+    assert "cocaine" not in json.dumps(data) and "cocaine" not in markdown
+    assert hidden("drugs") in json.dumps(data)
+    ui, _, console = make_ui(["y", "y"])
+    review.run_review(ui, summary, export_dir=tmp_path)
+    assert "cocaine" not in output(console)
+    assert list(tmp_path.glob("*.json")) and list(tmp_path.glob("*.md"))
+
+
+class RawKeepingLLM(ScriptedLLM):
+    """Like llama-server: keeps the engine's whole JSON answer (content and thinking) in ``raw``."""
+
+    def chat(self, messages, *, temperature=0.9, max_tokens=700, json_mode=False):
+        result = super().chat(messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode)
+        result.raw = {"choices": [{"message": {"role": "assistant", "content": result.text,
+                                               "reasoning_content": result.reasoning}, "finish_reason": "stop"}],
+                      "usage": {"completion_tokens": 42}}
+        return result
+
+
+def test_the_saved_transcript_never_keeps_blocked_thinking_or_unmasked_swearing_in_raw(tmp_path):
+    """The engine's raw answer repeats the text and the thinking: the filter covers it too."""
+    from gettowork import review
+
+    llm = RawKeepingLLM(intro=[("You overslept.\nCHALLENGE: A goose guards the door.",
+                                "Maybe the neighbour sells cocaine to the goose.")],
+                        outcome=["Damn, the goose honks and flaps off.\nCHALLENGE: A puddle."])
+    ui, _, _ = make_ui([GOOD_PLANS[0], "quit"])
+    summary = Game(llm, ui).run()
+    ui, _, _ = make_ui(["n", "y"])  # no reasoning review; yes to the export
+    review.run_review(ui, summary, export_dir=tmp_path)
+    [saved] = list(tmp_path.glob("*.json"))
+    text = saved.read_text(encoding="utf-8")
+    assert "cocaine" not in text and "Damn" not in text
+    assert "D***" in text or "d***" in text  # masked, as on screen
+    data = json.loads(text)
+    kept = [c["raw"] for c in data["rounds"][0]["llm_calls"] if c["raw"]]
+    assert kept and all(c["usage"] == {"completion_tokens": 42} for c in kept)  # the numbers are kept
+
+
+@pytest.mark.skipif(MockBackend is None, reason="backends/mock.py not available")
+def test_the_pretend_model_never_trips_the_filter():
+    ui, _, _ = make_ui(GOOD_PLANS)
+    game = Game(MockBackend(seed=3), ui)
+    summary = game.run()
+    assert summary.won and game.safety_notes == []
+    assert all(r.safety_notes == [] for r in summary.rounds)

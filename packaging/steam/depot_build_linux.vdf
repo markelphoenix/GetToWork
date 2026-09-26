@@ -1,0 +1,16 @@
+// SteamPipe depot build: the Linux + SteamOS (Steam Deck) depot of Get To Work.
+// content/linux/ holds the unpacked Linux archive: content/linux/GetToWork/GetToWork ...
+// (unpack it with tar on Linux or macOS, so the programs stay executable).
+// Players' install folder then gets GetToWork/..., so the launch option is GetToWork/GetToWork.
+"DepotBuild"
+{
+	"DepotID" "<DEPOT_ID_LINUX>"
+	"FileMapping"
+	{
+		// Relative to the app build's ContentRoot (../content/).
+		"LocalPath" "linux/*"
+		// Relative to the game's install folder.
+		"DepotPath" "."
+		"Recursive" "1"
+	}
+}

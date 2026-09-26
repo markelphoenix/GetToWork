@@ -6,12 +6,25 @@ modules are built against. If code and this document disagree, fix one of them.
 ## The player's journey
 
 The design goal: **the player only ever picks a model.** Everything else —
-finding models that fit, downloading the engine, downloading the weights,
+finding models that fit, getting the engine ready, downloading the weights,
 starting the model — is automatic, explained in friendly language, and
 reversible.
 
-1. `gettowork` launches → banner. Returning players: "Welcome back! Play again
-   with Qwen3 4B? [Y/n]" skips straight to the game.
+There are two front ends and one game. Players launch the **built game**
+(Steam, or a double-clicked test build): its windowed program runs
+`launcher.gui_main()` → `gui.app.run_gui()`, which opens the game's own Tk
+window and runs the unchanged `cli.main()` on a worker thread, talking to the
+window through `UI`. Developers run `gettowork` in a terminal (`cli.main()`
+directly). The built game ships the llama.cpp engine inside it
+(`distribution.py`), so it never downloads programs; a developer copy
+downloads the engine as before. See the
+[Distribution section](#distribution-the-game-window-the-built-game-and-safety-as-built)
+below and [docs/DISTRIBUTION.md](DISTRIBUTION.md) for the build itself.
+
+1. The game launches → banner. On the very first launch, a short note says
+   the story is written live by an AI and how to report problems
+   (`notices.AI_CONTENT_NOTICE`, shown once). Returning players: "Welcome
+   back! Play with Qwen3 4B again? [Y/n]" skips straight to the game.
 2. **Hardware check** (`specs.py` + `perf.py`): OS, CPU (+ SIMD flags), RAM,
    GPU(s)/VRAM, Apple unified memory, free disk, plus a quick (< 1 s)
    multi-core memory *read* benchmark (~512 MB, bigger than any CPU cache). Summarised in plain English ("16 GB of RAM and an NVIDIA
@@ -38,8 +51,12 @@ reversible.
 5. **One confirmation, then automatic** (`setup_flow.py`): "Here's what will
    happen: ① download the llama.cpp engine (~40 MB, MIT, from GitHub)
    ② download Qwen3 4B Q4_K_M (2.5 GB, Apache-2.0, from Hugging Face)
-   ③ start it on your computer. OK? [Y/n]". Then:
-   - **Managed llama.cpp (default)** — `runtime_install.py` downloads the
+   ③ start it on your computer. OK? [Y/n]". In the built game step ① reads
+   "Built into the game (llama.cpp <tag>, Vulkan + CPU) - nothing to
+   download". Then:
+   - **Managed llama.cpp (default)** — the built game uses the engine builds
+     it ships with (`distribution.py`, read-only). A developer copy's
+     `runtime_install.py` downloads the
      official prebuilt `llama-server` for this OS/CPU/GPU from the
      ggml-org/llama.cpp GitHub releases (CUDA / Vulkan / Metal / CPU), verifies
      and unpacks it into the app's data folder; `download.py` fetches the GGUF;
@@ -88,22 +105,38 @@ reversible.
    and the last step is always the finale at the office). Reaching **5** (the
    commute plus four obstacles) wins: the LLM narrates a triumphant arrival at
    work. Typing `quit` ends early.
+   Every piece of model text is checked by the family-friendly filter
+   (`safety.py`) before it is shown, and every typed plan before it reaches
+   the model or Jev (see the Distribution section).
 9. **Review** (`review.py`): two *independent* yes/no questions — show the Jev
    request/response JSON per round? show the local model's exposed reasoning
    (chain-of-thought) per round? — each asked only when there is something to
    show (plus the local referee's JSON verdicts when it didn't think out loud),
    then an optional transcript export (JSON + Markdown, API key never included).
-10. On exit, the managed `llama-server` process is always stopped.
+10. **"Play again? [Y/n]"** (only when a person is playing): a new game with the
+    same running model and Jev client, no setup. After a game with the pretend
+    model picked from the menu the question is a menu - play again with it,
+    **Pick a real AI model** (back to setup's model menu) or quit.
+11. On exit, the managed `llama-server` process is always stopped.
 
 ## Package layout
 
 ```
 src/gettowork/
-  __init__.py        version
+  __init__.py        version (the one place it is set; pyproject reads it)
   __main__.py        `python -m gettowork` -> cli.main()
+  launcher.py        gui_main(): the windowed entry (Steam / double-click / `gettowork-gui`)
+  gui/
+    __init__.py      exports run_gui, GuiBridge, TerminalBuffer
+    terminal.py      TerminalBuffer: pure-Python ANSI/VT screen model (no Tk)
+    bridge.py        GuiBridge: thread-safe game thread <-> window plumbing (no Tk)
+    app.py           run_gui(), GameWindow: the Tk window
+  assets/icon.png    window icon (drawn by packaging/make_icon.py)
+  distribution.py    built game or developer copy? reads distribution.json
   types.py           shared dataclasses (read this first)
   ui.py              rich-based UI; all input/output goes through UI
-  config.py          settings file + data dirs
+  config.py          settings file + data dirs (+ --models-dir, command_name())
+  crashlog.py        write_crash_report(): logs/crash.txt (game errors), logs/gui-crash.txt (window)
   specs.py           hardware detection
   perf.py            bandwidth micro-benchmark + tokens/sec estimates
   catalog.py         curated seed models + the fit/ranking engine
@@ -122,17 +155,25 @@ src/gettowork/
   jev.py             Jev HTTP client + game questions + verdict parsing
   onboarding.py      Jev opt-in / API-key flow
   prompts.py         all LLM prompt text
+  safety.py          family-friendly filter (check_text / soften / check_player_input)
+  safety_terms.py    its word lists, ROT13-scrambled
+  notices.py         AI_CONTENT_NOTICE (first launch) + STEAM_AI_DISCLOSURE (store page)
   game.py            core game loop
   review.py          end-of-game review + transcript export
   setup_flow.py      hardware -> discovery -> pick -> install -> warm-up
   cli.py             argparse entry point
+packaging/           PyInstaller spec, entry scripts, fetch_engine / collect_licenses /
+                     assemble / make_icon, smoke_test.sh, steam/ (see DISTRIBUTION.md)
 tests/               pytest, no network, no real models
 ```
 
-Runtime deps: `rich` (MIT), `psutil` (BSD-3), `huggingface_hub` (Apache-2.0).
+Runtime deps: `rich` (MIT), `psutil` (BSD-3), `huggingface_hub` (Apache-2.0),
+plus the standard library's `tkinter` (Tcl/Tk, BSD-style) for the window only -
+imported lazily, so the terminal version works on a Python without Tk.
 Optional: `llama-cpp-python` (MIT). HTTP to GitHub, llama-server, Ollama and
 Jev uses only the Python standard library (`urllib.request`) so learners can
-see exactly what is sent. Python ≥ 3.10. Must run on Windows, macOS, Linux.
+see exactly what is sent. Python ≥ 3.10. Must run on Windows, macOS, Linux
+(including Steam Deck).
 
 Data locations (`config.py`): settings in `config_dir()`; models in
 `models_dir()`; add `runtime_dir()` = `config_dir()/runtime` (llama.cpp
@@ -381,7 +422,11 @@ def download_custom_gguf(repo_id: str, quant: str, ui: UI, dest_dir: Path | None
   author's license.
 - *As built:* `DownloadError(message, kind="other")` — `kind` ∈ not_found,
   gated, no_gguf, missing_file, network, offline_mode, server, disk,
-  incomplete, bad_repo_id. Default folder `model_folder(repo)` =
+  incomplete, bad_repo_id, not_family_friendly (a player-named repo - the
+  `custom` pick, `--model` - whose id or tags mark it uncensored, safety-removed
+  or adult, `hf_discovery.not_family_friendly`: refused before anything is
+  downloaded, since the Steam AI disclosure promises only family-friendly
+  models). Default folder `model_folder(repo)` =
   `models_dir()/<owner>--<name>`. Already-downloaded files are returned
   without any network call; offline, an existing local copy of the quant is
   reused. Progress: a tqdm-compatible bridge is passed as `tqdm_class` when the
@@ -407,6 +452,8 @@ def ensure_llama_server(ui: UI, specs: SystemSpecs, *, variant: RuntimeVariant |
                         http=None, runtime_root: Path | None = None) -> tuple[Path, RuntimeVariant]   # path to llama-server executable
 def installed_runtimes(runtime_root: Path | None = None) -> list[tuple[Path, str, str]]   # (exe, tag, variant)
 RUNTIME_EXPLAINER: str   # Markdown: what llama.cpp / llama-server is, why prebuilt, what CUDA/Vulkan/Metal mean
+RUNTIME_EXPLAINER_BUILT_IN: str   # the same for a built game: the engine ships inside it, nothing downloaded
+def runtime_explainer() -> str    # whichever of the two fits this copy (the model menu's `learn`)
 ```
 - Official release asset names (from ggml-org/llama.cpp `.github/workflows/release.yml`):
   `llama-<tag>-bin-macos-arm64.tar.gz`, `llama-<tag>-bin-macos-x64.tar.gz`,
@@ -686,12 +733,19 @@ def run_setup(ui: UI, settings: Settings, *, args) -> SetupResult | None   # Non
 Super-friendly, few decisions:
 1. Returning player with saved settings whose model file / runtime still
    exists → "Welcome back! Play with <model> again? [Y/n]" → start it
-   (warm-up) and return.
+   (warm-up) and return. If Jev was turned down last time, that question has a
+   third choice, `jev` - "Play with Jev on this time (the optional AI
+   referee)" (`WELCOME_BACK_JEV_OPTIONS`; `SetupResult.ask_jev` →
+   `run_jev_onboarding(ask_again=True)`): the window has no command line for
+   `--jev`. A pretend-model game passes `remember_no=False`, so a "no" to Jev
+   there isn't saved.
 2. "Let me take a look at your computer…" spinner → `specs.friendly_summary`
    + compact details table; `teach` panel (condensed memory + speed
    explainers) — offer "details?" rather than dumping walls of text.
 3. "Searching Hugging Face for models that fit your computer…" spinner →
-   `discover_models` → `rank_models` → `pick_shortlist` → a clean numbered
+   `discover_models` → `rank_models` → `pick_shortlist` (the "more" list
+   keeps the short list's numbers first, then the rest best first, so a number
+   picks the same model in both views) → a clean numbered
    table: #, badge, model, download size, est. speed ("~25 tokens/s"),
    license, one-line why. Enter = Recommended. Extra options: `more`
    (show the full ranked list), `refresh` (re-query the Hub), `custom`
@@ -719,7 +773,20 @@ bandwidth behind the chosen placement is scaled by measured ÷ estimated
 `Settings.extra["speed_calibration"]` keyed by a hardware fingerprint for later
 launches (*Round 3:* only from bandwidth-dominated dense models, solved for
 the bandwidth, tagged with the engine build - see the Round 3 notes).
-`--mock` runs discovery with `offline=True`. Extra public helpers:
+`--mock` runs discovery with `offline=True`. In a built game (downloads off,
+managed engine) `find_models(..., engine_limits=True)` first drops discovered
+models whose GGUF architecture the bundled llama.cpp release doesn't know
+(`models_for_engine`: `SetupServices.engine_architectures` =
+`runtime_install.engine_architectures()`, the `architectures` list
+`fetch_engine.py` writes into each bundled `install.json`; unknown
+architectures are kept; a note says how many were left out), since the game
+can't update its engine and they would download and then fail; a custom repo
+or `--model` of such an architecture is warned about first
+(`engine_lacks_message`). When free disk space alone rules every model out
+(`catalog.disk_space_needed`), the empty menu, `--list-models` and
+`specs.friendly_summary` say so - how much the smallest model needs, how much
+is free, and `--models-dir` (`disk_space_warning` / `specs.disk_space_advice`,
+worded per `ui.option_hint`) - instead of blaming memory. Extra public helpers:
 `find_models`, `ModelSearch`, `show_hardware`, `model_table`/`show_model_table`,
 `entry_for_fit`, `fit_for_quant`, `calibrate_specs`, `apply_saved_calibration`,
 `entry_to_dict`/`entry_from_dict`, `default_backend_factory`.
@@ -743,7 +810,9 @@ runtime), `--list-models` (print the ranked shortlist for this machine and
 exit), `--specs` (print hardware + bandwidth and exit), `--refresh-models`
 (ignore discovery cache), `--offline` (no network: cache or curated seeds),
 `--all-licenses` (include non-permissive licenses in discovery; shows each
-license prominently), `--no-jev`, `--think` (let a thinking model think out
+license prominently), `--no-jev`, `--jev` (ask about Jev again after
+choosing the local model only), `--models-dir DIR` (keep models in this
+folder; remembered), `--think` (let a thinking model think out
 loud even when it's slow), `--target N` (default 5), `--reset` (forget saved
 settings), `--export-dir DIR`, `--debug` (tracebacks), `--version`.
 Ctrl+C anywhere exits cleanly with a friendly line (exit code 130); the
@@ -752,9 +821,12 @@ by `--no-jev`) → Game.run() → run_review().
 *As built:* `main(argv=None, *, ui=None, services=None)` (test hooks). Exit
 codes: 0 ok (including choosing `quit` - at a menu, or typed at a yes/no
 question, which raises `UserChoseQuit`, a `UserQuit` subclass; in the game it
-still leads to the quit ending and the review), 1 unexpected error (friendly line +
-"rerun with --debug"; `--debug` prints the traceback), 2 bad option or a
-missing `--gguf` file, 130 Ctrl+C. `-h` and `--version` return 0 instead of
+still leads to the quit ending and the review), 1 unexpected error (friendly line;
+the traceback is saved to `logs/crash.txt` via `crashlog.write_crash_report`
+and its path shown; `--debug` also prints it; the terminal names
+`<command_name()> --reset`, the window offers to forget the settings right
+away), 2 bad option, a missing `--gguf` file or an unusable `--models-dir`,
+130 Ctrl+C. `-h` and `--version` return 0 instead of
 raising `SystemExit`; `--quant` is upper-cased; `--target` accepts 1–50.
 SIGTERM, SIGHUP and (Windows) SIGBREAK are handled like Ctrl+C for the
 duration of main(); the previous handlers are restored on return. The engine
@@ -766,17 +838,300 @@ Each launch also writes an owner record, and the next launch stops any engine
 whose game is gone (`reap_orphaned_servers`). `main()` also makes stdin
 tolerant of undecodable bytes (`ui.make_input_safe`) and passes the warm-up
 speed and context window to `Game`.
+*Distribution (as built):* the first launch shows `notices.AI_CONTENT_NOTICE`
+once (`show_ai_notice_once`, remembered as `Settings.extra["ai_notice_seen"]`);
+after each review `ask_to_play_again` offers "Play again? [Y/n]" and loops with
+the same backend and Jev client - or, after a pretend model picked from the
+menu (not `--mock`), `after_pretend_game` offers `AFTER_PRETEND_OPTIONS`
+(again / **Pick a real AI model** / quit): "real" closes the pretend model and
+runs `run_setup` again (the model menu; Jev is asked again, since the trial's
+"no" wasn't saved), and quitting names the way to a real model. Both happen only when a person is playing
+(`player_is_present`: a real terminal or the game's window), so piped input
+and scripted tests see exactly the old flow. The games of one session share one
+set of "Learn" panels already shown (`Game(taught=...)`). A returning player
+who chose the local model only isn't asked about Jev again unless `--jev`
+(`run_jev_onboarding(..., ask_again=...)`). `--specs` shows `available_plan`
+(only the builds a built game ships) and `runtime_install.engine_summary()`.
+The built game's console program
+double-clicked on Windows waits for Enter before its window closes
+(`launcher.console_closes_on_exit` / `wait_before_closing`), including after
+errors. The window runs this same `main(argv, ui=...)` on a worker thread.
+
+## Distribution: the game window, the built game and safety (as built)
+
+Get To Work ships as a free double-click / Steam game. This section records
+the modules added for that; [docs/DISTRIBUTION.md](DISTRIBUTION.md) is the
+detailed contract (build layout, packaging scripts, CI, Steam) and has the
+same authority as this document.
+
+### distribution.py
+```python
+@dataclass(frozen=True)
+class Distribution:
+    channel: str = "dev"                 # "dev" (no distribution.json) or "release"
+    engine_downloads: bool = True        # may the game download llama.cpp at run time?
+    engine_dirs: tuple[Path, ...] = ()   # folders holding bundled engine builds
+    llama_cpp_tag: str | None = None
+    app_version: str = __version__
+    root: Path | None = None             # folder holding distribution.json
+    built_from: str | None = None        # git commit of the build
+    notes: tuple[str, ...] = ()          # anything odd noticed while reading the file
+    @property
+    def bundled(self) -> bool            # at least one engine dir exists
+def find_distribution_file() -> Path | None
+def load(*, refresh: bool = False) -> Distribution   # cached, thread-safe, never raises
+```
+- `distribution.json` is looked for at `$GETTOWORK_DISTRIBUTION`, next to
+  `sys.executable`, in `../Resources/` (macOS .app), then in `sys._MEIPASS`.
+  None found → developer copy (downloads allowed, no engine dirs) - but a
+  built game (`sys.frozen`) keeps downloads off and looks in the `engine/`
+  folder next to its executable. A damaged file → the `engine/` folder beside
+  it and a note; downloads stay on only in a developer copy.
+- `GETTOWORK_ENGINE_DIR` (one or more folders, `os.pathsep`-separated) is
+  checked first; `GETTOWORK_ALLOW_ENGINE_DOWNLOAD=1`/`0` forces downloads on or
+  off. The live-check workflow uses both to play through a real engine exactly
+  like the Steam build does.
+
+### The bundled engine (runtime_install.py, backends/llamaserver.py, setup_flow.py)
+- `installed_runtimes()` also lists the builds in `distribution.load().engine_dirs`
+  (each `<tag>-<variant>/` folder with an `install.json` carrying
+  `"bundled": true`). Bundled builds are **read-only**: never pruned, never
+  written to; `mark_unusable()` for one records the verdict in
+  `runtime_dir()/bundled-unusable.json` (`BUNDLED_UNUSABLE_FILE`, keyed
+  `"<tag>-<variant>"`, plus the program's size and mtime: a repaired or
+  different copy of the file gets a fresh check), which `unusable_reasons()` merges.
+- `downloads_allowed()` (False in a built game) makes `ensure_llama_server`
+  work offline: `choose_installed(plan, specs)` takes the best planned build
+  that is here (CUDA isn't bundled → Vulkan/Metal) - this copy's own builds
+  first, of any type or release, before any other install sharing the
+  settings folder (`own_builds_first`: a developer copy's newer download or
+  its CUDA build never beats the engine that ships; other installs count only
+  when no own build will do) - CPU mode on a bundled
+  build is the last resort, and with nothing installed it raises
+  `RuntimeInstallError(ENGINE_MISSING_MESSAGE)` ("The game's built-in engine is
+  missing. On Steam: ... Verify integrity. Otherwise re-download the game.").
+  `available_plan(specs)` is the plan a built game can really try (used by
+  `--specs`); `find_installed(variant, specs)` finds a build that can serve
+  as a variant (on Apple Silicon the Metal build *is* the CPU build: it runs
+  on the processor with `--device none`); `is_bundled(exe)` tells bundled
+  builds apart.
+- `relocate_engine(saved_exe)`: settings store the full path of the engine
+  that worked; a built game's engine moves with the game (another Steam
+  library, the app dragged elsewhere), so the same `<tag>-<variant>` build -
+  or else the newest of the same variant - is looked up again (setup's
+  "Welcome back" and `LlamaServerBackend.prepare` both use it). In a built
+  game a saved engine that still exists but belongs to another copy (an older
+  download, a developer copy sharing the settings folder) is swapped for this
+  copy's own build of the same type (`own_build_instead`), so the engine that
+  ships is the one that runs. A moved game's saved build is looked up among
+  its own builds first too.
+- `engine_architectures()`: in a built game, the model architectures its own
+  builds' `install.json` files list (`architectures`, from the pinned
+  release's `src/llama-arch.cpp`); None in a developer copy or for builds
+  that recorded none (then nothing is filtered).
+- `bundled_builds_problem()`: every built-in build present but noted as
+  unable to run here (on a Mac, the one Metal build) → the built-in
+  "can't run on this computer" wording instead of `ENGINE_MISSING_MESSAGE`.
+  `engine_problem`, `is_available`, `_use_builds_here` and setup's engine step
+  use it.
+- `engine_summary()` (for `--specs` and the build's smoke test): "built into
+  the game: llama.cpp <tag> (CPU, Vulkan); engine downloads off", or
+  "... engine downloads on" in a developer copy. `runtime_explainer()` picks
+  `RUNTIME_EXPLAINER_BUILT_IN` in a built game (no downloads, no CUDA).
+  `other_engines_hint()` names Ollama, plus `pip install llama-cpp-python`
+  only where that can work (`llama_cpp_python_possible()`: not frozen, and
+  downloads allowed).
+- `LlamaServerBackend`: the GPU → CPU fallback only considers builds that are
+  here when downloads are off (a failing Vulkan/Metal build falls back to the
+  bundled CPU build or `--device none` on the same exe). A model whose
+  architecture the bundled engine doesn't know gets a "builtin" explanation
+  (pick another model; game updates bring newer engines) instead of an
+  engine download - after trying the newest build of that type already on
+  disk, if the one that failed was older. `is_available()` reports "The
+  game's built-in llama.cpp engine is ready (<tag>, <variant>)". `close()` is
+  final until the next `prepare()` (`_closed`, guarded by a lock around
+  launching): once the game is quitting, `_launch`, `_ensure_running` and
+  `_switch_after_crash` refuse to start an engine, so a request failing
+  because `atexit` stopped the engine never starts a CPU-mode one that nothing
+  would stop (macOS has no parent-death signal).
+- `setup_flow`'s confirmation screen shows "Built into the game (llama.cpp
+  <tag>, Vulkan + CPU) - nothing to download" (Metal + CPU on a Mac) with a
+  line saying llama.cpp's MIT license text ships as THIRD_PARTY_LICENSES.txt;
+  `planned_engine_key` uses the build a built game will really run, so speed
+  calibration is keyed correctly.
+- Helpers `fetch_release(tag)`, `download_asset`, `unpack_archive`,
+  `finish_unpacked`, `install_marker(..., bundled=True, license_files=...)`
+  and `releases_newest_first` are public so `packaging/fetch_engine.py`
+  reuses the game's own verified download and safe-extract code.
+
+### gui/ (terminal.py, bridge.py, app.py)
+- `terminal.TerminalBuffer(*, max_lines=10_000, rows=24)`: pure-Python ANSI/VT screen
+  model. `feed(text)`, `lines` (runs of `(text, Style)`), `take_dirty()`,
+  `cursor`, `text()`. Wide and zero-width characters, `\n \r \b \t`, CSI
+  cursor movement / erase / SGR (16, 256 and truecolor), OSC 8 hyperlinks
+  (runs carry the URL), everything else dropped safely, even when split
+  across chunks. Rich's `Live`/`Status`/`Progress` redraws work as in a
+  terminal.
+- `bridge.GuiBridge(columns=100, rows=32, opener=None)`: `.stream` (what the
+  game's rich Console writes to; `isatty()` True, UTF-8), `request_line(prompt,
+  *, secret=False)` (blocks the game thread; `EOFError` once closed),
+  `show_choices(options)`, `open_url(url)` (http/https only), `closed`,
+  `columns`; the window side calls `poll()` and `submit(text, prompt_id)`,
+  and `close()` / `detach()` when the window goes.
+  Answers name the prompt they answer, so a late click can't answer the next
+  question. No Tk import.
+- `app.run_gui(argv=None, *, selftest=False, game_main=None) -> int` and
+  `GameWindow(root, argv, *, game_main, selftest, opener, env, ...)`: the Tk
+  window on the main thread (macOS requires it), `cli.main(argv, ui=...)` on a
+  daemon worker thread with `UI(console=Console(file=bridge.stream,
+  force_terminal=True, color_system="truecolor", width=<cols>, ...),
+  choices_fn=bridge.show_choices, hides_input=True, window=True, pauses=True, ...)`. Dark theme,
+  monospace font from `FONT_CANDIDATES`, clickable links, menu buttons, input
+  history (Up/Down), Ctrl+= / Ctrl+- / Ctrl+0 zoom saved as
+  `Settings.extra["gui_font_size"]`, F11 full screen. Full screen with a bigger
+  font and a **Keyboard** button (`steam://open/keyboard`) on a Steam Deck / in
+  Big Picture (`SteamDeck`, `SteamGamepadUI`, `GAMESCOPE_WAYLAND_DISPLAY`;
+  `GETTOWORK_FULLSCREEN=1/0` overrides); full screen keeps the 16-point font
+  while 80×24 characters fit (`FULLSCREEN_MIN_COLUMNS/ROWS`), so it stays big on
+  the Deck's 1280×800 screen. A **Report a problem** button opens
+  `notices.report_url()` (Steam's overlay can't open over a Tk window) - and
+  always writes that link into the transcript first (a browser may never
+  appear), adding a "copy the link above" line if opening failed; on a Steam
+  Deck / in Big Picture it goes through `steam://openurl/` (Steam's own
+  browser, over the game). Menu buttons show each option's short label, never
+  two that could be mistaken for each other (`button_labels` /
+  `labels_look_alike`: "Yes" next to "Yes, play" gets its full label). Pastes
+  always land in the input bar (a click on the transcript gives focus back;
+  Ctrl/Cmd+V there is redirected; Ctrl+Shift+V; a right-click menu). Keys that
+  aren't typing - a modifier on its own (the Ctrl of Ctrl+C), F-keys, Escape -
+  are left alone on the transcript, so Ctrl+C copies a selection and F11 works
+  first time; the transcript has its own right-click Copy / Select all. Lone
+  surrogates are replaced before they reach Tk (`bridge.clean_text`); a failed
+  redraw is logged once and the transcript redrawn, while the question still
+  appears. Transcripts default to
+  `default_export_dir()` (`~/Documents/Get To Work`, else
+  `config_dir()/transcripts`) unless the player passes `--export-dir`; macOS
+  `-psn_...` arguments are dropped. When the game ends: "Press Enter or close
+  the window to exit". Closing: mark closed → `EOFError` → `WindowClosed` (a
+  `UserQuit` the Jev setup and the review don't swallow) → the game's goodbye
+  and cleanup with no more model calls, wait ≤ 8 s, put stdout/stderr back
+  whatever replaced them (the window's spinners and progress bars don't
+  redirect them), return so `atexit` stops llama-server. A window that can't open writes `config_dir()/logs/gui-crash.txt`
+  and, from a terminal, plays there instead; otherwise a native message box
+  (`show_error_dialog`) says why and how to repair the install. Long answers
+  are echoed together with their question so rich wraps them inside the
+  window; key-shaped answers (`ui.looks_like_secret`, or one given at a key
+  question) are echoed as "(hidden)" and kept out of the history; the Jev key
+  menus take a key pasted straight into them (`UI.choose(accept=...)`). On a
+  Steam Deck the input area is at the top (Steam's keyboard covers the bottom).
+- Self-test (`--gui-selftest`, CI): `SelftestPlayer` answers by *what* is
+  asked (Enter at pauses and menus, plans, "n" to yes/no), the transcript must
+  contain "YOU GOT TO WORK", `$GETTOWORK_SELFTEST_OUT` receives it; exit 0 /
+  1 / 2 (timeout, default 120 s, `GETTOWORK_SELFTEST_TIMEOUT`). With no other
+  options it plays `--mock --no-jev`, in a throwaway `GETTOWORK_HOME`.
+
+### ui.py (additive)
+`UI.__init__(..., choices_fn=None, hides_input=False, window=False)`. With
+`window=True` (`ui.in_window`), an `EOFError` from the input function raises
+`WindowClosed` (subclass of `UserQuit`), hints are worded for the window (no
+commands or Ctrl+C), `status()` / `download_progress()` leave stdout/stderr
+alone, and the model menu's buttons come from setup's `_menu_buttons`.
+`choose()`, `confirm()`
+(`[("y", "Yes"), ("n", "No")]`) and `pause()` (`[("", "Continue")]`) call
+`choices_fn(options)` before asking and `choices_fn([])` afterwards (errors
+in it are ignored); `can_hide_input()` is True with `hides_input`. No change
+for the terminal.
+
+### launcher.py
+`gui_main(argv=None) -> int` (the windowed executable, `gettowork-gui`,
+`python -m gettowork.launcher`): strips `--gui-selftest`, runs
+`gui.app.run_gui`. `console_closes_on_exit()` (Windows + frozen + the console
+belongs to this process alone + stdin is a TTY) and
+`wait_before_closing(input_fn=None)` keep a double-clicked console window
+open. `restore_system_library_path()` (called first by both frozen entry
+scripts) undoes PyInstaller's `LD_LIBRARY_PATH` for the programs the game
+starts on Linux (engine, browser, hardware checks), so they load the system's
+libraries, not the game's bundled copies. Imports neither Tk nor the game at
+import time.
+
+### safety.py, safety_terms.py, notices.py (and game.py / prompts.py)
+```python
+@dataclass(frozen=True)
+class SafetyVerdict:
+    ok: bool; category: str | None = None; matched: str | None = None
+    @property
+    def label(self) -> str               # "graphic gore", or ""
+CATEGORY_LABELS: dict[str, str]          # sexual, hate, self_harm, gore, drugs
+def check_text(text) -> SafetyVerdict    # hard blocks; never raises
+def check_player_input(text) -> SafetyVerdict   # same lists, for typed plans
+def soften(text) -> str                  # masks mild swearing: "damn" -> "d***"; idempotent
+def normalize(text) -> str               # folding, lowercase, invisible chars, leetspeak inside words
+def hidden_note(verdict) -> str          # what the review/transcripts keep instead of blocked text
+```
+- Word lists are ROT13 in `safety_terms.py` (`BLOCKED` by category,
+  `MILD_PROFANITY`, `EXEMPT_PHRASES`); whole-word matching on several
+  readings of the normalised text (joined single letters, symbols inside a
+  word removed, stretched letters), phrases only within one clause. The
+  self-harm phrases are generated for every person and tense (`_phrases` over
+  small ROT13 building blocks), and figures of speech made from the same words
+  ("killing myself laughing"), compound nouns ("my own life jacket") and the
+  British crop are exempt.
+- `game.py`: every model text the player sees - intro, outcome narration and
+  challenge, victory/quit endings, local referee explanations, Jev's labels,
+  exposed reasoning - goes through `check_text`; a flagged story reply is
+  asked for once more with `prompts.safety_retry_messages(messages)` (adds
+  `SAFETY_REMINDER`, never repeats the rejected text), then replaced by a
+  built-in line from `backends/mock.py`; shown text is always `soften()`ed.
+  The kept `LLMResult.text`/`reasoning` becomes `hidden_note(...)` when
+  blocked, and `LLMResult.raw` (the engine's JSON, saved in exported
+  transcripts) goes through the same filter string by string
+  (`_screened_raw`), or is dropped when the reasoning was blocked. Notes (categories only) go to `RoundRecord.safety_notes` and
+  `Game.safety_notes`. A flagged plan is refused with
+  `FAMILY_FRIENDLY_REFUSAL` ("Let's keep it family-friendly - try another
+  plan!"), never sent to the model or Jev, and costs no round.
+- `notices.AI_CONTENT_NOTICE` (Markdown, first launch) and
+  `notices.STEAM_AI_DISCLOSURE` (the Steam content-survey text, quoted
+  verbatim in `packaging/steam/STORE_PAGE.md` and checked by a test);
+  `REPORT_HOW` says how to report problems: the window's **Report a problem**
+  button (`REPORT_BUTTON`, opening `report_url()` - the game's Steam
+  Discussions once `STEAM_APP_ID` is set, a store search before) or the store
+  page's Discussions. Steam's Shift+Tab overlay can't open over the Tk window
+  outside a Deck's Game Mode, so it isn't promised.
 
 ## Testing rules
 - `pytest` only, no network, no real models, no real browser. Use MockBackend,
   fake Jev transports, fake `hf_api`/`hf_download`, and `UI(console=Console(file=io.StringIO()), input_fn=scripted)`.
 - Each module has its own `tests/test_<module>.py`.
+- Tests that open real Tk windows (`tests/test_gui_app.py`) skip cleanly
+  without `tkinter` or a display; Linux CI runs the suite under `xvfb-run`.
+  `GuiBridge` and `TerminalBuffer` are tested with plain threads and strings.
+- Built-game behaviour is tested with `GETTOWORK_DISTRIBUTION` /
+  `GETTOWORK_ENGINE_DIR` / `GETTOWORK_ALLOW_ENGINE_DOWNLOAD` and
+  `distribution.load(refresh=True)`; the build scripts in `packaging/` are
+  tested with fake archives and fake `runner`s (`tests/test_packaging.py`,
+  `tests/test_fetch_engine.py`).
 
 ## Legal / safety rules for the codebase
 - No model weights are bundled. Models are downloaded by the player from
   Hugging Face under each model's own license; the game shows that license.
 - Curated seeds and default discovery results: Apache-2.0 / MIT only. `--all-licenses` shows others, and so does naming a model yourself (`custom`, `--model`) - always with the license visible and the same yellow warning.
-- The llama.cpp engine (MIT) is downloaded from the official ggml-org GitHub releases at the player's request; it is not bundled.
+- The llama.cpp engine (MIT) is **bundled in the game builds** (official
+  ggml-org release builds fetched and digest-checked in CI by
+  `packaging/fetch_engine.py`, used unmodified, license files kept -
+  llama.cpp's own MIT text and the texts of what's compiled into it
+  (cpp-httplib, jsonhpp, BoringSSL, LLVM OpenMP), which the build requires per
+  OS - and the Visual C++ runtime DLLs next to the Windows engine); a
+  developer copy downloads it from the official GitHub releases at the
+  player's request. It is never committed to the repository.
+- Every game build ships `THIRD_PARTY_LICENSES.txt` (`packaging/collect_licenses.py`):
+  every bundled Python distribution's license files, Python, Tcl/Tk, the
+  PyInstaller bootloader note (GPL with the bootloader exception) and the
+  llama.cpp licenses. Anything new that ships in the build must appear there
+  and in NOTICE.md.
+- Live-generated AI text has guardrails (Steam requires them): prompts ask for
+  family-friendly slapstick, `safety.py` checks every model text and typed
+  plan, the first launch discloses AI content, and `notices.STEAM_AI_DISCLOSURE`
+  must describe the guardrails accurately.
 - The hardware-fit heuristic is original code in this repo (MIT, no warranty).
 - Not affiliated with TypeSafe AI, Hugging Face, Ollama, or any model author;
   names are used only to identify their products.
@@ -967,7 +1322,9 @@ of each answer budget, in case an engine ignores the switches.
 game keeps a switchable model from thinking (slow, or a short context),
 `Game.thinking_note` says why and `run_review(thinking_skipped_note=...)`
 shows it instead of "your model doesn't think out loud". `--think` lets a slow
-model think anyway (`Game(force_think=True)`); the warm-up mentions it.
+model think anyway (`Game(force_think=True)`); the warm-up mentions it through
+`ui.option_hint` (the terminal command; in the window, Steam's Launch Options
+when Steam started the game, otherwise nothing - there's no command line).
 
 **Engine lifecycle (runtime_install.py, llamaserver.py, tls.py).** HTTPS
 (GitHub and Jev) uses `tls.https_context()`: truststore (the OS store), else
@@ -1003,7 +1360,22 @@ setup treats it as a failed start. A quiet restart happens once; a second
 stop switches setup. A GPU start that times out with no load progress at all
 - nothing in its log and no disk reads - may be a stuck device (`gpu_hang`):
 the player is asked whether to keep waiting or try the next build (the build
-that works is saved for next time, so this is never switched silently). On
+that works is saved for next time, so this is never switched silently). A
+graphics build that gives way to the separate CPU build (Windows/Linux) for a
+reason that may not last - no graphics card found, a driver hiccup, graphics
+memory running out, a crash on the warm-up, a hang - is noted in
+`runtime_dir()/gpu-switch.json` (`GPU_SWITCH_FILE`: from, to, reason, time, a
+game-version + GPU-driver fingerprint). When a later launch's saved engine is
+that CPU build, `_back_to_gpu_build` tries the graphics build again: for "no
+graphics card" by asking `--list-devices` every launch; for the others once
+the graphics driver or the game changed, or after `GPU_RETRY_AFTER_S` (7 days;
+a hang only after a change) - otherwise it says why the game is still on the
+processor. (On a Mac the fallback is the same Metal program in CPU mode, so
+the saved engine stays the GPU build.) Windows refusing to start the engine -
+Smart App Control / an app-control policy (WinError 4551) or an antivirus
+quarantine (225) - is explained (`windows_block_message`), and a missing
+library under Steam asks for Steam's file check, never `apt install`
+(`missing_library_hint(env=..., bundled=...)`). On
 Windows (no `flock`) each game writes its own `llama-server-<pid>-<id>.log`.
 
 **Fit engine (catalog.py, perf.py, setup_flow.py).** See the catalog/perf

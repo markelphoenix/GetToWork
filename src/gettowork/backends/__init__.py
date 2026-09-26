@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import platform
+import sys
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .base import BackendError, LLMBackend
@@ -90,7 +91,7 @@ def _check_managed(system: str, machine: str) -> tuple[bool, str]:
         return False, (
             f"llama.cpp doesn't publish a ready-made engine for {system or 'this system'} on "
             f"{machine or 'this processor'}, so automatic setup isn't possible here. "
-            "Ollama or llama-cpp-python may still work."
+            + _other_engines_hint()
         )
     try:
         from ..runtime_install import installed_runtimes
@@ -113,6 +114,15 @@ def _check_ollama(host: Optional[str], http: Any) -> tuple[bool, str]:
         return False, f"Couldn't check for Ollama ({exc})."
 
 
+def _other_engines_hint() -> str:
+    try:
+        from ..runtime_install import other_engines_hint
+
+        return other_engines_hint("may still work")
+    except Exception:
+        return "Ollama may still work."
+
+
 def _check_llamacpp(find_spec: Callable[[str], Any]) -> tuple[bool, str]:
     try:
         found = find_spec("llama_cpp") is not None
@@ -120,6 +130,8 @@ def _check_llamacpp(find_spec: Callable[[str], Any]) -> tuple[bool, str]:
         found = False
     if found:
         return True, "llama-cpp-python is installed."
+    if getattr(sys, "frozen", False):
+        return False, "llama-cpp-python isn't part of this build of the game (its built-in engine does the same job)."
     return False, "llama-cpp-python isn't installed (optional: pip install llama-cpp-python)."
 
 

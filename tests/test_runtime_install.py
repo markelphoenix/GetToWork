@@ -9,6 +9,7 @@ import json
 import time
 import os
 import stat
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 
+from gettowork import distribution
 from gettowork import runtime_install as ri
 from gettowork.runtime_install import (
     CPU,
@@ -277,6 +279,14 @@ def no_live_vulkan_probe(monkeypatch):
     monkeypatch.setattr(ri, "_system_has_vulkan_loader", lambda: False)
     monkeypatch.setattr(ri, "_glibc_version", lambda: (2, 39))  # a modern Linux, whatever runs the tests
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def developer_copy(monkeypatch):
+    """Every test starts as a developer copy (downloads on, no built-in engine), whatever the shell has set."""
+    for var in ("GETTOWORK_DISTRIBUTION", "GETTOWORK_ENGINE_DIR", "GETTOWORK_ALLOW_ENGINE_DOWNLOAD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(distribution, "_cache", distribution.Distribution())
 
 
 @pytest.fixture(autouse=True)
@@ -1419,3 +1429,612 @@ def test_engine_can_use_gpu_ignores_gpu_builds_that_failed_here_for_good(tmp_pat
     ri.mark_unusable(folder / "llama-server", "cpu_unsupported")
     assert [v.name for v in ri.usable_plan(rtx)] == ["cpu"]
     assert not ri.engine_can_use_gpu(rtx)
+
+
+# ---------------------------------------------------------------------------
+# The built game: an engine that ships inside the game (distribution.py)
+# ---------------------------------------------------------------------------
+
+BUNDLE_ASSETS = {
+    "vulkan": "llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz",
+    "cpu": "llama-{tag}-bin-ubuntu-x64.tar.gz",
+    "metal": "llama-{tag}-bin-macos-arm64.tar.gz",
+    "win-vulkan": "llama-{tag}-bin-win-vulkan-x64.zip",
+    "win-cpu": "llama-{tag}-bin-win-cpu-x64.zip",
+}
+
+
+def built_game(monkeypatch, tmp_path, *, downloads: bool = False) -> Path:
+    """Pretend to be a built game whose engine folder is <tmp>/game/engine (via GETTOWORK_ENGINE_DIR)."""
+    engine = tmp_path / "game" / "engine"
+    engine.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("GETTOWORK_ENGINE_DIR", str(engine))
+    monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "1" if downloads else "0")
+    distribution.load(refresh=True)
+    return engine
+
+
+def bundle(engine: Path, tag: str, variant: str, *, asset: str | None = None, exe: str = "llama-server",
+           bundled_flag: bool = True) -> Path:
+    """A fake built-in build: <engine>/<tag>-<variant>/ with install.json and a fake llama-server."""
+    folder = engine / f"{tag}-{variant}"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / exe).write_bytes(b"#!engine")
+    name = (asset or BUNDLE_ASSETS.get(variant, "llama-{tag}-bin-ubuntu-x64.tar.gz")).format(tag=tag)
+    marker = {"tag": tag, "variant": variant, "exe": exe, "assets": [name], "licenses": {name: "MIT"}}
+    if bundled_flag:
+        marker["bundled"] = True
+    (folder / "install.json").write_text(json.dumps(marker), encoding="utf-8")
+    return folder / exe
+
+
+def runtime_install_of(root: Path, tag: str, variant: str) -> Path:
+    """A build the game downloaded earlier into <root>/llama.cpp/<tag>-<variant>/."""
+    folder = root / "llama.cpp" / f"{tag}-{variant}"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "llama-server").write_bytes(b"#!downloaded")
+    name = BUNDLE_ASSETS.get(variant, "llama-{tag}-bin-ubuntu-x64.tar.gz").format(tag=tag)
+    (folder / "install.json").write_text(json.dumps({"tag": tag, "variant": variant, "exe": "llama-server",
+                                                     "assets": [name]}), encoding="utf-8")
+    return folder / "llama-server"
+
+
+class NoNetwork:
+    """Fails the test if anything tries to reach the network."""
+
+    def __init__(self):
+        self.calls = []
+
+    def request(self, *args, **kwargs):
+        self.calls.append(args)
+        raise AssertionError("a built game must never touch the network for the engine")
+
+
+@pytest.fixture
+def no_default_http(monkeypatch):
+    """Even the default HTTP client must not be created (it would mean a download was attempted)."""
+    def refuse(*args, **kwargs):
+        raise AssertionError("no HTTP client should be needed")
+
+    monkeypatch.setattr(ri, "UrllibHttp", refuse)
+    monkeypatch.setattr(ri, "fetch_releases", refuse)
+
+
+def test_a_bundled_engine_dir_is_found_alongside_earlier_installs(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path, downloads=True)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    cpu = bundle(engine, "b7000", "cpu")
+    old = runtime_install_of(tmp_path, "b6900", "cpu")
+    assert installed_runtimes(tmp_path) == [(vulkan, "b7000", "vulkan"), (cpu, "b7000", "cpu"), (old, "b6900", "cpu")]
+    assert installed_runtimes(tmp_path, bundled=False) == [(old, "b6900", "cpu")]
+    assert ri.is_bundled(vulkan) and ri.is_bundled(cpu) and not ri.is_bundled(old)
+    assert distribution.load().bundled
+
+
+def test_the_games_own_copy_comes_first_for_the_same_release(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    mine = bundle(engine, "b7000", "cpu")
+    downloaded = runtime_install_of(tmp_path, "b7000", "cpu")
+    assert installed_runtimes(tmp_path)[0] == (mine, "b7000", "cpu")
+    assert installed_runtimes(tmp_path)[1] == (downloaded, "b7000", "cpu")
+
+
+def test_an_engine_dir_that_is_itself_a_build_folder_works(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    exe = bundle(engine, "b7000", "cpu")
+    monkeypatch.setenv("GETTOWORK_ENGINE_DIR", str(exe.parent))
+    distribution.load(refresh=True)
+    assert installed_runtimes(tmp_path) == [(exe, "b7000", "cpu")]
+
+
+def test_incomplete_bundled_builds_are_ignored(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    (engine / "b7000-vulkan").mkdir()  # no marker
+    gone = bundle(engine, "b7000", "cpu")
+    gone.unlink()  # marker but no executable
+    (engine / ".staging-x").mkdir()
+    (engine / "README.txt").write_text("hi")
+    assert installed_runtimes(tmp_path) == []
+
+
+def test_a_file_inside_the_engine_dir_counts_as_bundled_even_without_the_flag(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    exe = bundle(engine, "b7000", "cpu", bundled_flag=False)
+    assert ri.is_bundled(exe)
+    assert not ri.is_bundled(tmp_path / "elsewhere" / "llama-server")
+
+
+def test_downloads_off_never_touches_the_network_and_uses_the_best_bundled_build(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan", asset=BUNDLE_ASSETS["win-vulkan"], exe="llama-server.exe")
+    bundle(engine, "b7000", "cpu", asset=BUNDLE_ASSETS["win-cpu"], exe="llama-server.exe")
+    rtx = make_specs("Windows", "AMD64", [GPUInfo(name="RTX 4070", vendor="nvidia", vram_gb=12.0, driver_version="581.29")])
+    assert [v.name for v in plan_variants(rtx)] == ["cuda-13", "cuda-12", "vulkan", "cpu"]
+    http = NoNetwork()
+    ui = make_ui()
+    exe, variant = ensure_llama_server(ui, rtx, http=http, runtime_root=tmp_path)
+    assert (exe, variant) == (vulkan, VULKAN)  # CUDA isn't built in: the best one that is
+    assert http.calls == []
+    text = output(ui)
+    assert "built-in llama.cpp engine (b7000, Vulkan build)" in text and "nothing to download" in text
+
+
+def test_downloads_off_on_a_computer_without_a_gpu_uses_the_bundled_cpu_build(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    bundle(engine, "b7000", "vulkan")
+    cpu = bundle(engine, "b7000", "cpu")
+    assert ensure_llama_server(make_ui(), make_specs(), http=NoNetwork(), runtime_root=tmp_path) == (cpu, CPU)
+    # An explicit request (the GPU -> CPU fallback) needs no network either.
+    assert ensure_llama_server(make_ui(), make_specs(), variant=CPU, http=NoNetwork(), runtime_root=tmp_path) == (cpu, CPU)
+
+
+def test_downloads_off_the_mac_metal_build_doubles_as_the_cpu_build(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    metal = bundle(engine, "b7000", "metal")
+    mac = make_specs("Darwin", "arm64", [APPLE])
+    assert ensure_llama_server(make_ui(), mac, http=NoNetwork(), runtime_root=tmp_path) == (metal, METAL)
+    ui = make_ui()
+    assert ensure_llama_server(ui, mac, variant=CPU, http=NoNetwork(), runtime_root=tmp_path) == (metal, CPU)
+    assert "Apple Metal build, in CPU mode" in output(ui)
+
+
+def test_downloads_off_without_a_cpu_build_runs_a_graphics_build_in_cpu_mode(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    # No Vulkan loader, no GPU: the plan is just [CPU], and there's no CPU build.
+    assert ensure_llama_server(make_ui(), make_specs(), http=NoNetwork(), runtime_root=tmp_path) == (vulkan, CPU)
+
+
+def test_downloads_off_a_build_that_isnt_built_in_is_explained(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    bundle(engine, "b7000", "cpu")
+    with pytest.raises(RuntimeInstallError, match="isn't built into this copy of the game"):
+        ensure_llama_server(make_ui(), make_specs(), variant=VULKAN, http=NoNetwork(), runtime_root=tmp_path)
+
+
+def test_downloads_off_with_a_missing_bundle_says_how_to_repair_the_game(tmp_path, monkeypatch, no_default_http):
+    built_game(monkeypatch, tmp_path)  # the engine folder is empty
+    with pytest.raises(RuntimeInstallError) as err:
+        ensure_llama_server(make_ui(), make_specs(), http=NoNetwork(), runtime_root=tmp_path)
+    assert str(err.value) == ri.ENGINE_MISSING_MESSAGE
+    assert "Verify integrity" in str(err.value) and "re-download the game" in str(err.value)
+    assert "Properties → Installed Files" in ri.ENGINE_MISSING_MESSAGE
+
+
+def test_downloads_off_a_bundle_for_another_computer_is_not_used(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    bundle(engine, "b7000", "metal")  # an Apple Silicon build, on a Linux PC
+    with pytest.raises(RuntimeInstallError, match="built-in engine is missing"):
+        ensure_llama_server(make_ui(), make_specs(), http=NoNetwork(), runtime_root=tmp_path)
+
+
+def test_downloads_off_the_games_own_build_wins_over_a_newer_earlier_download(tmp_path, monkeypatch,
+                                                                              no_default_http):
+    """A developer copy sharing the settings folder downloaded a newer llama.cpp: the built game still runs
+    the engine it ships - the one players get - even on its very first setup (and for an "update")."""
+    engine = built_game(monkeypatch, tmp_path)
+    own = bundle(engine, "b7000", "cpu")
+    runtime_install_of(tmp_path, "b7100", "cpu")
+    ui = make_ui()
+    assert ensure_llama_server(ui, make_specs(), http=NoNetwork(), runtime_root=tmp_path) == (own, CPU)
+    assert "built-in llama.cpp engine (b7000" in output(ui) and "b7100" not in output(ui)
+    assert ensure_llama_server(make_ui(), make_specs(), variant=CPU, update=True, http=NoNetwork(),
+                               runtime_root=tmp_path) == (own, CPU)
+    assert ri.choose_installed([CPU], make_specs(), runtime_root=tmp_path)[0] == own
+    assert ri.available_plan(make_specs(), tmp_path) == [CPU]
+
+
+def test_downloads_off_an_earlier_download_still_counts_when_the_game_has_no_build_that_fits(
+        tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    bundle(engine, "b7000", "metal")  # (nothing of its own runs on this Linux PC)
+    newer = runtime_install_of(tmp_path, "b7100", "cpu")
+    ui = make_ui()
+    assert ensure_llama_server(ui, make_specs(), http=NoNetwork(), runtime_root=tmp_path) == (newer, CPU)
+    assert "already installed (b7100" in output(ui)
+
+
+def test_downloads_off_the_games_vulkan_build_wins_over_another_copys_cuda_build(tmp_path, monkeypatch,
+                                                                                 no_default_http):
+    """On an NVIDIA PC the plan starts with CUDA, which the game doesn't ship: a developer copy's CUDA download
+    (even an older release) must not beat the game's own Vulkan build - of any type, own builds come first."""
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7100", "vulkan")
+    bundle(engine, "b7100", "cpu")
+    runtime_install_of(tmp_path, "b7000", "cuda-12")
+    rtx = make_specs("Linux", "x86_64", [NVIDIA], flags=["vulkan"])  # plan: cuda-12, vulkan, cpu
+    assert ensure_llama_server(make_ui(), rtx, http=NoNetwork(), runtime_root=tmp_path) == (vulkan, VULKAN)
+    assert ri.choose_installed(plan_variants(rtx), rtx, runtime_root=tmp_path)[:2] == (vulkan, "b7100")
+    assert [v.name for v in ri.available_plan(rtx, tmp_path)] == ["vulkan", "cpu"]
+    # A game that moved finds its own build of that type, not the developer copy's.
+    old_place = tmp_path / "OldLibrary" / "engine" / "b7100-vulkan" / "llama-server"
+    runtime_install_of(tmp_path, "b7100", "vulkan")
+    assert ri.relocate_engine(old_place, runtime_root=tmp_path) == vulkan
+
+
+def test_downloads_off_an_engine_update_never_downloads(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    cpu = bundle(engine, "b7000", "cpu")
+    ui = make_ui()
+    assert ensure_llama_server(ui, make_specs(), variant=CPU, update=True, http=NoNetwork(),
+                               runtime_root=tmp_path) == (cpu, CPU)
+    # Quietly: the caller says "trying the newest engine the game has" only when that's a different,
+    # newer engine - and when it's the one that just failed, the final error explains it.
+    assert "newest llama.cpp engine in this copy" not in output(ui)
+
+
+def test_downloads_on_a_bundled_best_build_is_reused_without_asking_github(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path, downloads=True)
+    cpu = bundle(engine, "b7000", "cpu")
+    ui = make_ui()
+    assert ensure_llama_server(ui, make_specs(), http=ExplodingHttp(), runtime_root=tmp_path) == (cpu, CPU)
+    assert "built-in llama.cpp engine" in output(ui)
+
+
+def test_marking_a_bundled_build_unusable_never_writes_into_the_game(tmp_path, monkeypatch, no_default_http):
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    cpu = bundle(engine, "b7000", "cpu")
+    before = (vulkan.parent / "install.json").read_bytes()
+    assert ri.mark_unusable(vulkan, "glibc", runtime_root=tmp_path) is True
+    assert (vulkan.parent / "install.json").read_bytes() == before  # the game's folder is read-only
+    notes = json.loads((tmp_path / ri.BUNDLED_UNUSABLE_FILE).read_text())
+    assert notes["builds"]["b7000-vulkan"]["reason"] == "glibc"
+    assert notes["builds"]["b7000-vulkan"]["variant"] == "vulkan"
+    assert installed_runtimes(tmp_path) == [(cpu, "b7000", "cpu")]
+    assert ri.unusable_reasons(tmp_path) == {"vulkan": "glibc"}
+    amd = make_specs("Linux", "x86_64", [AMD], flags=["vulkan"])
+    assert [v.name for v in ri.usable_plan(amd, tmp_path)] == ["cpu"]
+    assert ensure_llama_server(make_ui(), amd, http=NoNetwork(), runtime_root=tmp_path) == (cpu, CPU)
+    with pytest.raises(RuntimeInstallError, match="built-in llama.cpp engine can't run"):
+        ensure_llama_server(make_ui(), amd, variant=VULKAN, http=NoNetwork(), runtime_root=tmp_path)
+
+
+def test_the_default_note_file_lives_in_the_players_runtime_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("GETTOWORK_HOME", str(tmp_path / "home"))
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    assert ri.mark_unusable(vulkan, "cant_execute")
+    assert (tmp_path / "home" / "runtime" / ri.BUNDLED_UNUSABLE_FILE).is_file()
+    assert installed_runtimes() == []
+
+
+def test_a_game_update_gives_a_new_bundled_build_a_fresh_chance(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    old = bundle(engine, "b7000", "vulkan")
+    ri.mark_unusable(old, "glibc", runtime_root=tmp_path)
+    assert ri.unusable_reasons(tmp_path) == {"vulkan": "glibc"}
+    # Steam updates the game: the b7000 folder is replaced by b7200.
+    import shutil as _shutil
+    _shutil.rmtree(old.parent)
+    new = bundle(engine, "b7200", "vulkan")
+    assert installed_runtimes(tmp_path) == [(new, "b7200", "vulkan")]
+    assert ri.unusable_reasons(tmp_path) == {}
+
+
+def test_bundled_notes_expire_only_when_the_game_can_download_engines(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    ri.mark_unusable(vulkan, "cpu_unsupported", runtime_root=tmp_path)
+    later = time.time() + (ri.UNUSABLE_RETRY_DAYS + 1) * 86400
+    assert ri.unusable_reasons(tmp_path, now=later) == {"vulkan": "cpu_unsupported"}  # nothing newer can come
+    monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "1")
+    distribution.load(refresh=True)
+    assert ri.unusable_reasons(tmp_path, now=later) == {}  # a newer release may be downloaded instead
+    assert installed_runtimes(tmp_path) == []  # ...but this exact build still doesn't count
+
+
+def test_a_repaired_built_in_engine_gets_a_fresh_check(tmp_path, monkeypatch):
+    """Steam's "Verify integrity of game files" (or re-extracting a test build) replaces a broken program:
+    the note about the old file must not block the repaired one until the next game update."""
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    cpu = bundle(engine, "b7000", "cpu")
+    assert ri.mark_unusable(vulkan, "cant_execute", runtime_root=tmp_path)
+    note = json.loads((tmp_path / ri.BUNDLED_UNUSABLE_FILE).read_text())["builds"]["b7000-vulkan"]
+    assert note["file"]["size"] == vulkan.stat().st_size and Path(note["exe"]).is_absolute()
+    assert installed_runtimes(tmp_path) == [(cpu, "b7000", "cpu")]
+    assert ri.unusable_reasons(tmp_path) == {"vulkan": "cant_execute"}
+    vulkan.write_bytes(b"#!engine, the repaired file")
+    assert installed_runtimes(tmp_path) == [(vulkan, "b7000", "vulkan"), (cpu, "b7000", "cpu")]
+    assert ri.unusable_reasons(tmp_path) == {}
+
+
+def test_another_copy_of_the_game_with_the_same_engine_is_not_blocked(tmp_path, monkeypatch):
+    """The config folder is shared by every copy of the game on the computer (a developer run, the
+    double-click test build, Steam): one copy's failed check says nothing about another copy's files."""
+    engine = built_game(monkeypatch, tmp_path)
+    ri.mark_unusable(bundle(engine, "b7000", "cpu"), "cant_execute", runtime_root=tmp_path)
+    other = tmp_path / "test-build" / "engine"
+    monkeypatch.setenv("GETTOWORK_ENGINE_DIR", str(other))
+    distribution.load(refresh=True)
+    copy = bundle(other, "b7000", "cpu")
+    os.utime(copy, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))  # extracted at another time
+    assert installed_runtimes(tmp_path) == [(copy, "b7000", "cpu")]
+
+
+def test_an_older_note_without_the_files_details_still_applies(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    cpu = bundle(engine, "b7000", "cpu")
+    (tmp_path / ri.BUNDLED_UNUSABLE_FILE).write_text(json.dumps(
+        {"schema": 1, "builds": {"b7000-cpu": {"tag": "b7000", "variant": "cpu", "reason": "glibc", "at": 1}}}))
+    assert installed_runtimes(tmp_path) == []
+    assert cpu.is_file()
+
+
+def test_a_damaged_note_file_is_ignored(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    cpu = bundle(engine, "b7000", "cpu")
+    for text in ("{broken", "[]", '{"builds": [1]}', '{"builds": {"b7000-cpu": "nope"}}'):
+        (tmp_path / ri.BUNDLED_UNUSABLE_FILE).write_text(text)
+        assert installed_runtimes(tmp_path) == [(cpu, "b7000", "cpu")]
+        assert ri.unusable_reasons(tmp_path) == {}
+    assert ri.mark_unusable(cpu, "glibc", runtime_root=tmp_path)  # replaces the damaged file
+    assert installed_runtimes(tmp_path) == []
+
+
+def test_mark_unusable_for_a_bundled_exe_without_a_marker_uses_the_folder_name(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    folder = engine / "b7000-vulkan"
+    folder.mkdir()
+    (folder / "llama-server").write_bytes(b"x")
+    assert ri.mark_unusable(folder / "llama-server", "glibc", runtime_root=tmp_path)
+    assert "b7000-vulkan" in json.loads((tmp_path / ri.BUNDLED_UNUSABLE_FILE).read_text())["builds"]
+    (engine / "odd").mkdir()
+    (engine / "odd" / "llama-server").write_bytes(b"x")
+    assert ri.mark_unusable(engine / "odd" / "llama-server", "glibc", runtime_root=tmp_path) is False
+
+
+def test_prune_never_deletes_bundled_builds(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    bundled_old = bundle(engine, "b6000", "cpu")
+    newest = runtime_install_of(tmp_path, "b7100", "cpu")
+    older = runtime_install_of(tmp_path, "b7000", "cpu")
+    # A copy that says it's bundled, sitting in the runtime folder (e.g. copied by hand): hands off too.
+    stray = runtime_install_of(tmp_path, "b6500", "cpu")
+    marker = json.loads((stray.parent / "install.json").read_text())
+    marker["bundled"] = True
+    (stray.parent / "install.json").write_text(json.dumps(marker))
+    tidied, _freed = ri.prune_old_installs(newest, runtime_root=tmp_path)
+    assert tidied == 1 and not older.exists()
+    assert bundled_old.exists() and stray.exists()
+
+
+def test_prune_keeps_an_engine_dir_that_overlaps_the_runtime_folder(tmp_path, monkeypatch):
+    runtime_install_of(tmp_path, "b7000", "cpu")
+    newest = runtime_install_of(tmp_path, "b7100", "cpu")
+    monkeypatch.setenv("GETTOWORK_ENGINE_DIR", str(tmp_path / "llama.cpp" / "b7000-cpu"))
+    distribution.load(refresh=True)
+    assert ri.prune_old_installs(newest, runtime_root=tmp_path) == (0, 0)
+    assert (tmp_path / "llama.cpp" / "b7000-cpu" / "llama-server").exists()
+    # ...and it's listed only once.
+    assert [t for _e, t, _v in installed_runtimes(tmp_path)] == ["b7100", "b7000"]
+
+
+def test_prune_with_a_bundled_engine_in_use_only_tidies_the_runtime_folder(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    keep = bundle(engine, "b7000", "cpu")
+    older = runtime_install_of(tmp_path, "b6000", "cpu")
+    tidied, _freed = ri.prune_old_installs(keep, runtime_root=tmp_path)
+    assert tidied == 1 and not older.exists() and keep.exists()
+
+
+def test_engine_can_use_gpu_in_a_built_game_counts_only_bundled_gpu_builds(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    rtx = make_specs("Linux", "x86_64", [NVIDIA])  # plan: cuda-12, cpu (no Vulkan loader)
+    rtx_vk = make_specs("Linux", "x86_64", [NVIDIA], flags=["vulkan"])  # plan: cuda-12, vulkan, cpu
+    assert not ri.engine_can_use_gpu(rtx_vk)  # nothing built in yet
+    bundle(engine, "b7000", "cpu")
+    bundle(engine, "b7000", "vulkan")
+    assert not ri.engine_can_use_gpu(rtx)  # CUDA isn't built in
+    assert ri.engine_can_use_gpu(rtx_vk)
+    mac = make_specs("Darwin", "arm64", [APPLE])
+    assert not ri.engine_can_use_gpu(mac)
+    bundle(engine, "b7000", "metal")
+    assert ri.engine_can_use_gpu(mac)
+
+
+def test_find_and_choose_installed(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    win_vulkan = engine / "b7000-vulkan" / "llama-server.exe"
+    bundle(engine, "b7000", "vulkan", asset=BUNDLE_ASSETS["win-vulkan"], exe="llama-server.exe")
+    windows = make_specs("Windows", "AMD64", [AMD])
+    assert ri.find_installed(VULKAN, windows) == (win_vulkan, "b7000")
+    assert ri.find_installed(CPU, windows) is None  # the Vulkan zip isn't the CPU archive
+    assert ri.choose_installed([CUDA12, VULKAN, CPU], windows) == (win_vulkan, "b7000", VULKAN)
+    assert ri.choose_installed([CUDA12], windows) is None
+    assert ri.choose_installed([CPU], windows, runtimes=[]) is None
+
+
+def test_relocate_engine_finds_the_same_build_after_the_game_moved(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    vulkan = bundle(engine, "b7000", "vulkan")
+    cpu = bundle(engine, "b7000", "cpu")
+    old_library = tmp_path / "OldSteamLibrary" / "GetToWork" / "engine"
+    assert ri.relocate_engine(old_library / "b7000-cpu" / "llama-server") == cpu
+    assert ri.relocate_engine(old_library / "b7000-vulkan" / "bin" / "llama-server") == vulkan
+    assert ri.relocate_engine(old_library / "b6000-cpu" / "llama-server") == cpu  # updated since: same type
+    assert ri.relocate_engine(old_library / "b7000-cuda-12" / "llama-server") is None
+    assert ri.relocate_engine(tmp_path / "somewhere" / "llama-server") is None
+    assert ri.relocate_engine(cpu) == cpu  # still there: unchanged
+
+
+def test_a_built_game_uses_its_own_engine_not_another_copys(tmp_path, monkeypatch):
+    """A new test build next to an older one (or a developer copy) shares one settings folder:
+    the saved engine path points at the other copy's engine, which still exists. This copy's
+    own engine must win, so the engine that ships is the one that runs."""
+    engine = built_game(monkeypatch, tmp_path)  # this copy ships b7100
+    own_vulkan = bundle(engine, "b7100", "vulkan")
+    own_cpu = bundle(engine, "b7100", "cpu")
+    other = bundle(tmp_path / "gameOld" / "engine", "b7000", "vulkan")  # an older copy, still on disk
+    dev = runtime_install_of(tmp_path / "home" / "runtime", "b6900", "cpu")  # a developer copy's download
+    monkeypatch.setenv("GETTOWORK_HOME", str(tmp_path / "home"))
+    assert ri.relocate_engine(other) == own_vulkan
+    assert ri.own_build_instead(other) == own_vulkan
+    assert ri.relocate_engine(dev) == own_cpu  # same type, this game's newest
+    assert ri.relocate_engine(own_vulkan) == own_vulkan  # already ours: unchanged
+    custom = tmp_path / "mine" / "llama-server"  # the player's own engine (no install.json): never swapped
+    custom.parent.mkdir()
+    custom.write_bytes(b"x")
+    assert ri.relocate_engine(custom) == custom
+    cuda = bundle(tmp_path / "gameOld" / "engine", "b7000", "cuda-12")
+    assert ri.relocate_engine(cuda) == cuda  # no build of that type here: nothing to swap to
+
+
+def test_engine_architectures_come_from_the_games_own_builds(tmp_path, monkeypatch):
+    """fetch_engine records the model architectures the pinned llama.cpp knows in each bundled install.json:
+    a built game limits its model menu to them. A developer copy (it updates its engine) isn't limited."""
+    engine = built_game(monkeypatch, tmp_path)
+    for variant, names in (("vulkan", ["qwen3", "Llama"]), ("cpu", ["qwen3", "gpt-oss"])):
+        exe = bundle(engine, "b7100", variant)
+        marker = json.loads((exe.parent / "install.json").read_text())
+        marker["architectures"] = names + [7, ""]
+        (exe.parent / "install.json").write_text(json.dumps(marker))
+    assert ri.engine_architectures() == frozenset({"qwen3", "llama", "gpt-oss"})
+    built_game(monkeypatch, tmp_path, downloads=True)
+    assert ri.engine_architectures() is None
+
+
+def test_engine_architectures_unknown_for_builds_that_recorded_none(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path)
+    bundle(engine, "b7100", "cpu")
+    assert ri.engine_architectures() is None  # (an older build: nothing is left out)
+
+
+def test_a_developer_copy_keeps_the_saved_engine(tmp_path, monkeypatch):
+    engine = built_game(monkeypatch, tmp_path, downloads=True)
+    bundle(engine, "b7100", "vulkan")
+    other = bundle(tmp_path / "gameOld" / "engine", "b7000", "vulkan")
+    assert ri.relocate_engine(other) == other and ri.own_build_instead(other) is None
+
+
+def test_a_mac_whose_only_built_in_build_cant_run_says_so_instead_of_verify_integrity(tmp_path, monkeypatch):
+    """On a Mac the Metal build is also the CPU build. If it can never run here, "the engine
+    is missing - verify integrity" is the wrong advice: say what happened, and what else works."""
+    engine = built_game(monkeypatch, tmp_path)
+    metal = bundle(engine, "b7000", "metal")
+    mac = make_specs("Darwin", "arm64", [APPLE])
+    assert ri.bundled_builds_problem(tmp_path) is None
+    ri.mark_unusable(metal, "cpu_unsupported", runtime_root=tmp_path)
+    assert [v.name for v in ri.usable_plan(mac, tmp_path)] == ["cpu"]
+    problem = ri.engine_problem(mac, tmp_path)
+    assert problem is not None and problem.startswith("The game's built-in llama.cpp engine can't run")
+    assert "Verify integrity" not in problem and "Ollama" in problem
+    assert ri.bundled_builds_problem(tmp_path) == problem
+    with pytest.raises(RuntimeInstallError) as caught:
+        ri.ensure_llama_server(make_ui(), mac, runtime_root=tmp_path)
+    assert "Verify integrity" not in str(caught.value) and "can't run on this computer" in str(caught.value)
+
+
+def test_a_built_game_with_no_engine_at_all_still_says_verify_integrity(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path)  # an empty engine folder
+    assert ri.bundled_builds_problem(tmp_path) is None
+    with pytest.raises(RuntimeInstallError, match="Verify integrity"):
+        ri.ensure_llama_server(make_ui(), make_specs(), runtime_root=tmp_path)
+
+
+def test_engine_summary_says_where_the_engine_comes_from(tmp_path, monkeypatch):
+    assert "engine downloads on" in ri.engine_summary()  # a developer copy
+    folder = tmp_path / "GetToWork"
+    engine = folder / "engine"
+    bundle(engine, "b7000", "cpu")
+    bundle(engine, "b7000", "vulkan")
+    (folder / "distribution.json").write_text(json.dumps(
+        {"channel": "release", "engine_downloads": False, "engine_dir": "engine", "llama_cpp_tag": "b7000"}))
+    monkeypatch.setenv("GETTOWORK_DISTRIBUTION", str(folder / "distribution.json"))
+    distribution.load(refresh=True)
+    assert ri.engine_summary() == "built into the game: llama.cpp b7000 (CPU, Vulkan); engine downloads off"
+    # A build that lost its distribution.json: the release is unknown, which the build check catches.
+    monkeypatch.delenv("GETTOWORK_DISTRIBUTION")
+    built_game(monkeypatch, tmp_path)
+    assert "release unknown" in ri.engine_summary()
+
+
+def test_built_game_texts_never_suggest_pip(tmp_path, monkeypatch):
+    """A built game has no pip, and leaves llama_cpp out: only Ollama is suggested."""
+    assert "pip install llama-cpp-python" in ri.other_engines_hint()  # a copy run from source
+    assert "pip install" in ri.platform_problem("Linux", "x86_64", glibc=(2, 17))
+    built_game(monkeypatch, tmp_path)
+    texts = [
+        ri.other_engines_hint(),
+        ri.platform_problem("Linux", "x86_64", glibc=(2, 17)),
+        ri.platform_problem("Darwin", "arm64", macos=(12, 0)),
+        ri.platform_problem("Haiku", "sparc"),
+        ri.unusable_message({"cpu": "cpu_unsupported"}),
+    ]
+    for text in texts:
+        assert "pip" not in text and "llama-cpp-python" not in text and "Ollama" in text, text
+    monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "1")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    distribution.load(refresh=True)
+    assert "pip" not in ri.other_engines_hint()  # frozen: no pip, even with downloads allowed
+
+
+def test_a_built_game_explains_its_built_in_engine_not_downloads(tmp_path, monkeypatch):
+    assert ri.runtime_explainer() is ri.RUNTIME_EXPLAINER
+    built_game(monkeypatch, tmp_path)
+    text = ri.runtime_explainer()
+    assert text is ri.RUNTIME_EXPLAINER_BUILT_IN
+    assert "fetches" not in text and "CUDA" not in text and "SHA-256" not in text
+    for word in ("llama-server", "Vulkan", "Metal", "CPU", "MIT", "127.0.0.1", "inside its own folder"):
+        assert word in text
+
+
+def test_unusable_message_speaks_of_the_built_in_engine_when_downloads_are_off():
+    text = ri.unusable_message({"cpu": "cpu_unsupported"}, downloads=False)
+    assert text.startswith("The game's built-in llama.cpp engine can't run on this computer")
+    assert "won't download" not in text and "Ollama" in text
+    assert "won't download it again" in ri.unusable_message({"cpu": "glibc"}, downloads=True)
+
+
+def test_is_available_style_helpers_never_raise_on_odd_paths(tmp_path, monkeypatch):
+    built_game(monkeypatch, tmp_path)
+    assert ri.is_bundled(Path("\0bad")) is False
+    assert ri.relocate_engine(Path("\0bad")) is None
+
+
+def test_releases_newest_first_skips_drafts_and_junk():
+    releases = [make_release("b1", [], "2026-01-01T00:00:00Z"), "junk",
+                make_release("b3", [], "2026-03-01T00:00:00Z", draft=True),
+                make_release("b2", [], "2026-02-01T00:00:00Z")]
+    assert [r["tag_name"] for r in ri.releases_newest_first(releases)] == ["b2", "b1"]
+
+
+def test_fetch_release_by_tag():
+    body = json.dumps(make_release("b7000", [])).encode()
+    http = FakeHttp({f"{API}/tags/b7000": lambda: FakeResponse(200, body)})
+    assert ri.fetch_release("b7000", http=http)["tag_name"] == "b7000"
+    assert http.calls[0]["url"] == f"{API}/tags/b7000"
+    missing = FakeHttp({f"{API}/tags/": lambda: FakeResponse(404, b'{"message": "Not Found"}')})
+    with pytest.raises(RuntimeInstallError, match="no llama.cpp release called 'b1'"):
+        ri.fetch_release("b1", http=missing)
+    assert missing.calls[0]["url"] == f"{API}/tags/b1"
+    with pytest.raises(RuntimeInstallError, match="HTTP 500"):
+        ri.fetch_release("b1", http=FakeHttp({API: lambda: FakeResponse(500, b"")}))
+    with pytest.raises(RuntimeInstallError, match="unusual"):
+        ri.fetch_release("b1", http=FakeHttp({API: lambda: FakeResponse(200, b"[]")}))
+    weird = FakeHttp({API: lambda: FakeResponse(404, b"")})
+    with pytest.raises(RuntimeInstallError):
+        ri.fetch_release("../../x", http=weird)
+    assert weird.calls[0]["url"] == f"{API}/tags/..%2F..%2Fx"  # never a different API path
+
+
+def test_install_marker_records_bundled_builds_and_license_files():
+    rel = make_release("b7000", [])
+    assets = [{"name": "llama-b7000-bin-ubuntu-x64.tar.gz"}]
+    plain = ri.install_marker(rel, assets, CPU, "llama-server")
+    assert "bundled" not in plain and "license_files" not in plain
+    assert plain["licenses"] == {"llama-b7000-bin-ubuntu-x64.tar.gz": "MIT"}
+    marked = ri.install_marker(rel, assets, CPU, "bin/llama-server", bundled=True, license_files=["licenses/LICENSE"])
+    assert marked["bundled"] is True and marked["license_files"] == ["licenses/LICENSE"]
+    assert marked["exe"] == "bin/llama-server" and marked["tag"] == "b7000"
+    assert marked["source"].endswith("/releases/tag/b7000")
+
+
+def test_available_plan_lists_only_what_a_built_game_ships(tmp_path, monkeypatch):
+    rtx_vk = make_specs("Linux", "x86_64", [NVIDIA], flags=["vulkan"])
+    assert [v.name for v in ri.available_plan(rtx_vk, tmp_path)] == ["cuda-12", "vulkan", "cpu"]  # can download
+    engine = built_game(monkeypatch, tmp_path)
+    assert [v.name for v in ri.available_plan(rtx_vk, tmp_path)] == ["cpu"]
+    bundle(engine, "b7000", "vulkan")
+    assert [v.name for v in ri.available_plan(rtx_vk, tmp_path)] == ["vulkan", "cpu"]

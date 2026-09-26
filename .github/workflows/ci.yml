@@ -1,5 +1,19 @@
-# Runs the test suite on every push and pull request, on Windows, macOS and
-# Linux, with the oldest (3.10) and a recent (3.12) supported Python.
+# Runs the test suite with the oldest (3.10) and a recent (3.12) supported Python:
+#
+#   * every pull request:  Linux (3.10 and 3.12) and Windows (3.12)
+#   * pushes to main:      all of that, plus Windows (3.10)
+#   * manual runs:         all of that, plus macOS (3.12)
+#
+# macOS still gets checked on every push to main: build.yml builds the Mac app
+# there and runs its smoke test and window self-test.
+#
+# Why the split: the repository is private, and there GitHub counts every
+# macOS minute as 10 and every Windows minute as 2 against the free monthly
+# allowance. Pull requests get quick, cheap feedback; the expensive runners
+# check each change once it lands on main (or on demand: "Run workflow").
+#
+# On Linux the tests run under xvfb-run (a virtual screen), so the tests of
+# the game's window run too; elsewhere the runners have a desktop.
 #
 # The tests never touch the network, real models or real downloads (they use
 # fakes), so this needs no secrets and no GPU.
@@ -7,6 +21,7 @@ name: tests
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -28,6 +43,16 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         # Quoted on purpose: unquoted, YAML would read 3.10 as the number 3.1.
         python-version: ["3.10", "3.12"]
+        exclude:
+          # macOS runs Python 3.12 only (its minutes count 10x).
+          - os: macos-latest
+            python-version: "3.10"
+          # macOS unit tests run on manual runs only (build.yml tests the Mac app on main);
+          # pull requests also skip Windows + 3.10, which runs once the change is on main.
+          # (An exclude that names no real runner - the '' - leaves the matrix alone.)
+          - os: ${{ github.event_name != 'workflow_dispatch' && 'macos-latest' || '' }}
+          - os: ${{ github.event_name == 'pull_request' && 'windows-latest' || '' }}
+            python-version: "3.10"
     env:
       # Belt and braces: even if a test forgot a fake, huggingface_hub stays offline.
       HF_HUB_OFFLINE: "1"
@@ -53,6 +78,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Run the tests
+      - name: Make sure Tk (the window toolkit) and a virtual screen are available
+        if: runner.os == 'Linux'
+        run: |
+          if ! python -c "import tkinter; tkinter.Tcl()" 2>/dev/null || ! command -v xvfb-run >/dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends xvfb libtk8.6
+          fi
+
+      - name: Run the tests (with a virtual screen)
+        if: runner.os == 'Linux'
         # --durations lists the slowest tests, to spot ones waiting on real timeouts on some OS.
+        run: xvfb-run -a python -m pytest -q --durations=15
+
+      - name: Run the tests
+        if: runner.os != 'Linux'
         run: python -m pytest -q --durations=15

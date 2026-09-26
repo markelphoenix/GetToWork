@@ -4,7 +4,9 @@ This is the game's default backend. The player never installs anything by
 hand; :meth:`LlamaServerBackend.prepare` does it all:
 
 1. **Engine**: make sure a prebuilt ``llama-server`` for this computer is
-   installed (:func:`gettowork.runtime_install.ensure_llama_server`).
+   installed (:func:`gettowork.runtime_install.ensure_llama_server`). A built
+   game (Steam, or a double-clicked download) uses the engine it ships with
+   and never downloads one (see :mod:`gettowork.distribution`).
 2. **Model**: download the chosen GGUF file from Hugging Face
    (``gettowork.download.download_gguf``) unless it's already on disk.
 3. **Start**: launch ``llama-server`` as a child process listening only on
@@ -13,7 +15,9 @@ hand; :meth:`LlamaServerBackend.prepare` does it all:
 4. **Fallbacks**: if a GPU build crashes (old driver, missing CUDA...), read
    its log, explain in one sentence, and try the next build from
    :func:`gettowork.runtime_install.plan_variants` - ending with the CPU build
-   running with ``-ngl 0`` (zero layers on the GPU).
+   running with ``-ngl 0`` (zero layers on the GPU). In a built game only the
+   builds it ships with are tried, and CPU mode on the same build is the last
+   resort.
 
 After that, :meth:`chat` talks to the server's OpenAI-compatible
 ``POST /v1/chat/completions`` endpoint, and :meth:`close` stops the process
@@ -57,10 +61,12 @@ import secrets
 import signal
 import socket
 import subprocess
+import threading
+import sys
 import time
 import urllib.error
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from rich.markup import escape
 
@@ -129,6 +135,27 @@ BENCHMARK_CONTEXT = " ".join(
     for i in range(1, 46)
 )
 ENGINE_CHECK_TIMEOUT_S = 15.0  # `llama-server --version` right after installing: does it start at all?
+
+# Why a build gave way to the next one, in plain words (also recalled on later launches).
+_SWITCH_REASONS = {
+    "gpu": "it looks like a graphics-driver hiccup",
+    "glibc": "that build needs a newer Linux than this one",
+    "missing_library": "it needs a system library that isn't installed",
+    "cant_execute": "this computer can't run that kind of program",
+    "cpu_unsupported": "your processor is missing an instruction it needs",
+    "gpu_hang": "the graphics card never finished getting ready",
+    "no_device": "it couldn't find your graphics card - updating the graphics driver usually fixes this",
+    "gpu_arch": "that build doesn't support your graphics card's generation",
+    "memory": "the graphics card ran out of memory",
+    "crash": "it stopped as soon as it was given real work",
+}
+# A graphics-card build that gave way to the separate CPU build for one of these reasons may well work
+# another day (a driver update, VRAM another program held...): the switch is noted (GPU_SWITCH_FILE) and
+# later launches try the graphics build again - see LlamaServerBackend._back_to_gpu_build. (Permanent
+# failures - too old a Linux, a missing library... - mark the build unusable instead.)
+_RETRY_GPU_REASONS = frozenset({"no_device", "gpu", "memory", "crash", "unknown", "gpu_hang"})
+GPU_SWITCH_FILE = "gpu-switch.json"  # in the runtime folder
+GPU_RETRY_AFTER_S = 7 * 24 * 3600  # a crash/memory switch is retried after this long (or a driver/game change)
 # Signs in the start-up log that the model is actually being loaded (progress
 # dots, buffers allocated, the context created...). A graphics-card build that
 # goes quiet *before* any of these is stuck setting up the device, not loading.
@@ -192,6 +219,15 @@ def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _absolute_exe(exe: Path | str) -> Path:
+    """The engine's full path. The checks run it with its own folder as the working directory, and
+    Linux and macOS would look a relative program path up *inside* that folder - a false "can't run"."""
+    try:
+        return Path(exe).resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(exe))
 
 
 def server_env(exe: Path | str, base: Optional[dict[str, str]] = None, *, api_key: Optional[str] = None) -> dict[str, str]:
@@ -358,8 +394,20 @@ def missing_library_name(text: str) -> Optional[str]:
     return Path(name.strip("'\"")).name or None
 
 
-def missing_library_hint(text: str, system: Optional[str] = None) -> str:
-    """Plain English for "a system library is missing", naming it and the usual fix for this OS."""
+# Libraries the game's own Linux engine builds carry (packaging/fetch_engine.py adds OpenSSL 3).
+_SHIPPED_WITH_THE_ENGINE = ("libssl.so", "libcrypto.so")
+
+
+def missing_library_hint(text: str, system: Optional[str] = None, *, env: Optional[Any] = None,
+                         bundled: bool = False) -> str:
+    """Plain English for "a system library is missing", naming it and the usual fix for this OS.
+
+    On Linux under Steam, installing a package can't help: SteamOS is
+    read-only, and Steam runs the game in its own Linux runtime, which never
+    sees the computer's libraries anyway - so the fix is Steam's own file
+    check. `bundled` (the game's built-in engine): a library the engine ships
+    with means the game's files are incomplete.
+    """
     system = system or platform.system()
     name = missing_library_name(text)
     named = f" ({name})" if name else ""
@@ -368,6 +416,16 @@ def missing_library_hint(text: str, system: Optional[str] = None) -> str:
                 "On Windows this is usually the free Microsoft Visual C++ Redistributable "
                 "(https://aka.ms/vs/17/release/vc_redist.x64.exe) - install it and try again.")
     if system == "Linux":
+        from ..ui import launched_from_steam
+
+        if launched_from_steam(env):
+            return (f"The game's llama.cpp engine couldn't find a library it needs{named}. Ask Steam to check the "
+                    "game's files (right-click Get To Work > Properties > Installed Files > Verify integrity of "
+                    "game files), then try again. If it keeps happening, please tell us with the Report a problem "
+                    "button.")
+        if bundled and name and name.startswith(_SHIPPED_WITH_THE_ENGINE):
+            return (f"The game's llama.cpp engine couldn't find a library that comes with the game{named}, so the "
+                    "game's files look incomplete. Download and unpack the game again, then try again.")
         package = next((pkg for prefix, pkg in _LINUX_LIBRARY_PACKAGES if name and name.startswith(prefix)), None)
         if package:
             how = f"install the '{package}' package (for example 'sudo apt install {package}' on Ubuntu or Debian)"
@@ -379,6 +437,34 @@ def missing_library_hint(text: str, system: Optional[str] = None) -> str:
         return (f"The llama.cpp engine needs a system library that isn't on this Mac{named}. Updating macOS "
                 "usually fixes this.")
     return f"The llama.cpp engine needs a system library that isn't installed on this computer{named}."
+
+
+# Windows refusing to start a program, by the system error code CreateProcess gives.
+_WINDOWS_APP_CONTROL_ERRORS = {4551, 4553, 1260}  # an App Control policy (Smart App Control) / group policy
+_WINDOWS_ANTIVIRUS_ERRORS = {225, 226}  # "the file contains a virus" / "...has been removed" (quarantined)
+SMART_APP_CONTROL_MESSAGE = (
+    "Windows blocked the llama.cpp engine: Smart App Control (or another app-control policy on this PC) only "
+    "lets code-signed, well-known programs run, and the game's engine isn't code-signed yet. The free Ollama app "
+    "(https://ollama.com/download) is signed and works instead: install it, start it, and pick your model again. "
+    "(Turning Smart App Control off in Windows Security also works, but Windows can't turn it back on without a "
+    "reset - the game's README explains.)"
+)
+ANTIVIRUS_MESSAGE = (
+    "Windows Security (or another antivirus) stopped the llama.cpp engine as a suspected threat. It's the official "
+    "llama.cpp build, checked against the SHA-256 fingerprint its authors published - you can restore it from "
+    "quarantine and allow the game's folder, or use the free Ollama app (https://ollama.com/download) instead."
+)
+
+
+def windows_block_message(exc: BaseException) -> Optional[str]:
+    """What to tell the player when Windows itself refused to start the engine (Smart App Control, an
+    antivirus quarantine), from the error CreateProcess gave; None for any other failure."""
+    code = getattr(exc, "winerror", None)
+    if code in _WINDOWS_APP_CONTROL_ERRORS:
+        return SMART_APP_CONTROL_MESSAGE
+    if code in _WINDOWS_ANTIVIRUS_ERRORS:
+        return ANTIVIRUS_MESSAGE
+    return None
 
 
 def unsupported_architecture(text: str) -> Optional[str]:
@@ -694,6 +780,11 @@ class LlamaServerBackend(LLMBackend):
         self._log_fh: Any = None
         self._minimal_args = False
         self._atexit_registered = False
+        # Set by close(), cleared by prepare(): once the game has asked the engine
+        # to stop (quitting, the window closing), nothing may start a new one -
+        # not even a crash fallback on the game's thread racing the shutdown.
+        self._closed = False
+        self._lifecycle_lock = threading.RLock()
         self._api_key = secrets.token_urlsafe(24)  # only requests carrying it are answered
         self._owner_file: Optional[Path] = None
         self._health_timeout_fixed = health_timeout_s != HEALTH_TIMEOUT_S
@@ -722,7 +813,7 @@ class LlamaServerBackend(LLMBackend):
             if not is_platform_supported(platform.system(), platform.machine()):
                 return False, (
                     f"There's no official prebuilt llama.cpp engine for {platform.system()} on "
-                    f"{platform.machine()}. Ollama or llama-cpp-python may still work."
+                    f"{platform.machine()}. " + runtime_install.other_engines_hint("may still work")
                 )
             # Too old a Linux / macOS, or every build already failed here for good:
             # say so now, before the engine and a multi-GB model are downloaded.
@@ -731,12 +822,18 @@ class LlamaServerBackend(LLMBackend):
                 problem = runtime_install.engine_problem(self.specs)
             elif problem is None and runtime_install.CPU.name in runtime_install.unusable_reasons():
                 problem = runtime_install.unusable_message(runtime_install.unusable_reasons())
+            if problem is None:  # every built-in build is there, but none can run here
+                problem = runtime_install.bundled_builds_problem()
             if problem:
                 return False, problem
             runtimes = installed_runtimes()
             if runtimes:
-                _exe, tag, variant = runtimes[0]
+                exe, tag, variant = runtimes[0]
+                if runtime_install.is_bundled(exe):
+                    return True, f"The game's built-in llama.cpp engine is ready ({tag}, {variant})."
                 return True, f"The llama.cpp engine is already installed ({tag}, {variant})."
+            if not runtime_install.downloads_allowed():
+                return False, runtime_install.ENGINE_MISSING_MESSAGE  # a built game that lost its engine
             return True, (
                 "The official llama.cpp engine will be downloaded automatically (one-time: about 40 MB; "
                 "llama.cpp is MIT licensed. NVIDIA CUDA builds are bigger and also include NVIDIA's CUDA "
@@ -750,6 +847,8 @@ class LlamaServerBackend(LLMBackend):
         if entry is not None:
             self.entry = entry
         self.close()  # calling prepare() again restarts cleanly
+        with self._lifecycle_lock:
+            self._closed = False  # ...and may start the engine again
         self._cpu_mode_from_start = False
         self._reap_orphans(ui)
         self._ensure_engine(ui)
@@ -879,6 +978,8 @@ class LlamaServerBackend(LLMBackend):
                     elapsed = self._clock() - start
                 break
             except BackendError as exc:
+                if self._closed:
+                    raise  # the game is quitting: nothing to time, nothing to restart
                 # The engine started, but broke on its first real piece of work (a
                 # graphics-driver crash, running out of GPU memory...). Treat that
                 # like a start-up failure: move to the next build or to CPU mode.
@@ -902,8 +1003,17 @@ class LlamaServerBackend(LLMBackend):
         return speed
 
     def close(self) -> None:
-        """Stop the server process. Safe to call any number of times."""
-        self._stop_process()
+        """Stop the server process. Safe to call any number of times.
+
+        Final until the next :meth:`prepare`: the game's own thread may still
+        be inside :meth:`chat` when the game quits (the window gives it a few
+        seconds, then the interpreter runs this from ``atexit``). Its request
+        then fails, and a crash fallback must not start a fresh engine that
+        nothing would ever stop - macOS has no parent-death signal to catch it.
+        """
+        with self._lifecycle_lock:
+            self._closed = True
+            self._stop_process()
         if self._atexit_registered:
             with contextlib.suppress(Exception):
                 atexit.unregister(self.close)
@@ -951,12 +1061,39 @@ class LlamaServerBackend(LLMBackend):
 
     def _ensure_engine(self, ui: UI) -> None:
         if self.server_exe is not None:
+            if not self.server_exe.is_file():
+                # The engine that worked last time isn't where it was. A built game's
+                # engine lives inside the game, so it moves with it (another Steam
+                # library, the app dragged to a new folder): look it up again.
+                moved = runtime_install.relocate_engine(self.server_exe)
+                if moved is not None:
+                    if runtime_install.is_bundled(moved):
+                        ui.info("The game has moved since last time - no problem, I found its built-in llama.cpp engine.")
+                    else:
+                        ui.info("Found the llama.cpp engine from last time in its new place.")
+                    self.server_exe = moved
+            else:
+                # Still there - but in a built game, one from another copy of the game
+                # (an older download, a developer copy sharing the settings) gives way
+                # to this copy's own engine: the engine that ships is the one that runs.
+                own = runtime_install.own_build_instead(self.server_exe)
+                if own is not None:
+                    ui.info("Switching to this copy of the game's own built-in llama.cpp engine (last time's "
+                            "belongs to another copy).")
+                    self.server_exe = own
             if self.server_exe.is_file():
                 info = install_info(self.server_exe) or {}
                 self.variant = variant_by_name(info.get("variant")) or CUSTOM_VARIANT
-                ui.info(f"Using the llama.cpp engine you already have ({escape(self.variant.display)}).")
+                self._back_to_gpu_build(ui)  # last time's switch to the CPU build may not be needed any more
+                if runtime_install.is_bundled(self.server_exe):
+                    ui.info(f"Using the game's built-in llama.cpp engine ({escape(self.variant.display)}).")
+                else:
+                    ui.info(f"Using the llama.cpp engine you already have ({escape(self.variant.display)}).")
                 return
-            ui.warn("The llama.cpp engine from last time has gone missing - no worries, I'll fetch a fresh copy.")
+            if runtime_install.downloads_allowed():
+                ui.warn("The llama.cpp engine from last time has gone missing - no worries, I'll fetch a fresh copy.")
+            else:
+                ui.info("The llama.cpp engine from last time isn't where it was - let me find the game's built-in one.")
             self.server_exe = None
         self.server_exe, self.variant = self._install(ui, None)
         self._check_engine_starts(ui)
@@ -981,7 +1118,7 @@ class LlamaServerBackend(LLMBackend):
                 runtime_install.mark_unusable(self.server_exe, kind)  # never downloaded again
             if remaining is None:
                 remaining = self._fallback_variants(variant) if variant.name != CPU.name else []
-            nxt = self._next_build(ui, remaining, variant, kind) if remaining else None
+            nxt = self._next_build(ui, remaining, variant, kind, self.server_exe) if remaining else None
             if nxt is None:
                 self._show_log_tail(ui, text)
                 raise BackendError(self._explain_failure(kind, None, text))
@@ -1006,7 +1143,7 @@ class LlamaServerBackend(LLMBackend):
                 return  # it sees a card (or we can't tell): carry on
             if remaining is None:
                 remaining = self._fallback_variants(variant)
-            nxt = self._next_build(ui, remaining, variant, "no_device") if remaining else None
+            nxt = self._next_build(ui, remaining, variant, "no_device", self.server_exe) if remaining else None
             if nxt is None:
                 ui.info("Running this build in CPU mode instead: a bit slower, but it works on every computer.")
                 self._cpu_mode_from_start = True
@@ -1020,13 +1157,15 @@ class LlamaServerBackend(LLMBackend):
         """The graphics devices ``llama-server --list-devices`` reports, or None if unknown."""
         if self._runner is None:
             return None
+        exe = _absolute_exe(exe)
         try:
-            result = self._runner(
-                [str(exe), "--list-devices"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, env=server_env(exe), cwd=str(Path(exe).parent),
-                timeout=ENGINE_CHECK_TIMEOUT_S,
-                **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
-            )
+            with windows_system_dll_search():
+                result = self._runner(
+                    [str(exe), "--list-devices"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, env=server_env(exe), cwd=str(Path(exe).parent),
+                    timeout=ENGINE_CHECK_TIMEOUT_S,
+                    **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
+                )
         except Exception:
             return None
         if getattr(result, "returncode", 0):
@@ -1044,12 +1183,15 @@ class LlamaServerBackend(LLMBackend):
         """
         if self._runner is None:
             return None
+        exe = _absolute_exe(exe)
         try:
-            result = self._runner(
-                [str(exe), "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=server_env(exe), cwd=str(Path(exe).parent), timeout=ENGINE_CHECK_TIMEOUT_S,
-                **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
-            )
+            with windows_system_dll_search():
+                result = self._runner(
+                    [str(exe), "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, env=server_env(exe), cwd=str(Path(exe).parent),
+                    timeout=ENGINE_CHECK_TIMEOUT_S,
+                    **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
+                )
         except subprocess.TimeoutExpired:
             return None
         except OSError as exc:
@@ -1095,8 +1237,13 @@ class LlamaServerBackend(LLMBackend):
     # -- starting, with automatic fallbacks ------------------------------------
 
     def _fallback_variants(self, current: RuntimeVariant) -> list[RuntimeVariant]:
-        """Builds to try after `current` failed, ending with CPU."""
-        plan = plan_variants(self._get_specs())
+        """Builds to try after `current` failed, ending with CPU.
+
+        A built game can't download builds, so there only the ones it has count
+        (plus CPU, which always works: a CPU build, or CPU mode on this build).
+        """
+        specs = self._get_specs()
+        plan = plan_variants(specs)
         names = [v.name for v in plan]
         if current.name in names:
             rest = plan[names.index(current.name) + 1 :]
@@ -1104,22 +1251,21 @@ class LlamaServerBackend(LLMBackend):
             rest = [v for v in plan if v.name != current.name]
         if current.name != CPU.name and all(v.name != CPU.name for v in rest):
             rest.append(CPU)
+        if not runtime_install.downloads_allowed():
+            here = installed_runtimes()
+            rest = [v for v in rest
+                    if v.name == CPU.name or runtime_install.find_installed(v, specs, runtimes=here) is not None]
         return rest
 
-    def _next_build(self, ui: UI, remaining: list[RuntimeVariant], failed: RuntimeVariant, kind: str) -> Optional[tuple[Path, RuntimeVariant]]:
-        """Install the next build in `remaining` that installs successfully."""
-        why = {
-            "gpu": "it looks like a graphics-driver hiccup",
-            "glibc": "that build needs a newer Linux than this one",
-            "missing_library": "it needs a system library that isn't installed",
-            "cant_execute": "this computer can't run that kind of program",
-            "cpu_unsupported": "your processor is missing an instruction it needs",
-            "gpu_hang": "the graphics card never finished getting ready",
-            "no_device": "it couldn't find your graphics card - updating the graphics driver usually fixes this",
-            "gpu_arch": "that build doesn't support your graphics card's generation",
-            "memory": "the graphics card ran out of memory",
-            "crash": "it stopped as soon as it was given real work",
-        }.get(kind, "it stopped while starting up")
+    def _next_build(self, ui: UI, remaining: list[RuntimeVariant], failed: RuntimeVariant, kind: str,
+                    failed_exe: Optional[Path] = None) -> Optional[tuple[Path, RuntimeVariant]]:
+        """Install the next build in `remaining` that installs successfully.
+
+        A graphics build (`failed_exe`) giving way to a separate CPU build for
+        a reason that may not last is noted, so a later launch tries the
+        graphics build again instead of staying on the CPU for good.
+        """
+        why = _SWITCH_REASONS.get(kind, "it stopped while starting up")
         ui.warn(f"The {escape(failed.display)} build couldn't get going on this computer ({why}). No problem - trying the next option.")
         while remaining:
             nxt = remaining.pop(0)
@@ -1128,10 +1274,120 @@ class LlamaServerBackend(LLMBackend):
             else:
                 ui.info("Switching to CPU mode: a bit slower, but it works on every computer.")
             try:
-                return self._install(ui, nxt)
+                chosen = self._install(ui, nxt)
             except BackendError as exc:
                 ui.warn(f"Couldn't set up the {escape(nxt.display)} build: {escape(str(exc))}")
+                continue
+            if failed.gpu and not chosen[1].gpu and kind in _RETRY_GPU_REASONS and failed_exe is not None:
+                self._note_gpu_switch(failed_exe, chosen[0], kind)
+            return chosen
         return None
+
+    # -- a switch from the graphics card to the CPU build, remembered -----------------
+
+    def _gpu_fingerprint(self) -> dict:
+        """What would make a graphics build worth another try: another game version or graphics driver."""
+        from .. import __version__
+
+        try:
+            gpus = sorted(f"{g.name}|{g.driver_version or ''}" for g in (self._get_specs().gpus or []))
+        except Exception:
+            gpus = []
+        return {"game": __version__, "gpus": gpus}
+
+    @staticmethod
+    def _gpu_switch_path() -> Path:
+        return config.runtime_dir() / GPU_SWITCH_FILE
+
+    def _note_gpu_switch(self, gpu_exe: Path, cpu_exe: Path, reason: str) -> None:
+        """Remember that `gpu_exe` gave way to `cpu_exe` (and why). Never raises."""
+        note = {"from": str(_absolute_exe(gpu_exe)), "to": str(_absolute_exe(cpu_exe)), "reason": reason,
+                "at": time.time(), "fingerprint": self._gpu_fingerprint()}
+        with contextlib.suppress(Exception):
+            path = self._gpu_switch_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(note, indent=2), encoding="utf-8")
+
+    def _gpu_switch_note(self, cpu_exe: Path) -> Optional[dict]:
+        """The note about the switch that led to `cpu_exe`, if there is one."""
+        try:
+            note = json.loads(self._gpu_switch_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(note, dict) or not isinstance(note.get("from"), str) or not isinstance(note.get("to"), str):
+            return None
+        try:
+            key = os.path.normcase(str(_absolute_exe(cpu_exe)))
+            to = Path(note["to"])
+            if not to.is_file():  # the game moved since: its CPU build is somewhere else now
+                to = runtime_install.relocate_engine(to) or to
+            same = os.path.normcase(str(_absolute_exe(to))) == key
+        except (OSError, ValueError):
+            return None
+        return note if same else None
+
+    def _clear_gpu_switch(self) -> None:
+        with contextlib.suppress(OSError):
+            self._gpu_switch_path().unlink()
+
+    def _back_to_gpu_build(self, ui: UI) -> None:
+        """A returning player's saved engine is the CPU build the game switched to from a graphics build:
+        try the graphics build again when the reason may have gone away. Never raises.
+
+        * "no graphics card found": ``--list-devices`` is asked again (a
+          second or two) - after a driver update the card is back.
+        * a crash, running out of graphics memory, a driver hiccup: tried
+          again once the graphics driver or the game has changed, or after
+          :data:`GPU_RETRY_AFTER_S` (not for a start-up hang the player chose
+          to leave - only after a change).
+
+        Otherwise the player hears why the game is still on the processor.
+        Going back to the graphics build still runs the usual checks and
+        fallbacks, and a new failure is noted afresh.
+        """
+        try:
+            if self.server_exe is None or (self.variant is not None and self.variant.gpu):
+                return
+            note = self._gpu_switch_note(self.server_exe)
+            if note is None:
+                return
+            gpu_exe: Optional[Path] = Path(note["from"])
+            if not gpu_exe.is_file():
+                gpu_exe = runtime_install.relocate_engine(gpu_exe)  # (the game moved)
+            gpu_variant = variant_by_name((install_info(gpu_exe) or {}).get("variant")) if gpu_exe else None
+            if gpu_exe is None or gpu_variant is None or not gpu_variant.gpu:
+                self._clear_gpu_switch()
+                return
+            reason = str(note.get("reason") or "")
+            name = escape(gpu_variant.display)
+            if reason == "no_device":
+                if self._probe_devices(gpu_exe):
+                    ui.info(f"The {name} build can see your graphics card again - switching back to it from the CPU "
+                            "build.")
+                    self.server_exe, self.variant = gpu_exe, gpu_variant
+                    self._clear_gpu_switch()
+                else:
+                    ui.info(f"Running on the processor, like last time: the {name} build still can't find your "
+                            "graphics card. Updating the graphics driver usually fixes this - the game checks again "
+                            "every time it starts.")
+                return
+            changed = note.get("fingerprint") != self._gpu_fingerprint()
+            age = time.time() - float(note.get("at") or 0)
+            due = reason != "gpu_hang" and not 0 <= age < GPU_RETRY_AFTER_S
+            why = _SWITCH_REASONS.get(reason, "it stopped while starting up")
+            if changed or due:
+                since = ("your graphics driver or the game has been updated since" if changed
+                         else "it's been a while")
+                ui.info(f"Last time the {name} build had trouble ({why}), so the game used its CPU build. "
+                        f"{since[0].upper() + since[1:]} - trying the graphics card again.")
+                self.server_exe, self.variant = gpu_exe, gpu_variant
+                self._clear_gpu_switch()
+            else:
+                later = "after a graphics-driver or game update" + ("" if reason == "gpu_hang" else ", or in a few days")
+                ui.info(f"Running on the processor, like last time: the {name} build had trouble with your graphics "
+                        f"card ({why}). The game tries the graphics card again {later}.")
+        except Exception:
+            return
 
     def _start_with_fallbacks(self, ui: UI, model: Path) -> None:
         if self.server_exe is None:
@@ -1167,7 +1423,7 @@ class LlamaServerBackend(LLMBackend):
                 self._stop_process()
                 if remaining is None:
                     remaining = self._fallback_variants(variant)
-                nxt = self._next_build(ui, remaining, variant, "gpu_hang")
+                nxt = self._next_build(ui, remaining, variant, "gpu_hang", exe)
                 if nxt is not None:
                     exe, variant = nxt
                     cpu_only, minimal = not variant.gpu, False
@@ -1214,7 +1470,7 @@ class LlamaServerBackend(LLMBackend):
                                            "glibc"):
                 if remaining is None:
                     remaining = self._fallback_variants(variant)
-                nxt = self._next_build(ui, remaining, variant, kind)
+                nxt = self._next_build(ui, remaining, variant, kind, exe)
                 if nxt is not None:
                     exe, variant = nxt
                     cpu_only, minimal = not variant.gpu, False
@@ -1272,20 +1528,41 @@ class LlamaServerBackend(LLMBackend):
         design = f" ('{escape(architecture)}')" if architecture else ""
         if variant.name == CUSTOM_VARIANT.name or install_info(exe) is None:
             return None, "custom"  # the player's own llama-server: we don't replace it
-        ui.info(
-            f"This model uses a newer design{design} than your llama.cpp engine knows. No need to download "
-            "the model again - let me fetch the newest engine instead..."
-        )
-        try:
-            new_exe, new_variant = self._install(ui, variant, update=True)
-        except BackendError as exc:
-            if "newer llama.cpp engine than the one you have" in str(exc):
-                self._update_failure = str(exc)  # the newer build is known not to run here
-                return None, "cant_run_newer"
-            ui.warn(f"I couldn't get a newer engine: {escape(str(exc))}")
-            return None, "offline"
-        if Path(new_exe).resolve() == Path(exe).resolve():
-            return None, "newest"
+        if not runtime_install.downloads_allowed():
+            # A built game never downloads an engine, and its own engine is updated
+            # with the game. But the engine that just failed may be an older one
+            # (another copy of the game, a developer install sharing the settings):
+            # the newest build of this kind already here - no network involved -
+            # may know the design.
+            try:
+                new_exe, new_variant = self._install(ui, variant, update=True)
+            except BackendError:
+                return None, "builtin"  # (that build isn't here at all: nothing newer to try)
+            if Path(new_exe).resolve() == Path(exe).resolve():
+                return None, "builtin"  # the newest engine the game has is the one that failed (the error says so)
+            newer_tag = str((install_info(Path(new_exe)) or {}).get("tag") or "")
+            which = f" ({escape(newer_tag)})" if newer_tag else ""
+            if runtime_install.is_bundled(Path(new_exe)):
+                ui.info(f"This model uses a newer design{design} than that llama.cpp engine knows - "
+                        f"trying the game's built-in engine{which} instead...")
+            else:
+                ui.info(f"This model uses a newer design{design} than that llama.cpp engine knows - "
+                        f"trying another llama.cpp engine already on this computer{which} instead...")
+        else:
+            ui.info(
+                f"This model uses a newer design{design} than your llama.cpp engine knows. No need to download "
+                "the model again - let me fetch the newest engine instead..."
+            )
+            try:
+                new_exe, new_variant = self._install(ui, variant, update=True)
+            except BackendError as exc:
+                if "newer llama.cpp engine than the one you have" in str(exc):
+                    self._update_failure = str(exc)  # the newer build is known not to run here
+                    return None, "cant_run_newer"
+                ui.warn(f"I couldn't get a newer engine: {escape(str(exc))}")
+                return None, "offline"
+            if Path(new_exe).resolve() == Path(exe).resolve():
+                return None, "newest"
         # Check the new engine starts at all before loading the model with it. If
         # it can't, only *that* install is marked - the current one still works
         # for every other model.
@@ -1366,7 +1643,12 @@ class LlamaServerBackend(LLMBackend):
         self.log_path = log_dir / f"llama-server-{port}.log"
         self._log_fh = open(self.log_path, "wb")
 
+    def _refuse_if_closed(self) -> None:
+        if self._closed:
+            raise BackendError("The game is closing, so the local model isn't being started again.")
+
     def _launch(self, exe: Path, model: Path, *, cpu_only: bool, minimal: bool) -> None:
+        self._refuse_if_closed()
         exe, model = Path(exe).resolve(), Path(model).resolve()
         port = self._fixed_port or find_free_port()
         self.port = port
@@ -1394,20 +1676,31 @@ class LlamaServerBackend(LLMBackend):
             death_signal = _parent_death_signal_hook()
             if death_signal is not None:
                 kwargs["preexec_fn"] = death_signal
-        try:
-            self._proc = self._popen(args, **kwargs)
-        except PermissionError as exc:
-            self._close_log()
-            raise BackendError(
-                "Your computer wouldn't let the llama.cpp engine start (permission denied). Some systems "
-                "block programs in that folder - setting GETTOWORK_HOME to another folder usually fixes it."
-            ) from exc
-        except OSError as exc:
-            self._close_log()
-            raise BackendError(f"The llama.cpp engine couldn't be started ({exc}).") from exc
-        if platform.system() == "Windows":
-            _assign_to_kill_on_close_job(self._proc)
-        self._owner_file = _record_owner(log_dir, self._proc, exe)
+        # Under the lock close() holds while it marks the backend closed and stops
+        # the engine: either this launch comes first (and close() then stops it),
+        # or it is refused - a game that is quitting never leaves a new engine behind.
+        with self._lifecycle_lock:
+            try:
+                self._refuse_if_closed()
+                with windows_system_dll_search():
+                    self._proc = self._popen(args, **kwargs)
+            except BackendError:
+                self._close_log()
+                raise
+            except OSError as exc:
+                self._close_log()
+                blocked = windows_block_message(exc)
+                if blocked is not None:
+                    raise BackendError(blocked) from exc
+                if isinstance(exc, PermissionError):
+                    raise BackendError(
+                        "Your computer wouldn't let the llama.cpp engine start (permission denied). Some systems "
+                        "block programs in that folder - setting GETTOWORK_HOME to another folder usually fixes it."
+                    ) from exc
+                raise BackendError(f"The llama.cpp engine couldn't be started ({exc}).") from exc
+            if platform.system() == "Windows":
+                _assign_to_kill_on_close_job(self._proc)
+            self._owner_file = _record_owner(log_dir, self._proc, exe)
         if not self._atexit_registered:
             atexit.register(self.close)
             self._atexit_registered = True
@@ -1493,6 +1786,7 @@ class LlamaServerBackend(LLMBackend):
     # -- running -----------------------------------------------------------------
 
     def _ensure_running(self) -> None:
+        self._refuse_if_closed()
         if self._proc is None or self.server_exe is None or self.model_path is None:
             raise BackendError("The local model isn't running yet - it needs to be started first.")
         returncode = self._proc.poll()
@@ -1529,7 +1823,10 @@ class LlamaServerBackend(LLMBackend):
         """The engine broke after it had started. If it was using the graphics card,
         move to a setup that avoids it - the next build (only while setting up,
         with `ui`) or this same build in CPU mode - and start it. True if the new
-        setup is up and running; False if there's nothing safer to switch to."""
+        setup is up and running; False if there's nothing safer to switch to
+        (or the game is closing, when nothing new may be started)."""
+        if self._closed:
+            return False
         variant = self.variant or CUSTOM_VARIANT
         if not (variant.gpu and not self.cpu_only) or kind not in ("gpu", "gpu_arch", "memory", "crash", "unknown"):
             return False
@@ -1538,7 +1835,7 @@ class LlamaServerBackend(LLMBackend):
         options: list[tuple[Path, RuntimeVariant, bool]] = []
         if ui is not None:
             remaining = self._fallback_variants(variant)
-            nxt = self._next_build(ui, remaining, variant, kind) if remaining else None
+            nxt = self._next_build(ui, remaining, variant, kind, self.server_exe) if remaining else None
             if nxt is not None:
                 options.append((nxt[0], nxt[1], not nxt[1].gpu))
         else:
@@ -1676,11 +1973,19 @@ class LlamaServerBackend(LLMBackend):
                 f"This model uses a design{design_text} that your own llama-server doesn't know. The file is fine: "
                 "a newer llama.cpp build would run it - or pick another model."
             ),
+            "builtin": (
+                f"This model uses a design{design_text} that the game's built-in llama.cpp engine doesn't know yet. "
+                "The file itself is fine - downloading it again won't help. Please pick another model (game "
+                "updates bring newer engines)."
+            ),
         }
         if update_note == "cant_run_newer" and self._update_failure:
             return self._update_failure + where  # the newer engine this model needs is what can't run
         if kind == "model_unsupported":
-            return unsupported.get(update_note or "newest", unsupported["newest"]) + where
+            note = update_note or "newest"
+            if note in ("newest", "updated") and not runtime_install.downloads_allowed():
+                note = "builtin"  # even the newest engine the game has: game updates bring newer ones
+            return unsupported.get(note, unsupported["newest"]) + where
         if kind == "model" and not _CORRUPT_RE.search(tail or ""):
             model_message = (
                 "llama.cpp couldn't load this model file. If its download was interrupted, deleting it and "
@@ -1699,23 +2004,24 @@ class LlamaServerBackend(LLMBackend):
             "model": model_message,
             "glibc": (
                 "This Linux system is a bit older than the prebuilt llama.cpp engine needs (it wants a newer "
-                "glibc). Ollama (https://ollama.com/download) or `pip install llama-cpp-python` should still work."
+                "glibc). " + runtime_install.other_engines_hint()
             ),
-            "missing_library": missing_library_hint(tail),
+            "missing_library": missing_library_hint(
+                tail, bundled=bool(self.server_exe) and runtime_install.is_bundled(Path(str(self.server_exe)))),
             "gpu_arch": (
                 "This llama.cpp build doesn't support your graphics card's generation (the newest CUDA "
                 "builds leave out older cards)."
             ),
             "cpu_unsupported": (
                 "Your processor is missing an instruction the llama.cpp engine needs. "
-                "Ollama or llama-cpp-python may still work."
+                + runtime_install.other_engines_hint("may still work")
             ),
             "bad_args": "llama-server rejected its start-up settings, even the basic ones.",
             "port": "llama-server couldn't open a network port on this computer.",
             "gpu": "llama-server had trouble with the graphics card and stopped.",
             "cant_execute": (
                 "This computer can't run the prebuilt llama.cpp engine at all (for example a 32-bit system on a "
-                "64-bit processor). Ollama or `pip install llama-cpp-python` may still work."
+                "64-bit processor). " + runtime_install.other_engines_hint("may still work")
             ),
             "crash": "llama-server stopped as soon as it was given real work.",
         }
@@ -1813,6 +2119,44 @@ def _assign_to_kill_on_close_job(proc: Any) -> bool:
         return bool(kernel32.AssignProcessToJobObject(job, int(handle)))
     except Exception:
         return False
+
+
+@contextlib.contextmanager
+def windows_system_dll_search() -> Iterator[None]:
+    """Built game on Windows: start the engine with Windows' normal DLL search order.
+
+    PyInstaller's start-up program adds the game's own ``_internal`` folder to
+    the DLL search path (``SetDllDirectory``), and programs started while it is
+    set inherit it - so ``llama-server.exe`` would pick up the game's copies
+    of system DLLs (such as the Visual C++ runtime) ahead of the ones in
+    System32 that the rest of its runtime comes from. For the moment the
+    engine starts, the setting is cleared, then put back. Does nothing when
+    running from source or on other systems; never raises.
+    """
+    if platform.system() != "Windows" or not getattr(sys, "frozen", False):
+        yield
+        return
+    kernel32: Any = None
+    previous: Optional[str] = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        buffer = ctypes.create_unicode_buffer(32768)
+        if kernel32.GetDllDirectoryW(len(buffer), buffer):
+            previous = buffer.value or None
+        if previous is not None:
+            kernel32.SetDllDirectoryW(None)
+    except Exception:
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            try:
+                kernel32.SetDllDirectoryW(previous)
+            except Exception:
+                pass
 
 
 def _parent_death_signal_hook() -> Optional[Callable[[], None]]:

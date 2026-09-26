@@ -525,6 +525,32 @@ def test_custom_download_warns_about_unsuitable_models(tmp_path, plenty_of_disk)
     assert "not a storyteller" in ui.text
 
 
+@pytest.mark.parametrize("repo, tags", [
+    ("huihui-ai/Qwen3-8B-abliterated-GGUF", ["gguf", "license:apache-2.0"]),
+    # A plain-looking name whose base model is a safety-removed fine-tune.
+    ("someone/Qwen3-8B-GGUF", ["gguf", "base_model:finetune:huihui-ai/Qwen3-8B-abliterated"]),
+    ("someone/Spicy-NSFW-Tales-12B-GGUF", ["gguf"]),
+])
+def test_custom_picks_refuse_models_that_are_not_family_friendly(tmp_path, plenty_of_disk, repo, tags):
+    """The model search leaves uncensored/adult models out - naming one yourself doesn't bring it back
+    (the Steam AI disclosure promises the game only plays family-friendly models)."""
+    info = SimpleNamespace(id=repo, tags=tags, downloads=5000, gguf={"total": 8_190_735_360, "architecture": "qwen3"},
+                           card_data=None, gated=False, pipeline_tag="text-generation")
+    tree = {repo: [("m-Q4_K_M.gguf", 20)]}
+    with pytest.raises(DownloadError) as refused:
+        custom_entry(repo, hf_api=FakeApi(tree, info=info))
+    assert refused.value.kind == "not_family_friendly" and "family-friendly" in str(refused.value)
+    fetch = FakeDownloader({"m-Q4_K_M.gguf": 20})
+    with pytest.raises(DownloadError) as refused:
+        download_custom_gguf(repo, "Q4_K_M", RecordingUI(), tmp_path, hf_api=FakeApi(tree, info=info), hf_download=fetch)
+    assert refused.value.kind == "not_family_friendly"
+    assert not list(tmp_path.iterdir()), "nothing is downloaded"
+    # Without metadata the repo id alone still counts.
+    if "abliterated" in repo:
+        with pytest.raises(DownloadError):
+            custom_entry(repo, hf_api=FakeApi(tree, info=None))
+
+
 def test_custom_download_bad_ids_and_missing_repos(tmp_path):
     with pytest.raises(DownloadError) as info:
         download_custom_gguf("just-a-name", "Q4_K_M", RecordingUI(), tmp_path, hf_api=ExplodingApi())

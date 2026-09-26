@@ -1,0 +1,24 @@
+# The llama.cpp release built into the game (Steam and the test builds).
+#
+# Every game build fetches exactly this release (build.yml runs
+# `fetch_engine.py --tag pinned`), so the Windows, macOS and Linux builds of one
+# commit - and every re-run of it - ship the same, tested engine. The weekly
+# live check (live-check.yml) plays a real game with this release *and* with
+# the newest one, so it says when a newer engine is worth moving to.
+#
+# The lines after the tag pin each archive's SHA-256 (the format `sha256sum`
+# prints): fetch_engine.py refuses a download whose bytes - or whose
+# fingerprint on GitHub - differ, so a file replaced on the release after it
+# was reviewed never reaches players.
+#
+# To move: change the tag below (it must have Windows vulkan + cpu, Linux
+# vulkan + cpu and macOS arm64 builds), replace the SHA-256 lines with the new
+# archives' (download them from the release page and run `sha256sum` on them,
+# or copy the "sha256:" digests the release page shows), let CI build it, and
+# play a test build.
+b11100
+2b1af3fb7a5da5b499871782f590b20caa92c3acf917baaab2da99eae9df4e88  llama-b11100-bin-win-vulkan-x64.zip
+c62aa9c73d866486f72bfb0085ffc4116136c356c6a67db4ea122eb1b281b219  llama-b11100-bin-win-cpu-x64.zip
+18de8fbcd0993359ba74310c8f3fb15c6f7891e99e7dd98676bba2d900c4c04b  llama-b11100-bin-ubuntu-vulkan-x64.tar.gz
+a836c913236ab4533ef9aaf49f0e1ad2955c8159869d7eec1a9072a92e13d61b  llama-b11100-bin-ubuntu-x64.tar.gz
+33de9bee88ef4bcb7858fc65b1d3770ca6c6a6282ea53587f79a99c2ac9eb807  llama-b11100-bin-macos-arm64.tar.gz

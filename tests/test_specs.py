@@ -631,6 +631,32 @@ def test_friendly_summary_agrees_with_the_fit_engine():
         assert m is not None and float(m.group(1)) == pytest.approx(biggest, abs=0.5)
 
 
+@pytest.mark.parametrize("free_gb", [0.3, 0.9, 1.3])
+def test_a_full_disk_is_never_called_tight_memory(free_gb):
+    """16 GB of RAM but only a few hundred MB of disk (a 64 GB Steam Deck full of games): the summary says
+    the disk is the problem - how much the smallest model needs, and how to fix it - not that memory is."""
+    from gettowork import catalog
+
+    s = plain_specs(ram_total_gb=16.0, ram_available_gb=14.7, ram_bandwidth_gbs=40.0, disk_free_gb=free_gb)
+    need = catalog.disk_space_needed(s)
+    assert need is not None and free_gb < need < 2.5
+    text = specs.friendly_summary(s)
+    assert "memory is very tight" not in text
+    assert "too little free disk space" in text
+    assert f"the smallest needs about {need:.1f} GB free, and only {free_gb:.1f} GB is" in text
+    assert "--models-dir" in text and "Launch Options" in text
+    # With room to spare, the usual verdict is back; with tiny memory, memory really is the problem.
+    assert catalog.disk_space_needed(plain_specs(ram_total_gb=16.0, disk_free_gb=1.8)) is None
+    tiny = plain_specs(ram_total_gb=3.0, ram_bandwidth_gbs=20.0, disk_free_gb=0.3)
+    assert catalog.disk_space_needed(tiny) is None and "memory is very tight" in specs.friendly_summary(tiny)
+    assert catalog.disk_space_needed(plain_specs(ram_total_gb=16.0, disk_free_gb=-1.0)) is None  # unknown
+
+
+def test_disk_space_advice_without_a_command_line_just_says_free_up_space():
+    text = specs.disk_space_advice(0.3, 1.4, how=None)
+    assert "Free up some space, then start the game again." in text and "--models-dir" not in text
+
+
 def test_friendly_summary_with_integrated_graphics_and_low_disk():
     s = plain_specs(gpus=[GPUInfo("Intel UHD Graphics 620", "intel", 0.0)], disk_free_gb=6.2)
     text = specs.friendly_summary(s)

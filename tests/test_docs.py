@@ -29,11 +29,17 @@ LEARN = ROOT / "docs" / "LEARN.md"
 CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 NOTICE = ROOT / "NOTICE.md"
 ARCHITECTURE = ROOT / "docs" / "ARCHITECTURE.md"
+DISTRIBUTION = ROOT / "docs" / "DISTRIBUTION.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "build.yml"
 PYPROJECT = ROOT / "pyproject.toml"
 SRC = ROOT / "src" / "gettowork"
+STEAM_README = ROOT / "packaging" / "steam" / "README.md"
 
 MARKDOWN_DOCS = [README, LEARN, CONTRIBUTING, NOTICE]
+# The contracts: held to the same basic checks (fences, links, no emoji).
+DESIGN_DOCS = [ARCHITECTURE, DISTRIBUTION]
+ALL_DOCS = MARKDOWN_DOCS + DESIGN_DOCS
 
 
 # ---------------------------------------------------------------------------
@@ -148,19 +154,19 @@ APPLE_M2 = GPUInfo("Apple M2", "apple", 11.2)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", MARKDOWN_DOCS + [CI_WORKFLOW], ids=lambda p: p.name)
+@pytest.mark.parametrize("path", ALL_DOCS + [CI_WORKFLOW, BUILD_WORKFLOW], ids=lambda p: p.name)
 def test_doc_exists_and_is_not_empty(path: Path) -> None:
     assert path.is_file(), f"{path.relative_to(ROOT)} is missing"
     assert len(read(path).strip()) > 500
 
 
-@pytest.mark.parametrize("path", MARKDOWN_DOCS, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", ALL_DOCS, ids=lambda p: p.name)
 def test_code_fences_are_balanced(path: Path) -> None:
     fences = [line for line in read(path).splitlines() if _FENCE_RE.match(line)]
     assert len(fences) % 2 == 0, f"{path.name} has an unclosed ``` code block"
 
 
-@pytest.mark.parametrize("path", MARKDOWN_DOCS, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", ALL_DOCS, ids=lambda p: p.name)
 def test_relative_links_and_anchors_resolve(path: Path) -> None:
     text = read(path)
     problems = []
@@ -186,7 +192,8 @@ def test_the_helpers_slug_headings_like_github() -> None:
 
 def test_docs_use_no_emoji() -> None:
     emoji = re.compile("[\U0001F300-\U0001FAFF☀-⛿✀-➿]")
-    for path in MARKDOWN_DOCS:
+    # (ARCHITECTURE.md is left out: it quotes the "✓" that ui.make_stream_safe replaces.)
+    for path in MARKDOWN_DOCS + [DISTRIBUTION]:
         assert not emoji.search(read(path)), f"{path.name} contains an emoji"
 
 
@@ -597,14 +604,109 @@ def test_readme_flags_exist_in_cli_once_it_is_written() -> None:
         assert f'"{flag}"' in source or f"'{flag}'" in source, f"{flag} is documented but not in cli.py"
 
 
-def test_readme_quickstart_commands() -> None:
+def test_readme_play_from_source_commands() -> None:
     text = read(README)
-    assert "pipx install git+https://github.com/markelphoenix/GetToWork" in text
-    assert "pip install ." in text
+    assert "pip install -e ." in text
     assert "gettowork --mock" in text
-    assert "python -m gettowork" in text
+    assert "python -m gettowork" in text and "python -m gettowork.launcher" in text
     requires = re.search(r'requires-python\s*=\s*">=\s*([\d.]+)"', read(PYPROJECT)).group(1)
     assert f"Python {requires} or newer" in text
+    # The two commands pip installs are the ones the README tells people to type.
+    pyproject = read(PYPROJECT)
+    assert re.search(r'^gettowork = "gettowork\.cli:main"', pyproject, re.MULTILINE)
+    assert re.search(r'^gettowork-gui = "gettowork\.launcher:gui_main"', pyproject, re.MULTILINE)
+    assert "gettowork-gui" in text
+
+
+def test_readme_windows_commands_work_in_powershell_and_command_prompt() -> None:
+    """PowerShell (Windows Terminal's default) runs nothing from the current folder without .\\, and Command
+    Prompt reads "./" as a switch: the Windows forms must be .\\GetToWork.exe / .\\gettowork-cli.exe."""
+    text = read(README)
+    assert "`.\\GetToWork.exe --jev`" in text and "`.\\gettowork-cli.exe --mock`" in text
+    assert "`GetToWork.exe --jev`" not in text
+    windows_lines = [line for line in text.splitlines() if "**Windows:**" in line and "`" in line]
+    assert windows_lines and not any("`./" in line for line in windows_lines)
+
+
+def test_readme_names_smart_app_control_for_unsigned_windows_builds() -> None:
+    """Smart App Control blocks unsigned programs even from Steam (0x11C7): the README may not promise that
+    Steam builds avoid the unsigned-build problem, and says what works."""
+    text = flat(read(README))
+    assert "Steam builds don't have this problem" not in text
+    for words in ("Smart App Control", "0x11C7", "Ollama", "llama-server.exe"):
+        assert words in text, words
+    steam = flat(read(STEAM_README))
+    assert "Smart App Control" in steam and "packaging/sign_windows.py" in read(STEAM_README).replace("../", "packaging/")
+
+
+def test_readme_test_build_instructions_match_the_build() -> None:
+    """The README's "Playing the test builds" names what the build workflow and assemble.py really make."""
+    readme = flat(read(README))
+    section = readme[readme.index("## Playing the test builds"):readme.index("## Playing from source")]
+    workflow = read(ROOT / ".github" / "workflows" / "build.yml")
+    for target in ("windows-x64", "macos-arm64", "linux-x64"):
+        assert f"target: {target}" in workflow, target
+    # The game archives are uploaded as they are (the artifact takes the archive's name)...
+    assert "archive: false" in workflow and "one layer" in section and "two layers" not in section
+    assert "name: gettowork-python-package" in workflow and "`gettowork-python-package`" in section
+    retention = re.findall(r"retention-days:\s*(\d+)", workflow)
+    assert sorted(retention) == ["3", "7"] and "kept for **3 days**" in section and "the Python package for 7" in section
+    assert "Extract All" in section  # Windows: the game can't start from inside the zip
+
+    assemble = _packaging_module("assemble")
+    for os_key, arch in (("windows", "x64"), ("macos", "arm64"), ("linux", "x64")):
+        name = assemble.archive_name(os_key, arch, "<version>")
+        assert f"`{name}`" in section, name
+    assert "`GetToWork.exe`" in section and f"`{assemble.MAC_APP}`" in section and "`GetToWork`" in section
+    assert f"`{assemble.CLI_NAME}`" in section and f"`{assemble.CLI_NAME}.exe`" in section
+    assert f"Contents/MacOS/{assemble.CLI_NAME}" in section
+    assert "More info" in section and "Run anyway" in section  # Windows SmartScreen
+    assert "Open Anyway" in section and "xattr -dr com.apple.quarantine" in section  # macOS Gatekeeper
+    assert "./GetToWork" in section  # Linux
+
+
+def _packaging_module(name: str):
+    """Import one of the build scripts in packaging/ (they aren't part of the installed game)."""
+    import importlib.util
+
+    module_name = f"_docs_packaging_{name}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, ROOT / "packaging" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[module_name] = module  # dataclasses look their module up while the class is made
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_readme_window_controls_match_the_window() -> None:
+    from gettowork.gui import app
+
+    text = flat(read(README))
+    section = text[text.index("### In the game's window"):text.index("## How does it know which models fit?")]
+    assert app.EXIT_HINT.lower() in section.lower()
+    source = read(SRC / "gui" / "app.py")
+    for key in ("<F11>", "<Escape>", "<Up>", "<Down>", "<Prior>", "<Next>"):
+        assert key in source, key
+    assert '"equal": +1' in source and '"minus": -1' in source and '"0": 0' in source
+    assert "Ctrl + = / Ctrl + - / Ctrl + 0" in section and "F11" in section and "Escape" in section
+    assert "Keyboard" in section and 'text="Keyboard"' in source
+    assert app.default_export_dir().name == "Get To Work" or not (Path.home() / "Documents").is_dir()
+    assert "`Documents/Get To Work`" in text
+
+
+def test_readme_troubleshooting_covers_the_window_and_steam_deck() -> None:
+    from gettowork.gui import app
+
+    readme = flat(read(README))
+    assert f"`logs/{app.CRASH_FILE}`" in readme
+    assert "STEAM + X" in readme and "X11" in readme and "XWayland" in readme
+    assert "python3-tk" in readme
+    # The "engine is missing" advice is the game's own message.
+    missing = runtime_install.ENGINE_MISSING_MESSAGE
+    assert "Verify integrity" in missing and "Verify integrity" in readme
+    assert "packaging/steam/README.md" in readme
 
 
 def _source_text() -> str:
@@ -766,9 +868,13 @@ def test_contributing_injection_table_matches_real_signatures() -> None:
     def params(func) -> set[str]:
         return set(inspect.signature(func).parameters)
 
+    from gettowork.gui import app
+
     text = read(CONTRIBUTING)
     expectations = {
-        UI.__init__: {"console", "input_fn", "secret_fn", "open_url_fn"},
+        UI.__init__: {"console", "input_fn", "secret_fn", "open_url_fn", "choices_fn"},
+        app.run_gui: {"game_main"},
+        app.GameWindow.__init__: {"game_main", "opener", "env"},
         hf_discovery.discover_models: {"api", "cache_path", "clock"},
         download.download_gguf: {"hf_api", "hf_download"},
         runtime_install.ensure_llama_server: {"http", "runtime_root"},
@@ -786,6 +892,13 @@ def test_contributing_injection_table_matches_real_signatures() -> None:
         assert not missing, f"{func.__qualname__} has no parameter(s) {missing}, but CONTRIBUTING.md says so"
         for name in names:
             assert f"{name}=" in text, name
+    assert "hides_input" in params(UI.__init__) and "`hides_input=True`" in text
+    # The environment variables CONTRIBUTING tells test writers about are the ones distribution.py reads.
+    from gettowork import distribution
+
+    for var in (distribution.ENV_DISTRIBUTION, distribution.ENV_ENGINE_DIR, distribution.ENV_ALLOW_DOWNLOAD):
+        assert f"`{var}`" in text, var
+    assert "refresh" in params(distribution.load) and "distribution.load(refresh=True)" in text
 
 
 # ---------------------------------------------------------------------------
@@ -811,3 +924,159 @@ def test_ci_workflow_runs_pytest_on_every_os_and_python() -> None:
     assert 'pip install -e ".[dev]"' in runs
     assert "llamacpp" not in runs, "CI must not need the optional llama-cpp-python backend"
     assert "python -m pytest" in runs
+
+
+def test_contributing_describes_the_safety_workflow_and_the_build() -> None:
+    from gettowork import prompts, safety, safety_terms
+
+    text = read(CONTRIBUTING)
+    for name in ("check_text", "soften", "check_player_input"):
+        assert hasattr(safety, name) and (f"safety.{name}" in text or f"`{name}`" in text), name
+    assert hasattr(prompts, "safety_retry_messages") and "prompts.safety_retry_messages" in text
+    assert "ROT13" in text and "rot13" in text and "tests/test_safety.py" in text
+    assert "ROT13" in (safety_terms.__doc__ or "")
+    assert "notices.STEAM_AI_DISCLOSURE" in text
+    for script in ("fetch_engine.py", "gettowork.spec", "collect_licenses.py", "assemble.py", "smoke_test.sh",
+                   "engine_isolation_check.sh", "sign_windows.py"):
+        assert (ROOT / "packaging" / script).is_file(), script
+        assert f"packaging/{script}" in text, script
+    assert "--gui-selftest" in text and "gettowork_entry.py" not in text
+    # A maintainer note about the license of future versions, and LICENSE itself still MIT.
+    assert "MIT License" in read(ROOT / "LICENSE")
+    assert "license of future versions" in text.lower() and "stay MIT" in text
+
+
+def test_notice_covers_what_ships_inside_the_game_builds() -> None:
+    lines = read(NOTICE).splitlines()
+    text = flat(read(NOTICE))
+    collect = _packaging_module("collect_licenses")
+    assemble = _packaging_module("assemble")
+    assert assemble.LICENSES_FILE == "THIRD_PARTY_LICENSES.txt" and "`THIRD_PARTY_LICENSES.txt`" in text
+    assert "packaging/collect_licenses.py" in text
+    # Each bundled component is named with its license on one table row.
+    for name, license_words in (("Tcl/Tk", "BSD"), ("PyInstaller", "GPL"), ("Python", "PSF-2.0"),
+                                ("llama.cpp", "MIT")):
+        assert any(name in line and license_words in line for line in lines), name
+    assert "bootloader exception" in text and "BSD" in collect.TCL_TK_NOTICE
+    assert "**Bundled** in the game builds" in text
+    # The engine builds NOTICE names are the ones the build workflow bundles.
+    workflow = read(BUILD_WORKFLOW)
+    assert workflow.count("engines: vulkan,cpu") == 2 and "engines: metal" in workflow
+    assert "Vulkan and CPU builds on Windows and Linux, the Metal build on macOS" in text
+
+
+def test_readme_ai_content_section_matches_the_filter() -> None:
+    from gettowork import game, notices, safety
+
+    readme = flat(read(README))
+    section = readme[readme.index("## AI content and the family-friendly filter"):readme.index("## Privacy")]
+    assert game.FAMILY_FRIENDLY_REFUSAL in section
+    for label in ("sexual content", "self-harm", "graphic gore"):
+        assert label in safety.CATEGORY_LABELS.values() and label in section, label
+    assert "slurs and hate speech" in section and "hard drugs" in section
+    assert safety.soften("damn") == "d***" and '"d***"' in section
+    assert "hidden by the family-friendly filter" in safety.hidden_note(safety.SafetyVerdict(ok=False, category="gore"))
+    assert '"hidden by the family-friendly filter"' in section
+    for word in ("Scunthorpe", "assassin", "classic"):
+        assert safety.check_text(f"a {word} morning").ok and word in section, word
+    # Steam's overlay can't open over the game's Tk window (outside a Deck's Game Mode):
+    # the window's own button is the reporting path the notice and the README promise.
+    assert "Shift+Tab" not in notices.REPORT_HOW and notices.REPORT_BUTTON in notices.REPORT_HOW
+    assert notices.REPORT_BUTTON in section and "Discussions" in section
+    assert "`STEAM_AI_DISCLOSURE`" in section and hasattr(notices, "STEAM_AI_DISCLOSURE")
+    assert "abliterated" in section
+
+
+def test_readme_privacy_section_names_the_steam_keyboard_request() -> None:
+    from gettowork.gui import app
+
+    text = flat(read(README))
+    section = text[text.index("## Privacy"):text.index("## Troubleshooting")]
+    assert f"`{app.STEAM_KEYBOARD_URL}`" in section
+    assert "their engine is built in" in section  # built games never ask GitHub for the engine
+
+
+def test_distribution_contract_matches_the_build() -> None:
+    from gettowork import distribution, launcher, setup_flow
+    from gettowork.gui import app
+
+    doc = read(DISTRIBUTION)
+    flat_doc = flat(doc)
+    assemble = _packaging_module("assemble")
+    # The programs and archives.
+    assert f"`{assemble.CLI_NAME}(.exe)`" in doc and f"`{assemble.GUI_NAME}(.exe)`" in doc
+    assert "Contents/MacOS/gettowork-cli" in doc and f"`{assemble.MAC_APP}`" in doc
+    spec = read(ROOT / "packaging" / "gettowork.spec")
+    assert f'CLI_NAME = "{assemble.CLI_NAME}"' in spec and f'GUI_NAME = "{assemble.GUI_NAME}"' in spec
+    for os_key, arch in (("windows", "x64"), ("macos", "arm64"), ("linux", "x64")):
+        assert f"`{assemble.archive_name(os_key, arch, '<version>')}`" in doc
+    # distribution.json: the example has exactly the keys assemble.py writes.
+    example = find_json(doc, lambda b: "engine_downloads" in b)
+    assert set(example) == set(assemble.distribution_info("b1", "0.2.0", "sha"))
+    assert example["engine_downloads"] is False and example["engine_dir"] == assemble.ENGINE_DIR
+    # The Distribution dataclass fields and the environment variables.
+    fields = {f.name for f in dataclasses.fields(distribution.Distribution)}
+    for name in fields:
+        assert f"    {name}:" in doc, name
+    for var in (distribution.ENV_DISTRIBUTION, distribution.ENV_ENGINE_DIR, distribution.ENV_ALLOW_DOWNLOAD,
+                app.FULLSCREEN_ENV, app.SELFTEST_OUT_ENV, app.SELFTEST_TIMEOUT_ENV):
+        assert var in doc, var
+    # Messages and names quoted from the code.
+    assert flat(runtime_install.ENGINE_MISSING_MESSAGE) in flat_doc
+    assert runtime_install.BUNDLED_UNUSABLE_FILE in doc
+    assert "Built into the game (" in read(SRC / "setup_flow.py") and "Built into the game (llama.cpp" in doc
+    for quoted in (app.EXIT_HINT, app.SELFTEST_SUCCESS_TEXT, launcher.SELFTEST_FLAG, launcher.CLOSE_PROMPT,
+                   app.CRASH_FILE, f"{app.SELFTEST_TIMEOUT_S:g} s", f"{app.CLOSE_WAIT_S:g} s",
+                   f"{app.FULLSCREEN_FONT_SIZE}-point", setup_flow.__name__.rsplit(".", 1)[-1]):
+        assert quoted in flat_doc, quoted
+    assert app.SelftestPlayer().max_answers == 120 and "after 120 answers" in flat_doc
+    # Launch options agree with the Steam checklist.
+    steam = read(STEAM_README)
+    for launch in ("GetToWork\\GetToWork.exe", "Get To Work.app", "GetToWork/GetToWork"):
+        assert f"`{launch}`" in steam and f"`{launch}`" in doc, launch
+
+
+def test_distribution_contract_matches_the_workflows() -> None:
+    doc = flat(read(DISTRIBUTION))
+    build = read(BUILD_WORKFLOW)
+    for path in ("packaging/**", "src/gettowork/gui/**", "src/gettowork/launcher.py",
+                 "src/gettowork/distribution.py", ".github/workflows/build.yml"):
+        assert f'- "{path}"' in build, path
+    for runner in ("windows-latest", "ubuntu-22.04", "macos-latest"):
+        assert f"os: {runner}" in build and runner in doc, runner
+    assert "if: github.event_name != 'pull_request'" in build and "not on pull requests" in doc
+    assert "archive: false" in build and "`archive: false`" in doc
+    assert "--tag pinned" in build and "`packaging/llama_cpp_tag.txt`" in doc
+    assert "retention-days: 3" in build and "retention 3 days" in doc
+    ci = read(CI_WORKFLOW)
+    assert "xvfb-run -a python -m pytest" in ci and "`xvfb-run`" in doc
+    assert "github.event_name != 'workflow_dispatch' && 'macos-latest'" in ci and "macOS counts 10" in doc
+    live = read(ROOT / ".github" / "workflows" / "live-check.yml")
+    assert "GETTOWORK_ALLOW_ENGINE_DOWNLOAD" in live and "GETTOWORK_ENGINE_DIR" in live
+    assert "gettowork --list-models --refresh-models" in live and "`gettowork --list-models --refresh-models`" in doc
+
+
+def test_architecture_documents_the_distribution_modules() -> None:
+    text = read(ARCHITECTURE)
+    start = text.index("## Distribution: the game window, the built game and safety (as built)")
+    section = text[start:text.index("\n## ", start + 1)]
+    for heading in ("### distribution.py", "### gui/", "### ui.py (additive)", "### launcher.py",
+                    "### safety.py"):
+        assert heading in section, heading
+    layout = next(body for _lang, body in code_blocks(text) if body.startswith("src/gettowork/"))
+    for path in sorted(SRC.glob("*.py")):
+        if path.name != "__init__.py":
+            assert path.name in layout, f"{path.name} is missing from ARCHITECTURE.md's package layout"
+    for path in sorted((SRC / "gui").glob("*.py")):
+        assert path.name in layout, f"gui/{path.name} is missing from ARCHITECTURE.md's package layout"
+    assert "(DISTRIBUTION.md)" in text
+
+
+def test_readme_project_layout_lists_the_window_package() -> None:
+    layout = next(body for lang, body in code_blocks(read(README)) if body.startswith("src/gettowork/"))
+    assert "gui/" in layout
+    for path in sorted((SRC / "gui").glob("*.py")):
+        if path.name != "__init__.py":
+            assert path.name in layout, f"gui/{path.name} is missing from the README's project layout"
+    for folder in ("packaging/", "steam/", "docs/DISTRIBUTION.md", "assets/icon.png"):
+        assert folder in layout, folder

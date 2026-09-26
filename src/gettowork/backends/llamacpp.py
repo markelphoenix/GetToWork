@@ -14,6 +14,7 @@ stand in for ``llama_cpp.Llama``.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from contextlib import nullcontext
 from importlib.util import find_spec
@@ -27,12 +28,22 @@ from ..types import LLMResult, ModelEntry
 from ..ui import UI
 from .base import RETRY_WITHOUT_THINKING_NOTICE, BackendError, LLMBackend
 
-__all__ = ["LlamaCppBackend", "INSTALL_HINT", "is_qwen3", "add_no_think"]
+__all__ = ["LlamaCppBackend", "INSTALL_HINT", "BUILT_GAME_HINT", "install_hint", "is_qwen3", "add_no_think"]
 
 INSTALL_HINT = (
     "llama-cpp-python isn't installed. You can add it with: pip install llama-cpp-python "
     "(or just use the default engine, which needs no extra installs)."
 )
+# A built game (Steam, the double-click builds) has no pip and leaves llama_cpp out.
+BUILT_GAME_HINT = (
+    "llama-cpp-python isn't part of this build of the game - its built-in llama.cpp engine does the same job. "
+    "Leave out --backend llamacpp (or use Ollama)."
+)
+
+
+def install_hint() -> str:
+    """Why this backend can't run, and what to do: pip for a copy run from source, not in a built game."""
+    return BUILT_GAME_HINT if getattr(sys, "frozen", False) else INSTALL_HINT
 BENCHMARK_PROMPT = "Count from 1 to 40, separated by commas. Reply with the numbers only."
 
 
@@ -113,7 +124,7 @@ class LlamaCppBackend(LLMBackend):
             found = find_spec("llama_cpp") is not None
         except Exception:
             found = False
-        return (True, "llama-cpp-python is installed.") if found else (False, INSTALL_HINT)
+        return (True, "llama-cpp-python is installed.") if found else (False, install_hint())
 
     def prepare(self, ui: UI, entry: Optional[ModelEntry] = None) -> None:
         """Download the model if needed, then load it into memory."""
@@ -208,7 +219,7 @@ class LlamaCppBackend(LLMBackend):
         try:
             import llama_cpp  # optional dependency, imported only when needed
         except ImportError as exc:
-            raise BackendError(INSTALL_HINT) from exc
+            raise BackendError(install_hint()) from exc
         except Exception as exc:  # e.g. a broken native library inside the package
             raise BackendError(f"llama-cpp-python is installed but failed to start ({exc}).") from exc
         return llama_cpp.Llama

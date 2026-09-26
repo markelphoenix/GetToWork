@@ -30,7 +30,7 @@ from rich.text import Text
 
 from .jev import redact_key
 from .types import GameSummary, JevExchange, JevVerdict, LLMResult, RoundRecord
-from .ui import UI, UserQuit, plain, safe_text
+from .ui import UI, UserQuit, WindowClosed, plain, safe_text
 
 __all__ = [
     "run_review",
@@ -77,6 +77,8 @@ def run_review(ui: UI, summary: GameSummary, *, export_dir: Optional[Path] = Non
     """
     try:
         _run_review(ui, summary, export_dir, _secret_set(secrets), thinking_skipped_note)
+    except WindowClosed:
+        raise  # the window closed: nothing more to show (the game says goodbye)
     except UserQuit:
         ui.say()
         ui.info("Skipping the rest of the review.")

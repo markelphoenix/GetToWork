@@ -58,6 +58,8 @@ __all__ = [
     "score_fit",
     "rank_models",
     "pick_shortlist",
+    "runnable_by_engine",
+    "disk_space_needed",
     "recommend",
     "explain_fit",
     "speed_breakdown",
@@ -1103,6 +1105,43 @@ def _originals_first(fits: list[FitResult]) -> list[FitResult]:
         out.append(fit)
         placed.add(id(fit))
     return out
+
+
+def disk_space_needed(specs: SystemSpecs, catalog: Optional[list[ModelEntry]] = None) -> Optional[float]:
+    """When free disk space alone keeps every model out: the free space (GB, as the computer counts it)
+    the smallest model that would otherwise run needs. None when some model fits, or when memory (not
+    the disk) is what rules them all out - so "not enough memory" is never said about a full disk.
+    """
+    if specs.disk_free_gb < 0:
+        return None  # free space unknown: never the reason
+    ranked = rank_models(specs, catalog)
+    if not ranked or any(f.verdict != "no" for f in ranked):
+        return None
+    roomy = replace(specs, disk_free_gb=-1.0)  # the same computer with room to spare
+    fits = [f for f in rank_models(roomy, catalog) if f.verdict != "no" and f.download_gb]
+    if not fits:
+        return None
+    smallest = min(f.download_gb for f in fits)
+    return round(smallest * GIB_PER_GB + DISK_SPARE_GB, 1)
+
+
+def runnable_by_engine(models: list[ModelEntry], architectures: Optional[frozenset[str]]
+                       ) -> tuple[list[ModelEntry], list[ModelEntry]]:
+    """Split `models` into ``(the engine can load them, it can't)`` by GGUF architecture.
+
+    `architectures` is what the engine's llama.cpp release knows (see
+    :func:`gettowork.runtime_install.engine_architectures`); None = no limit.
+    A model whose architecture isn't known is kept: only a known name the
+    engine lacks rules a model out.
+    """
+    if not architectures:
+        return list(models), []
+    kept: list[ModelEntry] = []
+    left_out: list[ModelEntry] = []
+    for model in models:
+        arch = (model.architecture or "").strip().lower()
+        (left_out if arch and arch not in architectures else kept).append(model)
+    return kept, left_out
 
 
 def pick_shortlist(ranked: list[FitResult], n: int = 6) -> list[FitResult]:

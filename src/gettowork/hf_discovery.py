@@ -48,6 +48,7 @@ __all__ = [
     "group_quant_files",
     "shard_info",
     "rejection_reason",
+    "not_family_friendly",
     "license_of",
     "params_from_name",
     "prettify_repo_name",
@@ -65,6 +66,9 @@ __all__ = [
     "thinking_mode_for",
     "DISCOVERY_EXPLAINER",
 ]
+
+# Ends the "left out N models" note; the game's window drops it (no command line there).
+ALL_LICENSES_HINT = " (--all-licenses shows them)"
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -550,6 +554,17 @@ def _publisher_rank(repo_id: str) -> int:
     return ranks.index(publisher) if publisher in ranks else len(ranks)
 
 
+def not_family_friendly(info: Any) -> bool:
+    """Is this Hub model marked as uncensored, safety-removed ("abliterated") or adult content?
+
+    Looks at the repo id and its tags (a GGUF of such a fine-tune names it in a
+    ``base_model:`` tag). The model search leaves these out, and a model the
+    player names themselves (the "custom" pick, ``--model``) is refused too.
+    """
+    repo = str(_attr(info, "id", default=""))
+    return bool(_UNSAFE_RE.search(" ".join([repo, *_tags(info)])))
+
+
 def rejection_reason(info: Any, *, allow_all_licenses: bool = False) -> Optional[str]:
     """Why we'd leave this Hub model out, in plain English - or None if it's a good candidate.
 
@@ -565,7 +580,7 @@ def rejection_reason(info: Any, *, allow_all_licenses: bool = False) -> Optional
     if _attr(info, "private") or _attr(info, "disabled"):
         return "private or disabled"
     name = _repo_name(repo)
-    if _UNSAFE_RE.search(" ".join([repo, *_tags(info)])):
+    if not_family_friendly(info):
         return "not family-friendly (uncensored, abliterated or adult content)"
     pipeline = _attr(info, "pipeline_tag")
     words = _words(name) + _words(_repo_name(_base_model(info) or ""))  # a GGUF of a specialist is one too
@@ -1183,8 +1198,8 @@ def _fetch_live(api: Any, *, allow_all_licenses: bool, max_candidates: int, time
         elif reason.startswith("its license"):
             license_skips += 1
     if license_skips and not allow_all_licenses:
-        notes.append(f"Left out {_plural(license_skips, 'model')} whose license isn't Apache-2.0 or MIT "
-                     "(--all-licenses shows them).")
+        notes.append(f"Left out {_plural(license_skips, 'model')} whose license isn't Apache-2.0 or MIT"
+                     f"{ALL_LICENSES_HINT}.")
     open_models = [i for i in kept if not _is_gated(i)]
     if not open_models and kept:
         notes.append("Only models that need a Hugging Face login turned up, so those are listed.")

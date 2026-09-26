@@ -300,6 +300,8 @@ class RoundRecord:
     jev: Optional[JevVerdict] = None
     llm_calls: list[tuple[str, LLMResult]] = field(default_factory=list)  # (purpose, result)
     failed_jev_exchange: Optional[JevExchange] = None  # a Jev call that failed this round (the local model judged instead)
+    # What the family-friendly filter (safety.py) did this round - categories only, never the words.
+    safety_notes: list[str] = field(default_factory=list)
 
 
 @dataclass

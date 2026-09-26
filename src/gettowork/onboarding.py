@@ -26,7 +26,7 @@ from typing import Callable, Mapping, Optional
 
 from rich.markup import escape
 
-from .config import Settings
+from .config import Settings, command_name
 from .jev import (
     JEV_API_KEY_ENV,
     JEV_BASE_URL_ENV,
@@ -40,7 +40,7 @@ from .jev import (
     redact_key,
     validate_api_key_format,
 )
-from .ui import UI, UserQuit
+from .ui import UI, UserQuit, WindowClosed, looks_like_secret
 
 ClientFactory = Callable[[str], JevClient]
 
@@ -60,12 +60,15 @@ def run_jev_onboarding(
     env: Optional[Mapping[str, str]] = None,
     client_factory: Optional[ClientFactory] = None,
     local_model_elsewhere: Optional[str] = None,
+    ask_again: bool = False,
+    remember_no: bool = True,
 ) -> Optional[JevClient]:
     """Ask whether to enable Jev and, if so, get a working API key.
 
     Returns a ready :class:`JevClient`, or ``None`` to play with the local
     model only. Never raises for anything the player does: Ctrl+C anywhere in
-    here just means "skip Jev".
+    here just means "skip Jev". (Closing the game's window is the exception:
+    :class:`~gettowork.ui.WindowClosed` goes through, and the game ends.)
 
     Args:
         ui: Where all questions and messages go.
@@ -77,12 +80,22 @@ def run_jev_onboarding(
         local_model_elsewhere: where the "local" model really runs when it
             isn't this computer (an Ollama at another address, from
             OLLAMA_HOST), so the menus don't promise "nothing leaves this computer".
+        ask_again: ask about Jev even though the player said no last time
+            (``--jev``). Otherwise a player who chose the local model only is
+            not asked again - one line says how to turn Jev on - so a
+            returning player goes straight into the game.
+        remember_no: save a "no" (``jev_enabled = False``). False for a
+            pretend-model trial game: declining Jev there must not stop the
+            first real game from offering it.
     """
     env = os.environ if env is None else env
     factory = client_factory or _default_factory(env)
-    flow = _JevOnboarding(ui, settings, env, factory, local_model_elsewhere)
+    flow = _JevOnboarding(ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
+                          remember_no=remember_no)
     try:
         return flow.run()
+    except WindowClosed:
+        raise  # the window closed: the game ends here (no opening story behind a hidden window)
     except (UserQuit, KeyboardInterrupt):
         # Ctrl+C at a prompt (UserQuit) or while a key is being checked (KeyboardInterrupt).
         ui.say()
@@ -154,12 +167,22 @@ _TO_BACK_ALIASES = {w: "back" for w in ("no", "n", "skip", "cancel", "quit", "ex
 _PASTE_ANYWAY_ALIASES = {**_TO_BACK_ALIASES, **{w: "paste" for w in ("y", "yes", "yeah", "yep", "sure", "ok")}}
 
 
+def _pasted_key_shape(answer: str) -> bool:
+    """A menu answer that is really an API key pasted into the wrong box."""
+    key = clean_pasted_key(answer)
+    return looks_like_secret(key) and validate_api_key_format(key) is None
+
+
 class _JevOnboarding:
     """The onboarding conversation, one small method per step."""
 
     def __init__(self, ui: UI, settings: Settings, env: Mapping[str, str], factory: ClientFactory,
-                 local_model_elsewhere: Optional[str] = None) -> None:
+                 local_model_elsewhere: Optional[str] = None, *, ask_again: bool = False,
+                 remember_no: bool = True) -> None:
         self.ui = ui
+        self.ask_again = ask_again
+        self.remember_no = remember_no
+        self._pasted: Optional[str] = None  # a key pasted straight into a menu, waiting to be checked
         self.settings = settings
         self.env = env
         self.factory = factory
@@ -175,6 +198,12 @@ class _JevOnboarding:
     # -- the overall flow ---------------------------------------------------------
 
     def run(self) -> Optional[JevClient]:
+        if self.settings.jev_enabled is False and not self.ask_again and not self._key_in_env():
+            # A returning player who chose the local referee: straight into the game, with
+            # one line on how to change their mind (asked again only with --jev).
+            self.ui.info("Jev (the optional, paid AI referee) is off - you chose your local model last time. "
+                         + self._how_to_turn_jev_on())
+            return None
         self.ui.heading("Optional extra: Jev, the AI referee")
         existing = self._existing_key()
         if existing:
@@ -201,6 +230,17 @@ class _JevOnboarding:
         return self._key_menu(start=result)
 
     # -- step: an API key we already know about -------------------------------------------
+
+    def _key_in_env(self) -> bool:
+        """A key in TYPESAFE_API_KEY: set on purpose for this run, so it's always offered."""
+        return bool((self.env.get(JEV_API_KEY_ENV) or "").strip())
+
+    def _how_to_turn_jev_on(self) -> str:
+        if getattr(self.ui, "in_window", False):
+            return ("To turn it on, choose 'Play with Jev on this time' when the game welcomes you back - or start "
+                    "it once with --jev (on Steam: right-click Get To Work > Properties > General > Launch Options).")
+        return (f"To turn it on, choose jev ('Play with Jev on this time') when the game welcomes you back, or start "
+                f"the game with [bold]{command_name()} --jev[/bold].")
 
     def _existing_key(self) -> Optional[tuple[str, str]]:
         env_key = (self.env.get(JEV_API_KEY_ENV) or "").strip()
@@ -253,7 +293,7 @@ class _JevOnboarding:
     def _ask_enable(self) -> bool:
         ui = self.ui
         if self.settings.jev_enabled is False:
-            # A returning player who chose the local referee last time: one short
+            # A returning player who asked to be asked again (--jev): one short
             # question, not the whole introduction again (it's behind "learn").
             ui.say("Jev (the optional, paid AI referee) is off - last time you chose to play with your local model only.")
             choice = ui.choose(
@@ -286,9 +326,11 @@ class _JevOnboarding:
             "This game isn't affiliated with TypeSafe AI."
         )
         ui.say(escape(privacy_notice(self.env)))
+        back_out = ("choose 'no' or 'back'" if getattr(ui, "in_window", False)  # (Ctrl+C copies text there)
+                    else "choose 'no' or 'back', or press Ctrl+C")
         ui.say(
             "The game works fully without it - your local model can referee for free. "
-            "[dim](You can back out at any step: choose 'no' or 'back', or press Ctrl+C.)[/dim]"
+            f"[dim](You can back out at any step: {back_out}.)[/dim]"
         )
         remembered_yes = self.settings.jev_enabled is True
         while True:
@@ -317,7 +359,7 @@ class _JevOnboarding:
         step = start if start in (_PASTE, _HELP) else None
         while True:
             if step is None:
-                step = self.ui.choose(
+                step = self._menu_or_key(self.ui.choose(
                     "How would you like to add your Jev API key?",
                     [
                         ("paste", "I have a key, let me paste it"),
@@ -326,12 +368,14 @@ class _JevOnboarding:
                     ],
                     default="paste",
                     aliases=_TO_BACK_ALIASES,
-                )
+                    accept=_pasted_key_shape,
+                ))
             if step == _HELP:
                 step = self._show_help()
                 continue
             if step == _PASTE:
-                key = self._ask_for_key()
+                pasted, self._pasted = self._pasted, None
+                key = self._key_from(pasted) if pasted is not None else self._ask_for_key()
                 if key is None:
                     step = None
                     continue
@@ -346,10 +390,17 @@ class _JevOnboarding:
     def _ask_for_key(self) -> Optional[str]:
         ui = self.ui
         if ui.can_hide_input():
-            ui.say(
-                "[dim]Your key stays hidden: nothing shows on screen while you paste. "
-                "(Tip: some terminals paste with right-click or Ctrl+Shift+V.)[/dim]"
-            )
+            if getattr(ui, "in_window", False):
+                paste = "Cmd+V" if platform.system() == "Darwin" else "Ctrl+V"
+                ui.say(
+                    f"[dim]Paste it into the box below with {paste} (or right-click it and choose Paste): "
+                    "it shows as dots, so your key stays hidden.[/dim]"
+                )
+            else:
+                ui.say(
+                    "[dim]Your key stays hidden: nothing shows on screen while you paste. "
+                    "(Tip: some terminals paste with right-click or Ctrl+Shift+V.)[/dim]"
+                )
             ui.say("[dim](Press Enter with nothing typed to go back.)[/dim]")
             raw = ui.secret("Paste your Jev API key and press Enter")
         else:
@@ -371,7 +422,26 @@ class _JevOnboarding:
             if choice != "paste":
                 return None
             raw = ui.ask("Paste your Jev API key and press Enter (leave it empty to go back)")
-        key = clean_pasted_key(raw)
+        return self._key_from(raw)
+
+    def _menu_or_key(self, answer: str) -> str:
+        """A menu's answer: its option - or, for a key pasted straight into the menu, "paste" with that key.
+
+        Pasting there is the natural thing to do after copying a key in the
+        browser; the window already showed it as "(hidden)".
+        """
+        if answer in (_PASTE, _HELP, "back", "open", "docs"):
+            return answer
+        self._pasted = answer
+        if not getattr(self.ui, "in_window", False):
+            self.ui.say("[dim](That looks like your key, so I'll use it. Next time, choose 'paste' first: "
+                        "then it stays hidden as you paste it.)[/dim]")
+        return _PASTE
+
+    def _key_from(self, raw: Optional[str]) -> Optional[str]:
+        """A pasted key, cleaned up and checked for the right shape (None = go back a step)."""
+        ui = self.ui
+        key = clean_pasted_key(raw or "")
         if not key:
             ui.info("Nothing was entered - that's fine, let's go back a step.")
             return None
@@ -403,7 +473,7 @@ class _JevOnboarding:
         ui.say(f"[dim]{escape(privacy_notice(self.env))}[/dim]")
         opened = False
         while True:
-            choice = ui.choose(
+            choice = self._menu_or_key(ui.choose(
                 "What next?",
                 [
                     ("open", "Open typesafe.ai in my browser"),
@@ -413,7 +483,8 @@ class _JevOnboarding:
                 ],
                 default="paste" if opened else "open",
                 aliases=_TO_BACK_ALIASES,
-            )
+                accept=_pasted_key_shape,
+            ))
             if choice == "open":
                 ui.open_url(JEV_HOME_URL)
                 ui.info("Take your time. When you've copied your key, come back and choose 'paste'.")
@@ -560,7 +631,12 @@ class _JevOnboarding:
         )
         if choice == "yes":
             self.settings.jev_api_key = key
-            ui.info(f"Saved. (Delete it any time by running the game with --reset, or by editing {escape(str(self.settings.path))}.)")
+            where = escape(str(self.settings.path))
+            if getattr(ui, "in_window", False):
+                ui.info(f"Saved. (It's in {where} - delete it from there any time.)")
+            else:
+                ui.info(f"Saved. (Delete it any time by running [bold]{command_name()} --reset[/bold], "
+                        f"or by editing {where}.)")
         elif self.settings.jev_api_key:
             self.settings.jev_api_key = None  # the old key was replaced: what's on disk must match what we say
             ui.info("Not saved - the key only lives in memory while the game runs, and the key saved last "
@@ -577,9 +653,13 @@ class _JevOnboarding:
         self.ui.info(message)
 
     def _go_local(self) -> None:
-        self.settings.jev_enabled = False
-        self._save_settings()
-        self.ui.info("Playing with your local model only - it will referee your plans. Have fun!")
+        if self.remember_no:
+            self.settings.jev_enabled = False
+            self._save_settings()
+            self.ui.info("Playing with your local model only - it will referee your plans. Have fun!")
+        else:  # a pretend-model trial: nothing remembered, so a real game asks again
+            self.ui.info("No Jev this time - the pretend model will referee. I'll ask again when you play "
+                         "with a real model.")
         return None
 
     def _save_settings(self) -> None:
@@ -592,11 +672,26 @@ class _JevOnboarding:
             return
         if self.settings.jev_api_key and getattr(self.settings, "key_file_protected", None) is False:
             # Windows wouldn't give the file an owner-only access list: say so plainly.
-            self.ui.warn(
-                f"Windows wouldn't let me restrict who can read {escape(str(self.settings.path))}, so other "
-                "accounts on this PC may be able to read your saved key. To be safe, run the game once with "
-                f"--reset and set the {JEV_API_KEY_ENV} environment variable instead."
-            )
+            where = escape(str(self.settings.path))
+            if not getattr(self.ui, "in_window", False):
+                self.ui.warn(
+                    f"Windows wouldn't let me restrict who can read {where}, so other accounts on this PC may be "
+                    "able to read your saved key. To be safe, run the game once with --reset and set the "
+                    f"{JEV_API_KEY_ENV} environment variable instead."
+                )
+                return
+            # The window has no command line for --reset: offer the safe choice right here.
+            self.ui.warn(f"Windows wouldn't let me restrict who can read {where}, so other accounts on this PC "
+                         "may be able to read your saved key.")
+            if self.ui.confirm("Forget the saved key? (Jev still works for this session - you'd paste the key "
+                               "again next time.)", default=True):
+                self.settings.jev_api_key = None
+                try:
+                    self.settings.save()
+                    self.ui.info("Done - your key isn't saved on this PC any more.")
+                except OSError as exc:
+                    self.ui.warn(escape(f"Couldn't update your settings ({exc}). You can delete {self.settings.path} "
+                                        "yourself to remove the key."))
 
 
 def _unexpected(exc: BaseException, key: str) -> str:

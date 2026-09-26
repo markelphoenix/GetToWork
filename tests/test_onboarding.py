@@ -285,6 +285,45 @@ def test_help_opens_browser_then_paste(home):
     h.assert_menus_offer_local_only()
 
 
+def test_a_key_pasted_straight_into_the_key_menu_is_used(home):
+    """Pasting where the menu asks "How would you like to add your Jev API key?" is the natural thing
+    to do: it means 'paste', with that key - never "Pick one of the options above"."""
+    h = Harness(answers=["yes", KEY, "no"], responses=[MODELS_OK])
+    client = h.run()
+    assert client is not None and client.key_hint == "****wxyz"
+    assert h.transport.calls[0]["headers"]["Authorization"] == f"Bearer {KEY}"
+    assert "Pick one of the options" not in h.output
+    assert "Got a key ending ****wxyz" in h.output
+    assert "choose 'paste' first" in h.output  # (a terminal showed it as it was pasted: say how to keep it hidden)
+    assert h.script.secrets == []  # the hidden paste question was never needed
+
+
+def test_a_key_pasted_at_what_next_after_the_browser_is_used(home):
+    h = Harness(answers=["yes", "help", "open", f"  Bearer {OTHER_KEY} ", "no"], responses=[MODELS_OK])
+    client = h.run()
+    assert client is not None and client.key_hint == "****abcd"
+    assert h.script.opened == [JEV_HOME_URL]
+    assert "Pick one of the options" not in h.output
+    h.assert_no_leak(OTHER_KEY)  # (the terminal itself echoed it; the game never printed it)
+
+
+def test_a_key_pasted_into_a_menu_in_the_window_gets_no_terminal_advice(home):
+    script = Script(["yes", KEY, "no"])  # enable, the key (into the menu), don't save it
+    ui = UI(console=Console(file=io.StringIO(), width=200), input_fn=script.input, secret_fn=script.secret,
+            window=True)
+    transport = FakeTransport(MODELS_OK)
+    client = run_jev_onboarding(ui, Settings(), env={}, client_factory=lambda k: JevClient(
+        k, transport=transport, max_retries=0, sleep=lambda s: None))
+    assert client is not None
+    assert "choose 'paste' first" not in ui.console.file.getvalue()
+
+
+def test_ordinary_menu_words_are_never_taken_for_a_key(home):
+    h = Harness(answers=["yes", "pasted please", "back"])
+    assert h.run() is None
+    assert "Pick one of the options" in h.output
+
+
 def test_help_then_back_is_local_only(home):
     h = Harness(answers=["yes", "help", "back"])
     assert h.run() is None
@@ -667,8 +706,89 @@ def test_back_out_words_work_at_the_key_menu(home):
     assert "Pick one of the options" not in h.output
 
 
-def test_returning_local_only_players_get_one_short_question(home):
-    h = Harness(answers=[""], settings=Settings(jev_enabled=False))
+def test_returning_local_only_players_go_straight_in_with_one_line_on_jev(home):
+    """They said no to Jev last time: no question at all (Script fails on an unexpected prompt)."""
+    h = Harness(answers=[], settings=Settings(jev_enabled=False))
+    assert h.run() is None
+    out = " ".join(h.output.split())
+    assert "Jev (the optional, paid AI referee) is off" in out and "gettowork --jev" in out
+    assert "Noul" not in out and "Privacy:" not in out  # no pitch
+    assert h.ui.menus == [] and h.script.prompts == []
+
+
+def test_the_window_says_how_to_turn_jev_back_on_without_a_command_line(home):
+    script = Script([])
+    ui = UI(console=Console(file=io.StringIO(), width=300), input_fn=script.input, window=True)
+    assert run_jev_onboarding(ui, Settings(jev_enabled=False), env={}) is None
+    out = " ".join(ui.console.file.getvalue().split())
+    assert "choose 'Play with Jev on this time' when the game welcomes you back" in out
+    assert "Properties > General > Launch Options" in out
+    # ...which is exactly what that welcome-back button says (the window shows a label's part before " (").
+    from gettowork.gui.app import button_labels
+    from gettowork.setup_flow import WELCOME_BACK_JEV_OPTIONS
+
+    assert "Play with Jev on this time" in button_labels(WELCOME_BACK_JEV_OPTIONS)
+
+
+def _unprotected_key_file(monkeypatch):
+    """As on a Windows PC that won't give settings.json an owner-only access list."""
+    real_save = Settings.save
+
+    def save(self):
+        real_save(self)
+        self.key_file_protected = False if self.jev_api_key else None
+
+    monkeypatch.setattr(Settings, "save", save)
+
+
+def test_an_unprotected_key_file_in_the_window_offers_to_forget_the_key_right_there(home, monkeypatch):
+    _unprotected_key_file(monkeypatch)
+    script = Script(["yes", "paste", "yes", ""], secrets=[KEY])  # ...save the key: yes; forget it: Enter (yes)
+    ui = UI(console=Console(file=io.StringIO(), width=300), input_fn=script.input, secret_fn=script.secret,
+            window=True)
+    transport = FakeTransport(MODELS_OK)
+    client = run_jev_onboarding(ui, Settings(), env={}, client_factory=lambda k: JevClient(
+        k, transport=transport, max_retries=0, sleep=lambda s: None))
+    assert client is not None  # Jev still works this session
+    out = " ".join(ui.console.file.getvalue().split())
+    assert "Windows wouldn't let me restrict who can read" in out
+    assert "--reset" not in out  # no command line in the window
+    assert saved(home)["jev_api_key"] is None and "isn't saved on this PC any more" in out
+
+
+def test_an_unprotected_key_file_in_a_terminal_names_reset(home, monkeypatch):
+    _unprotected_key_file(monkeypatch)
+    h = Harness(answers=["yes", "paste", "yes"], secrets=[KEY], responses=[MODELS_OK])
+    assert h.run() is not None
+    assert "--reset" in h.output and saved(home)["jev_api_key"] == KEY
+
+
+def test_a_no_in_a_pretend_model_trial_is_not_remembered(home):
+    """Enter at "Enable Jev?" while trying the pretend model must not switch Jev off for the first real game."""
+    h = Harness(answers=[""])
+    assert run_jev_onboarding(h.ui, h.settings, env={}, client_factory=h.factory, remember_no=False) is None
+    assert h.settings.jev_enabled is None
+    assert not (home / "settings.json").exists() or saved(home).get("jev_enabled") is None
+    assert "I'll ask again when you play with a real model" in h.output
+    # ...so the next (real) game still asks.
+    again = Harness(answers=["no"], settings=Settings.load())
+    assert again.run() is None and len(again.ui.menus) == 1
+    assert saved(home)["jev_enabled"] is False  # a real game's "no" is remembered, as before
+
+
+def test_a_key_in_the_environment_is_still_offered_to_a_returning_local_only_player(home):
+    h = Harness(answers=["no"], settings=Settings(jev_enabled=False), env={"TYPESAFE_API_KEY": KEY})
+    assert h.run() is None
+    assert len(h.ui.menus) == 1  # "Use it?"
+
+
+class _AskAgainHarness(Harness):
+    def run(self):
+        return run_jev_onboarding(self.ui, self.settings, env=self.env, client_factory=self.factory, ask_again=True)
+
+
+def test_with_jev_returning_local_only_players_get_one_short_question(home):
+    h = _AskAgainHarness(answers=[""], settings=Settings(jev_enabled=False))
     assert h.run() is None
     out = h.output
     assert "last time you chose to play with your local model only" in out
@@ -677,14 +797,14 @@ def test_returning_local_only_players_get_one_short_question(home):
 
 
 def test_returning_local_only_players_can_still_turn_jev_on(home):
-    h = Harness(answers=["yes", "paste", "no"], secrets=[KEY], responses=[MODELS_OK],
-                settings=Settings(jev_enabled=False))
+    h = _AskAgainHarness(answers=["yes", "paste", "no"], secrets=[KEY], responses=[MODELS_OK],
+                         settings=Settings(jev_enabled=False))
     assert h.run() is not None
     assert "Privacy:" in h.output  # shown before anything is sent
 
 
 def test_returning_local_only_players_can_ask_to_learn_first(home):
-    h = Harness(answers=["learn", "no"], settings=Settings(jev_enabled=False))
+    h = _AskAgainHarness(answers=["learn", "no"], settings=Settings(jev_enabled=False))
     assert h.run() is None
     assert "Learn: What is Jev?" in h.output and "Noul" in h.output
 
@@ -720,3 +840,31 @@ def test_help_words_open_the_jev_lesson(word):
     assert h.run() is None
     assert "calibrated" in h.output  # the lesson (TEACH_JEV) was shown
     assert h.script.prompts[0].startswith("[bold]Enable Jev") and len(h.script.prompts) == 2
+
+
+def test_closing_the_game_window_during_jev_setup_ends_the_game_instead_of_skipping_jev():
+    """Ctrl+C here means "skip Jev"; a closed window means stop - no opening story afterwards."""
+    from gettowork.ui import UserQuit, WindowClosed
+
+    def closed(prompt):
+        raise EOFError("the game window was closed")
+
+    ui = UI(console=Console(file=io.StringIO(), width=120), input_fn=closed, secret_fn=closed, window=True)
+    with pytest.raises(WindowClosed):
+        run_jev_onboarding(ui, Settings(), env={})
+    assert "skipping Jev" not in ui.console.file.getvalue()
+    terminal = UI(console=Console(file=io.StringIO(), width=120), input_fn=closed)
+    assert run_jev_onboarding(terminal, Settings(), env={}) is None  # a terminal's Ctrl+D: skip Jev
+    assert issubclass(WindowClosed, UserQuit)
+
+
+def test_the_window_gets_its_own_paste_hint_and_no_ctrl_c_advice(monkeypatch):
+    answers = iter(["yes", "paste"])
+    secrets = iter([""])
+    ui = UI(console=Console(file=io.StringIO(), width=200), input_fn=lambda p: next(answers, "back"),
+            secret_fn=lambda p: next(secrets, ""), window=True)
+    run_jev_onboarding(ui, Settings(), env={})
+    text = ui.console.file.getvalue()
+    assert "Ctrl+C" not in text
+    assert "shows as dots" in text and "right-click" in text
+    assert "nothing shows on screen" not in text and "Ctrl+Shift+V" not in text

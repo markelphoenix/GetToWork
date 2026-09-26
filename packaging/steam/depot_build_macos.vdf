@@ -1,0 +1,18 @@
+// SteamPipe depot build: the macOS (Apple Silicon) depot of Get To Work.
+// content/macos/ holds the unpacked macOS archive: content/macos/GetToWork/Get To Work.app ...
+// (unpack it with ditto on a Mac, so the app keeps its symbolic links and permissions).
+// Only the inside of that GetToWork folder is uploaded, so players' install folder
+// gets "Get To Work.app" at the top and the launch option is: Get To Work.app
+"DepotBuild"
+{
+	"DepotID" "<DEPOT_ID_MAC>"
+	"FileMapping"
+	{
+		// Relative to the app build's ContentRoot (../content/).
+		"LocalPath" "macos/GetToWork/*"
+		// Relative to the game's install folder.
+		"DepotPath" "."
+		"Recursive" "1"
+	}
+	"FileExclusion" ".DS_Store"
+}

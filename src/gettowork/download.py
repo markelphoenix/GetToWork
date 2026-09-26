@@ -36,6 +36,7 @@ from .hf_discovery import (
     group_quant_files,
     license_of,
     make_hub_api,
+    not_family_friendly,
     parse_quant,
     prettify_repo_name,
     rejection_reason,
@@ -69,7 +70,8 @@ class DownloadError(RuntimeError):
     """A download problem, explained in one plain-English sentence.
 
     `kind` lets callers react: "not_found", "gated", "no_gguf", "missing_file",
-    "network", "offline_mode", "server", "disk", "incomplete", "bad_repo_id" or "other".
+    "network", "offline_mode", "server", "disk", "incomplete", "bad_repo_id",
+    "not_family_friendly" (a player-named model marked uncensored/adult) or "other".
     """
 
     def __init__(self, message: str, kind: str = "other") -> None:
@@ -607,6 +609,14 @@ def _inspect_custom(repo_id: str, quant: Optional[str], api: Any) -> tuple[Model
         info: Any = with_deadline(lambda: api.model_info(repo), LISTING_DEADLINE_S / 2)
     except Exception:
         info = None  # metadata is nice to have, not essential
+    if not_family_friendly(info if info is not None else SimpleNamespace(id=repo)):
+        # The game is family-friendly (and its Steam AI disclosure says so): the model search
+        # leaves these out, and naming one yourself doesn't bring it back.
+        raise DownloadError(
+            f"{repo} is marked as uncensored, safety-removed or adult content, and Get To Work only "
+            "plays family-friendly models. Please pick another one.",
+            "not_family_friendly",
+        )
     names = [name for name, _ in listing]
     if pick_gguf_file(names, wanted) is None:
         _choose_files(names, wanted, repo)  # raises the friendly "no GGUF files" error right away
@@ -638,7 +648,8 @@ def custom_entry(repo_id: str, quant: Optional[str] = None, *, hf_api: Any = Non
     e.g. so the fit engine can check a "custom" pick before anything is downloaded.
 
     `repo_id` may be "owner/name", a huggingface.co link, or "hf.co/owner/name:QUANT".
-    Raises DownloadError (bad id, not found, gated, no GGUF, network).
+    Raises DownloadError (bad id, not found, gated, no GGUF, network, or a model marked
+    uncensored/adult: "not_family_friendly").
     """
     entry, _, _, _ = _inspect_custom(repo_id, quant, hf_api or _default_api())
     return entry
@@ -650,7 +661,8 @@ def download_custom_gguf(repo_id: str, quant: str, ui: UI, dest_dir: Optional[Pa
 
     `repo_id` may be "owner/name", a huggingface.co link, or "hf.co/owner/name:QUANT".
     Reads the repo's metadata to show its license (warning if it isn't
-    Apache-2.0/MIT or looks unsuitable), then behaves like `download_gguf`.
+    Apache-2.0/MIT or looks unsuitable), then behaves like `download_gguf`. A model
+    marked uncensored, safety-removed or adult is refused (DownloadError "not_family_friendly").
     """
     api = hf_api or _default_api()
     entry, info, listing, wanted = _inspect_custom(repo_id, quant, api)

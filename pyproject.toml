@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gettowork"
-version = "0.1.0"
+dynamic = ["version"]  # read from src/gettowork/__init__.py: the one place to bump it
 description = "Get To Work: an edutainment text adventure that teaches local open-weight LLMs and the Jev typed-judgment API."
 readme = "README.md"
 license = "MIT"
@@ -28,10 +28,19 @@ llamacpp = ["llama-cpp-python>=0.3.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-gettowork = "gettowork.cli:main"
+gettowork = "gettowork.cli:main"  # the terminal version
+
+[project.gui-scripts]
+gettowork-gui = "gettowork.launcher:gui_main"  # the game's own window (what Steam launches)
+
+[tool.setuptools.dynamic]
+version = { attr = "gettowork.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+gettowork = ["assets/*"]  # the window icon
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

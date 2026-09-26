@@ -1,0 +1,16 @@
+// SteamPipe depot build: the Windows depot of Get To Work.
+// content/windows/ holds the unpacked Windows archive: content/windows/GetToWork/GetToWork.exe ...
+// Players' install folder then gets GetToWork/..., so the launch option is GetToWork\GetToWork.exe.
+"DepotBuild"
+{
+	"DepotID" "<DEPOT_ID_WIN>"
+	"FileMapping"
+	{
+		// Relative to the app build's ContentRoot (../content/).
+		"LocalPath" "windows/*"
+		// Relative to the game's install folder.
+		"DepotPath" "."
+		"Recursive" "1"
+	}
+	"FileExclusion" "*.pdb"
+}

@@ -150,6 +150,32 @@ def test_ctrl_c_and_ctrl_d_at_a_prompt_raise_user_quit():
             UI(console=Console(file=io.StringIO()), input_fn=input_fn).ask("?")
 
 
+def test_a_closed_game_window_is_told_apart_from_ctrl_c():
+    """In the game's window, input ends with EOFError only when the window closed: WindowClosed
+    (still a UserQuit), so "skip this step" handlers can let it through."""
+    from gettowork.ui import WindowClosed
+
+    def closed(prompt):
+        raise EOFError("the game window was closed")
+
+    window_ui = UI(console=Console(file=io.StringIO()), input_fn=closed, secret_fn=closed, window=True)
+    for ask in (lambda: window_ui.ask("?"), lambda: window_ui.secret("key"), lambda: window_ui.confirm("?"),
+                lambda: window_ui.choose("?", [("a", "A")])):
+        with pytest.raises(WindowClosed):
+            ask()
+    terminal = UI(console=Console(file=io.StringIO()), input_fn=closed)
+    with pytest.raises(UserQuit) as caught:
+        terminal.ask("?")
+    assert not isinstance(caught.value, WindowClosed)  # Ctrl+D in a terminal is a plain quit
+
+    def ctrl_c(prompt):
+        raise KeyboardInterrupt
+
+    with pytest.raises(UserQuit) as caught:
+        UI(console=Console(file=io.StringIO()), input_fn=ctrl_c, window=True).ask("?")
+    assert not isinstance(caught.value, WindowClosed)
+
+
 def test_make_input_safe_replaces_undecodable_bytes():
     stream = io.TextIOWrapper(io.BytesIO(b"caf\xe9 au lait\n"), encoding="utf-8")
     make_input_safe(stream)
