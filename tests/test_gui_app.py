@@ -1138,7 +1138,16 @@ def test_the_console_matches_the_window_size(harness):
     h = harness(game)
     h.wait_prompt("resize me")
     columns, rows = h.window.console_size
-    assert columns >= 100 and rows >= 32
+    # The harness pins the font (11 pt), so the window can't shrink it to fit: on a small
+    # desktop (a CI runner's 1024x768) 100x32 characters at that size don't fit the screen,
+    # and the window fits the screen instead. (The real game shrinks the font: see
+    # test_the_desktop_window_still_fits_100_columns_on_a_small_screen.)
+    need_w, need_h = h.window._window_size_for(app.MIN_COLUMNS, app.MIN_ROWS)
+    room_w, room_h = int(h.root.winfo_screenwidth() * 0.96), int(h.root.winfo_screenheight() * 0.88)
+    if need_w <= room_w and need_h <= room_h:
+        assert columns >= 100 and rows >= 32
+    else:
+        assert columns >= 40 and rows >= 10
     assert widths[0] == columns and h.window.bridge.columns == columns
     h.root.geometry("640x480")
     h.pump(lambda: h.window.console_size[0] < columns, what="the console to narrow")
@@ -1158,11 +1167,15 @@ def test_zoom_changes_the_font_and_the_console_width(harness, isolated_home):
     h = harness(game, remember_font_size=True)
     h.wait_prompt("zoom?")
     h.settle(0.2)
-    size, columns = h.window.font_size, h.window.console_size[0]
+    size, (columns, rows) = h.window.font_size, h.window.console_size
     h.window.zoom(+2)
     h.settle(0.2)
     assert h.window.font_size == size + 2
-    assert h.window.console_size[0] < columns
+    # Bigger letters, less text: fewer columns or rows (a bitmap font can keep its width for
+    # a couple of point sizes and grow only in height), and the text still fits the window.
+    new_columns, new_rows = h.window.console_size
+    assert (new_columns, new_rows) != (columns, rows) and new_columns <= columns and new_rows <= rows
+    assert new_columns * h.window.font.measure("0") <= h.window.text.winfo_width()
     h.window.zoom(-1)
     assert h.window.font_size == size + 1
     for key in ("<Control-equal>", "<Control-minus>", "<Control-0>"):
@@ -1249,11 +1262,18 @@ def test_steam_deck_keeps_its_big_font_on_its_own_1280x800_screen(display, monke
     try:
         assert window.fullscreen is True
         columns, rows = window._size
-        if window.font_size != app.FULLSCREEN_FONT_SIZE:  # (only on a screen far denser than the Deck's)
-            assert window._window_size_for(app.FULLSCREEN_MIN_COLUMNS, app.FULLSCREEN_MIN_ROWS)[0] <= 1280
-        else:
+        fits = window._window_size_for(app.FULLSCREEN_MIN_COLUMNS, app.FULLSCREEN_MIN_ROWS)
+        assert fits[0] <= 1280 and fits[1] <= 800
+        if window.font_size == app.FULLSCREEN_FONT_SIZE:
             assert columns >= app.FULLSCREEN_MIN_COLUMNS and rows >= app.FULLSCREEN_MIN_ROWS
-        assert window.font_size == app.FULLSCREEN_FONT_SIZE or window.font.measure("0") * 80 > 1000
+        else:
+            # Font sizes are in points, so their pixel size depends on the display's DPI (Windows'
+            # 96 dpi draws bigger letters than a virtual X screen). The big font may shrink - but
+            # only as far as needed: one size up, 80x24 characters must no longer fit.
+            assert window.font_size < app.FULLSCREEN_FONT_SIZE
+            window._set_font_size(window.font_size + 1)
+            bigger = window._window_size_for(app.FULLSCREEN_MIN_COLUMNS, app.FULLSCREEN_MIN_ROWS)
+            assert bigger[0] > 1280 or bigger[1] > 800
     finally:
         window.finish()
 
@@ -1372,12 +1392,15 @@ def test_on_a_steam_deck_the_question_and_input_bar_sit_above_steams_keyboard(di
 
 
 def test_the_desktop_keeps_the_input_bar_at_the_bottom(harness):
-    h = harness(lambda argv, ui: ui.ask("Plan?") and 0)
+    opened = []
+    h = harness(lambda argv, ui: ui.ask("Plan?") and 0, opener=lambda url: opened.append(url) or True)
     h.wait_prompt("Plan?")
     assert not h.window.input_on_top
     assert h.window.entry.winfo_rooty() > h.window.text.winfo_rooty()
     h.window.show_keyboard()  # (no room is made on a desktop)
     assert not h.window.keyboard_space.winfo_ismapped()
+    h.root.update()
+    assert opened == []  # no steam:// request (without Steam it would just open a web browser)
     h.window.type_answer("walk")
 
 

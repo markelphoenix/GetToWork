@@ -101,8 +101,15 @@ def test_ram_benchmark_notes_when_it_had_to_shrink(monkeypatch):
 def test_ram_benchmark_hardly_depends_on_buffer_size_once_past_the_cache():
     # Reading RAM (not copying small buffers) gives the same answer for any
     # buffer comfortably bigger than the CPU cache.
-    small = perf._parallel_read_bandwidth(2, 96 * 1024 * 1024, 0.15)
-    large = perf._parallel_read_bandwidth(2, 192 * 1024 * 1024, 0.15)
+    # One short timing on a shared CI machine can be knocked sideways by a
+    # noisy neighbour (seen: 34 vs 15 GB/s), so compare the best of a few runs:
+    # the peak is what the hardware can do, the dips are interference.
+    def best(size: int) -> float:
+        runs = [perf._parallel_read_bandwidth(2, size, 0.15) for _ in range(4)]
+        return max((r for r in runs if r), default=0.0)
+
+    small = best(96 * 1024 * 1024)
+    large = best(192 * 1024 * 1024)
     assert small and large and 0.5 < small / large < 2.0
 
 

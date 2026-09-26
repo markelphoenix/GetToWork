@@ -1683,6 +1683,10 @@ class GameWindow:
         lines - the obstacle being answered - stay in sight above the keyboard.
         """
         self.entry.focus_set()
+        if not self.input_on_top:
+            # A desktop (not Steam Deck mode): there's a real keyboard, and with no Steam client
+            # running, the steam:// request would only make the system open a web browser.
+            return
         self._show_keyboard_space(True)
         threading.Thread(target=open_steam_keyboard, args=(self._keyboard_opener,), name="gettowork-keyboard",
                          daemon=True).start()
