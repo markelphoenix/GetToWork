@@ -18,7 +18,7 @@ from typing import ClassVar, Optional
 # Credentials for other services that no child program (the llama.cpp engine,
 # a hardware-detection tool) ever needs: left out of their environment.
 SECRET_ENV_VARS = frozenset({
-    "TYPESAFE_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+    "TYPESAFE_API_KEY", "LAYA_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
     "HUGGINGFACE_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
 })
 
@@ -116,7 +116,7 @@ class Settings:
     server_exe: Optional[str] = None  # installed llama-server executable (managed backend)
     ollama_model: Optional[str] = None  # model tag used with ollama
     jev_enabled: Optional[bool] = None  # remembered answer to "use a System One referee?"
-    system_one: Optional[str] = None  # "jev" or "laya" when one was chosen
+    system_one: Optional[str] = None  # "jev", "laya" (hosted) or "laya-local"
     # Only stored if the player explicitly opted in. Never shown by repr(), so a
     # stray debug print or traceback can't reveal it.
     jev_api_key: Optional[str] = field(default=None, repr=False)

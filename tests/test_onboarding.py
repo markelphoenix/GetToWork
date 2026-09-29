@@ -947,3 +947,80 @@ def test_yes_still_means_jev(home):
 
 def test_clean_pasted_key_strips_a_laya_assignment():
     assert clean_pasted_key(f"export LAYA_API_KEY='{LAYA_KEY}'") == LAYA_KEY
+
+
+# ---------------------------------------------------------------------------
+# Laya installed on this computer
+# ---------------------------------------------------------------------------
+
+
+def _roomy_specs():
+    from gettowork.types import SystemSpecs
+
+    return SystemSpecs(
+        os_name="Linux", os_version="1", arch="x86_64", cpu_name="CPU",
+        cpu_cores_physical=4, cpu_cores_logical=8, ram_total_gb=16, ram_available_gb=10,
+        disk_free_gb=40,
+    )
+
+
+class _FakeLocal:
+    def __init__(self, *, ok: bool = True, reason: str = "") -> None:
+        self.ok = ok
+        self.reason = reason
+        self.started: list[tuple[str, int]] = []
+        self.installed_flag = False
+
+    def fit(self, specs):
+        from gettowork.laya_local import LocalLayaFit
+
+        if self.ok:
+            return LocalLayaFit(True, device="cpu", threads=2)
+        return LocalLayaFit(False, reason=self.reason)
+
+    def installed(self):
+        return self.installed_flag
+
+    def start(self, ui, *, device, threads):
+        from gettowork.jev import LAYA_LOCAL_OPTION
+
+        self.started.append((device, threads))
+        return JevClient("laya_local_" + "a" * 24, option=LAYA_LOCAL_OPTION,
+                         base_url="http://127.0.0.1:9", model="english")
+
+    def close(self):
+        pass
+
+
+def test_a_computer_with_room_can_choose_laya_on_this_machine(home):
+    local = _FakeLocal()
+    h = Harness(answers=["laya-local", "y"])
+    client = run_jev_onboarding(
+        h.ui, h.settings, env={}, specs=_roomy_specs(), offer_local=True, local_laya=local,
+    )
+    assert client is not None and client.base_url == "http://127.0.0.1:9"
+    assert local.started == [("cpu", 2)]
+    assert saved(home)["system_one"] == "laya-local" and saved(home)["jev_enabled"] is True
+    assert "Apache-2.0" in h.output and "running on this computer" in h.output
+    keys = [key for key, _label in h.ui.menus[0][1]]
+    assert keys == ["jev", "laya", "laya-local", "no", "learn"]
+
+
+def test_declining_the_install_returns_to_the_model_menu(home):
+    local = _FakeLocal()
+    h = Harness(answers=["laya-local", "n", "no"])
+    assert run_jev_onboarding(
+        h.ui, h.settings, env={}, specs=_roomy_specs(), offer_local=True, local_laya=local,
+    ) is None
+    assert local.started == []
+    assert saved(home)["jev_enabled"] is False
+
+
+def test_a_tight_computer_is_told_why_local_laya_is_missing(home):
+    local = _FakeLocal(ok=False, reason="only about 1 GB of memory is free")
+    h = Harness(answers=["no"])
+    assert run_jev_onboarding(
+        h.ui, h.settings, env={}, specs=_roomy_specs(), offer_local=True, local_laya=local,
+    ) is None
+    assert "isn't offered" in h.output and "1 GB of memory" in h.output
+    assert all(key != "laya-local" for _prompt, options in h.ui.menus for key, _label in options)

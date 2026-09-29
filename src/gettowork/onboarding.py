@@ -32,6 +32,7 @@ from rich.markup import escape
 from .config import Settings, command_name
 from .jev import (
     JEV_OPTION,
+    LAYA_LOCAL_OPTION,
     LAYA_OPTION,
     SYSTEM_ONE_OPTIONS,
     SystemOneOption,
@@ -43,6 +44,8 @@ from .jev import (
     system_one_option,
     validate_api_key_format,
 )
+from .laya_local import LocalLaya, LocalLayaError, LocalLayaFit
+from .types import SystemSpecs
 from .ui import UI, UserQuit, WindowClosed, looks_like_secret
 
 ClientFactory = Callable[..., JevClient]
@@ -59,6 +62,8 @@ _NAVIGATION_WORDS = frozenset({"back", "b", "skip", "cancel", "no", "n", "quit",
 
 # What the key-entry steps can ask the menu to do next.
 _PASTE, _HELP, _MENU, _LOCAL = "paste", "help", "menu", "local"
+# The player said no to installing local Laya: show the model menu again.
+_AGAIN = "again"
 
 
 def run_jev_onboarding(
@@ -70,6 +75,9 @@ def run_jev_onboarding(
     local_model_elsewhere: Optional[str] = None,
     ask_again: bool = False,
     remember_no: bool = True,
+    specs: Optional[SystemSpecs] = None,
+    offer_local: bool = False,
+    local_laya: Optional[LocalLaya] = None,
 ) -> Optional[JevClient]:
     """Ask whether to enable Jev and, if so, get a working API key.
 
@@ -95,11 +103,18 @@ def run_jev_onboarding(
         remember_no: save a "no" (``jev_enabled = False``). False for a
             pretend-model trial game: declining Jev there must not stop the
             first real game from offering it.
+        specs: this computer, after the story model is loaded. Used only to
+            decide whether Laya can be installed and run here.
+        offer_local: show that option when ``specs`` say it fits. Off for a
+            pretend-model trial, which shouldn't start a multi-GB install.
+        local_laya: the installer/server. Tests pass a fake.
     """
     env = os.environ if env is None else env
     factory = client_factory or _default_factory(env)
-    flow = _JevOnboarding(ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
-                          remember_no=remember_no)
+    flow = _JevOnboarding(
+        ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
+        remember_no=remember_no, specs=specs, offer_local=offer_local, local_laya=local_laya,
+    )
     try:
         return flow.run()
     except WindowClosed:
@@ -229,7 +244,8 @@ class _JevOnboarding:
 
     def __init__(self, ui: UI, settings: Settings, env: Mapping[str, str], factory: ClientFactory,
                  local_model_elsewhere: Optional[str] = None, *, ask_again: bool = False,
-                 remember_no: bool = True) -> None:
+                 remember_no: bool = True, specs: Optional[SystemSpecs] = None,
+                 offer_local: bool = False, local_laya: Optional[LocalLaya] = None) -> None:
         self.ui = ui
         self.ask_again = ask_again
         self.remember_no = remember_no
@@ -237,6 +253,9 @@ class _JevOnboarding:
         self.settings = settings
         self.env = env
         self.factory = factory
+        self.specs = specs
+        self.offer_local = offer_local
+        self.local_laya = local_laya if local_laya is not None else LocalLaya()
         self.option = self._remembered_option() or JEV_OPTION
         # "nothing leaves this computer" is only true when the local model runs here:
         # an Ollama on another machine (OLLAMA_HOST) gets the plans too.
@@ -262,20 +281,27 @@ class _JevOnboarding:
             self.option, key, source = known[0]
             return self._after_existing_offer(key, source)
         if len(known) > 1:
-            picked = self._ask_model(short=self.settings.jev_enabled is False and not self._remembered_option())
+            return self._ask_and_dispatch(short=self.settings.jev_enabled is False and not self._remembered_option(),
+                                          known=known)
+
+        return self._ask_and_dispatch(short=self.settings.jev_enabled is False, known=known)
+
+    def _ask_and_dispatch(self, *, short: bool, known: list[tuple[SystemOneOption, str, str]]) -> Optional[JevClient]:
+        while True:
+            picked = self._ask_model(short=short)
             if picked is None:
                 return self._go_local()
-            self.option = picked
+            if picked.id == "laya-local":
+                started = self._start_local_laya()
+                if started is _AGAIN:
+                    continue
+                return started
             match = next((item for item in known if item[0].id == picked.id), None)
             if match is not None:
+                self.option = picked
                 return self._after_existing_offer(match[1], match[2])
+            self.option = picked
             return self._key_menu()
-
-        picked = self._ask_model(short=self.settings.jev_enabled is False)
-        if picked is None:
-            return self._go_local()
-        self.option = picked
-        return self._key_menu()
 
     def _after_existing_offer(self, key: str, source: str) -> Optional[JevClient]:
         choice = self._offer_existing_key(source, key)
@@ -284,6 +310,11 @@ class _JevOnboarding:
             return self._continue_from(result)
         if choice == "no":
             return self._go_local()
+        if choice == "laya-local":
+            started = self._start_local_laya()
+            if started is _AGAIN:
+                return self._ask_and_dispatch(short=False, known=self._known_credentials())
+            return started
         return self._key_menu()
 
     def _remembered_option(self) -> Optional[SystemOneOption]:
@@ -367,6 +398,8 @@ class _JevOnboarding:
             ("no", f"No thanks, play with the local model only ({self._local_note})"),
             ("learn", "What's a System One model? Tell me more first"),
         ]
+        if self._local_fit().ok:
+            options.append(("laya-local", "Laya on this computer instead (free, stays on this machine)"))
         if source == "saved":
             options.append(("forget", "Forget the saved key and play with the local model only"))
         while True:
@@ -381,34 +414,62 @@ class _JevOnboarding:
                 self.option = other
                 self.ui.say(f"[dim]{escape(privacy_notice(self.env, other))}[/dim]")
                 return "new"
+            if choice == "laya-local":
+                return "laya-local"
             if choice != "learn":
                 return choice
             self.ui.teach("System One models", system_one_lesson())
 
     # -- step: which System One model, if any? -----------------------------------------------
 
+    def _local_fit(self) -> LocalLayaFit:
+        cached = getattr(self, "_fit_cache", None)
+        if cached is not None:
+            return cached
+        if not self.offer_local or self.specs is None:
+            fit = LocalLayaFit(False)
+        else:
+            fit = self.local_laya.fit(self.specs)
+        self._fit_cache = fit
+        return fit
+
+    def _with_local_option(self, options: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Insert the on-this-computer choice just before the way out, when it fits."""
+        if not self._local_fit().ok:
+            return options
+        local = ("laya-local", "Laya on this computer (free; install it here if it isn't yet)")
+        no_at = next((i for i, item in enumerate(options) if item[0] == "no"), None)
+        if no_at is None or no_at == 0:
+            # The short "you said no last time" menu leads with no: keep that first.
+            learn_at = next((i for i, item in enumerate(options) if item[0] == "learn"), len(options))
+            return [*options[:learn_at], local, *options[learn_at:]]
+        return [*options[:no_at], local, *options[no_at:]]
+
     def _model_options(self) -> list[tuple[str, str]]:
-        return [
+        return self._with_local_option([
             (option.id, option.summary)
             for option in SYSTEM_ONE_OPTIONS
         ] + [
             ("no", f"No thanks, play with the local model only ({self._local_note})"),
             ("learn", "Tell me more about System One models first"),
-        ]
+        ])
 
     def _ask_model(self, *, short: bool) -> Optional[SystemOneOption]:
         """The System One Model Options menu. None means play local-only."""
         ui = self.ui
+        fit = self._local_fit()
+        if self.offer_local and self.specs is not None and not fit.ok and fit.reason:
+            ui.info(escape(fit.reason) + ", so Laya on this computer isn't offered.")
         if short:
             # A returning player who asked to be asked again (--jev): one short
             # question, not the whole introduction again (it's behind "learn").
             ui.say("System One referees are off - last time you chose to play with your local model only.")
-            options = [
+            options = self._with_local_option([
                 ("no", f"No thanks, play with the local model only ({self._local_note})"),
                 ("jev", "Jev - referee my plans (needs a TypeSafe API key)"),
                 ("laya", "Laya - referee my plans (needs a Laya Studio API key)"),
                 ("learn", "What's a System One model? Tell me more first"),
-            ]
+            ])
             while True:
                 choice = ui.choose(
                     SYSTEM_ONE_PROMPT, options, default="no", aliases=_SYSTEM_ONE_ALIASES,
@@ -419,7 +480,8 @@ class _JevOnboarding:
                 if choice == "no":
                     return None
                 picked = system_one_option(choice)
-                ui.say(f"[dim]{escape(privacy_notice(self.env, picked))}[/dim]")
+                if picked.id != "laya-local":
+                    ui.say(f"[dim]{escape(privacy_notice(self.env, picked))}[/dim]")
                 return picked
         ui.say(
             "A [bold]System One[/bold] model doesn't write the story. It gives [bold]typed judgments[/bold]: "
@@ -437,6 +499,12 @@ class _JevOnboarding:
             "or Laya Studio."
         )
         ui.say(escape(system_one_privacy(self.env)))
+        if fit.ok:
+            where = {"cpu": "your processor", "mps": "the Apple graphics chip"}.get(fit.device, "this computer")
+            ui.say(
+                f"This computer can also run [bold]Laya[/bold] itself, on {where}. That's free, the weights "
+                "stay here, and your plans don't leave this machine."
+            )
         back_out = ("choose 'no' or 'back'" if getattr(ui, "in_window", False)  # (Ctrl+C copies text there)
                     else "choose 'no' or 'back', or press Ctrl+C")
         ui.say(
@@ -444,11 +512,14 @@ class _JevOnboarding:
             f"[dim](You can back out at any step: {back_out}.)[/dim]"
         )
         remembered = self._remembered_option()
+        options = self._model_options()
+        remembered_id = remembered.id if remembered is not None else ""
+        default = remembered_id if any(key == remembered_id for key, _label in options) else "no"
         while True:
             choice = ui.choose(
                 SYSTEM_ONE_PROMPT,
-                self._model_options(),
-                default=remembered.id if remembered is not None else "no",
+                options,
+                default=default,
                 aliases=_SYSTEM_ONE_ALIASES,
             )
             if choice == "learn":
@@ -457,6 +528,59 @@ class _JevOnboarding:
             if choice == "no":
                 return None
             return system_one_option(choice)
+
+    # -- step: Laya on this computer ------------------------------------------------------------
+
+    def _start_local_laya(self) -> "JevClient | None | str":
+        """Install (if needed) and start a local Laya. ``_AGAIN`` means back to the menu."""
+        ui = self.ui
+        fit = self._local_fit()
+        if not fit.ok:
+            ui.warn(escape(fit.reason or "This computer can't run Laya itself."))
+            return self._go_local()
+        where = {"cpu": "your processor", "mps": "the Apple graphics chip"}.get(fit.device, "this computer")
+        if self.local_laya.installed():
+            ui.say(f"Laya is already installed here. I'll start it on {where}.")
+            ui.say("[dim]Privacy: your plans stay on this computer. Nothing is sent to Laya Studio.[/dim]")
+            if not ui.confirm("Let that Laya referee this game?", default=True):
+                ui.info("Okay.")
+                return _AGAIN
+        else:
+            ui.say(
+                "I'll set Laya up in the game's folder: a private Python environment (a few GB, from PyPI, "
+                "the first time only) and the English checkpoint (about 0.8 GB, Apache-2.0, from Hugging Face)."
+            )
+            ui.say(f"It runs on {where}. A round takes a moment.")
+            ui.say("[dim]Privacy: your plans stay on this computer. Nothing is sent to Laya Studio.[/dim]")
+            if not ui.confirm("Install Laya on this computer and let it referee?", default=True):
+                ui.info("Okay - not installing Laya.")
+                return _AGAIN
+        while True:
+            try:
+                client = self.local_laya.start(ui, device=fit.device, threads=fit.threads)
+            except LocalLayaError as exc:
+                ui.error(escape(exc.message))
+                choice = ui.choose(
+                    "What would you like to do?",
+                    [("retry", "Try again"), ("back", self._local_only_label)],
+                    default="retry",
+                    aliases=_TO_BACK_ALIASES,
+                )
+                if choice == "retry":
+                    continue
+                return self._go_local()
+            except Exception as exc:
+                ui.error(escape(f"Couldn't start Laya ({type(exc).__name__}: {exc})."))
+                return self._go_local()
+            self.option = LAYA_LOCAL_OPTION
+            self.settings.jev_enabled = True
+            self.settings.system_one = "laya-local"
+            self._save_settings()
+            ui.say(
+                "Laya is on, running on this computer! Each round it will referee your plan with a "
+                "[bold]Noul[/bold], a [bold]Choice[/bold] and a [bold]Score[/bold]."
+            )
+            return client
 
     # -- step: get a key -----------------------------------------------------------------------
 

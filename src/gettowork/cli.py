@@ -36,6 +36,7 @@ from rich.table import Table
 
 from . import __version__, catalog, config, crashlog, launcher, onboarding, perf, runtime_install
 from .jev import JEV_API_KEY_ENV, LAYA_API_KEY_ENV
+from .laya_local import LocalLaya
 from .config import Settings, command_name
 from .setup_flow import (
     planned_engine_key,
@@ -450,6 +451,7 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
     ui = ui or UI()
     services = services or SetupServices()
     backend = None
+    local_laya: Optional[LocalLaya] = None
     restore_signals = _stop_politely_on_termination()
     try:
         if args.reset:
@@ -488,9 +490,12 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
             # A pretend-model game is a trial: a "no" to Jev there isn't remembered, so the first
             # game with a real model still offers it.
             trial = getattr(backend, "name", "") == "mock"
+            if local_laya is None:
+                local_laya = LocalLaya()
             jev = None if args.no_jev else onboarding.run_jev_onboarding(
                 ui, settings, local_model_elsewhere=_remote_ollama(backend),
-                ask_again=args.jev or getattr(result, "ask_jev", False), remember_no=not trial)
+                ask_again=args.jev or getattr(result, "ask_jev", False), remember_no=not trial,
+                specs=result.specs, offer_local=not trial, local_laya=local_laya)
             # The player's API key in every form it could appear: masked in the
             # review and transcripts, and refused if it's pasted as a plan.
             secret_values = getattr(jev, "secret_values", None)
@@ -569,6 +574,11 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
                 _offer_fresh_start(ui)
         return EXIT_ERROR
     finally:
+        if local_laya is not None:
+            try:
+                local_laya.close()  # a Laya the game started on this computer
+            except Exception:
+                pass
         if backend is not None:
             try:
                 backend.close()  # always stop the local model's engine

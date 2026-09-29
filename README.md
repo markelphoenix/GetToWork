@@ -408,6 +408,15 @@ questions with values code can use directly. They speak the same request
 |---|---|---|
 | Who runs it | [TypeSafe AI](https://typesafe.ai) | [Laya Studio](https://laya.studio) (open weights from Convai Innovations) |
 | Model sent | `jev-latest` | `english` (the English checkpoint; shorter stories than Jev) |
+
+**Laya on this computer.** If there is about 3 GB of memory free after the story
+model is loaded (1.5 GB when an NVIDIA card has 2 GB of video memory to spare),
+about 4 GB of disk, and Python 3.10 or newer, the same menu offers **Laya on
+this computer**. The game then installs Laya into its own folder (a private
+Python environment from PyPI, plus the English checkpoint from Hugging Face)
+and runs it at `127.0.0.1`. Your plans stay on this machine. It runs on the
+processor, or on the Apple graphics chip on a Mac. A pretend-model trial
+doesn't offer the install.
 | API key | `TYPESAFE_API_KEY` | `LAYA_API_KEY` |
 | Address | `https://api.typesafe.ai` | `https://api.laya.studio` |
 | Docs | https://docs.typesafe.ai/ | https://laya.studio/docs |
@@ -648,6 +657,7 @@ model runs locally and is only reachable at `127.0.0.1`.
 | Downloading the engine (copies run from source only: first time, or a new build) | GitHub (`api.github.com`, `github.com` and its download servers) | A request for the list of recent llama.cpp releases, then the download of one archive. If you set `GITHUB_TOKEN`, it's sent only to `api.github.com`. The Steam and test builds never do this: their engine is built in. |
 | Each round, **only if Jev is enabled** | TypeSafe AI (`api.typesafe.ai`) | This round's state: a trimmed "story so far", the current challenge, your plan, your progress and a short summary of recent rounds (including your earlier plans), plus the three questions and your API key (in the `Authorization` header). The key is only ever sent over https to that address: the game never follows a redirect elsewhere. |
 | Each round, **only if Laya is enabled** | Laya Studio (`api.laya.studio`) | The same kind of state, with your plan and the challenge first and the rest trimmed (Laya reads a shorter story), plus the three questions and your API key. Same rule: https only, and the game never follows a redirect. |
+| Each round, **only if Laya is running on this computer** | Nowhere | The same kind of state, sent to a Laya server the game started at `127.0.0.1`. The one-time install downloads the program from PyPI and the English checkpoint from Hugging Face. |
 | Checking your Jev key | TypeSafe AI | One `GET /v1/models` request with your key. |
 | Checking your Laya key | Laya Studio | One `GET /v1/usage` request with your key, then `GET /v1/models` (that list is public; it does not prove the key). |
 | "Open the website" in the referee help, or a link you click | Your web browser | Only when you ask; it opens typesafe.ai, laya.studio, their docs, or the link. |
@@ -873,7 +883,8 @@ src/gettowork/
   reasoning.py       separates chain-of-thought from answers
   backends/          llamaserver.py (default), ollama.py, llamacpp.py, mock.py
   jev.py             Jev API client, the game's three questions, verdicts
-  onboarding.py      the friendly "enable Jev?" flow
+  laya_local.py      install and run Laya on this computer when it fits
+  onboarding.py      the System One choice: Jev, hosted Laya, or local Laya
   prompts.py         every word the game says to the local model
   safety.py          the family-friendly filter for AI text and typed plans
   safety_terms.py    its word lists (scrambled with ROT13, so they're not on show)

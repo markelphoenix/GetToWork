@@ -153,7 +153,8 @@ src/gettowork/
     llamacpp.py      LlamaCppBackend (llama-cpp-python, optional)
     mock.py          MockBackend (scripted, offline, deterministic)
   jev.py             Jev HTTP client + game questions + verdict parsing
-  onboarding.py      Jev opt-in / API-key flow
+  laya_local.py      install and run Laya on this computer when it fits
+  onboarding.py      System One opt-in: Jev, hosted Laya, or local Laya
   prompts.py         all LLM prompt text
   safety.py          family-friendly filter (check_text / soften / check_player_input)
   safety_terms.py    its word lists, ROT13-scrambled
@@ -652,13 +653,17 @@ def run_jev_onboarding(ui: UI, settings: Settings, *, env: dict | None = None,
 - Otherwise explain System One models in a few friendly lines (typed judgments:
   Noul/Choice/Score; Jev and Laya are paid third-party services with their own
   terms/pricing; the game works fully without either). Ask **System One Model
-  Options**: `jev` / `laya` / `no` (local only) / `learn`. `yes` still means Jev.
+  Options**: `jev` / `laya` / `laya-local` (only when `laya_local.assess_specs`
+  says this computer has room, and Python 3.10+ is available) / `no` / `learn`.
+  `yes` still means Jev. `laya-local` installs `laya[serve]` into
+  `runtime/laya` and runs `laya-serve` on `127.0.0.1` (English checkpoint).
 - After a model is chosen: `paste` key (hidden input) / `help` (step-by-step:
   open that model's home URL to sign up / log in, find the API keys page,
   create a key, copy it; offer to open its docs too; then return to the paste
   prompt) / `back` (local only). The choice is saved as `settings.system_one`
-  (`"jev"` or `"laya"`) next to `jev_enabled`. Keys are `jev_api_key` and
-  `laya_api_key`, saved only if the player opts in.
+  (`"jev"`, `"laya"` or `"laya-local"`) next to `jev_enabled`. Keys are
+  `jev_api_key` and `laya_api_key`, saved only if the player opts in.
+  `laya-local` doesn't use those keys: the game starts its own server.
 - Validate format, then `check_key()` with a spinner (Jev: `list_models()`;
   Laya: `GET /v1/usage`, then the public model list). On auth error: explain,
   offer retry / help / back. On network error: offer retry / continue without

@@ -790,6 +790,8 @@ That's a common pattern, but notice its weak spots:
 request. In the game you pick one under **System One Model Options**. The
 examples below use Jev (`jev-latest`); Laya's default model id is `english`,
 and it only reads about the first 512 tokens, so the game puts the plan first.
+If the computer has room, the same menu can install those open weights and run
+them locally, so the plans never leave the machine.
 You define the *type* of answer you want, and it answers in exactly that type:
 
 - a **Noul** (yes/no) returns the **probability of yes**;

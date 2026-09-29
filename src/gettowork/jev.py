@@ -98,11 +98,30 @@ LAYA_OPTION = SystemOneOption(
     key_check="usage",
     compact_state=True,
 )
+# Same model as hosted Laya, but the game installs and runs it on this computer.
+# Not in SYSTEM_ONE_OPTIONS: it is offered only when the machine can run it.
+LAYA_LOCAL_OPTION = SystemOneOption(
+    id="laya-local",
+    name="Laya",
+    vendor="this computer",
+    summary="Laya on this computer - free, open weights, nothing leaves this machine",
+    default_base_url="http://127.0.0.1",
+    default_model="english",
+    api_key_env="LAYA_API_KEY",
+    base_url_env="LAYA_BASE_URL",
+    model_env="LAYA_DEFAULT_MODEL",
+    home_url="https://huggingface.co/convaiinnovations/laya",
+    docs_url="https://huggingface.co/convaiinnovations/laya",
+    key_check="usage",
+    compact_state=True,
+)
 SYSTEM_ONE_OPTIONS: tuple[SystemOneOption, ...] = (JEV_OPTION, LAYA_OPTION)
 
 
 def system_one_option(option_id: Optional[str]) -> SystemOneOption:
     """The option with this id, or Jev when the id is missing or unknown."""
+    if option_id == LAYA_LOCAL_OPTION.id:
+        return LAYA_LOCAL_OPTION
     for option in SYSTEM_ONE_OPTIONS:
         if option.id == option_id:
             return option
