@@ -109,8 +109,9 @@ def _run_review(ui: UI, summary: GameSummary, export_dir: Optional[Path], secret
         ui.say("Want to see how the game really worked?")
 
     show_jev = False
+    name = _system_one_name(summary)
     if has_jev:
-        show_jev = ui.confirm("See the Jev request & response for each round?", default=False)
+        show_jev = ui.confirm(f"See the {name} request & response for each round?", default=False)
     show_reasoning = False
     if has_reasoning:
         whose = "the pretend model's scripted example" if scripted else "your local model's"
@@ -142,6 +143,12 @@ def _local_name(summary: GameSummary) -> str:
     return "the pretend model" if _is_pretend(summary) else "your local model"
 
 
+def _system_one_name(summary: GameSummary) -> str:
+    """The System One referee's name (``Jev`` unless the player chose Laya)."""
+    name = getattr(summary, "referee_name", None) or "Jev"
+    return str(name)
+
+
 def _result_line(summary: GameSummary) -> str:
     rounds = len(summary.rounds)
     played = f"{rounds} round{'' if rounds == 1 else 's'}"
@@ -161,7 +168,7 @@ def _show_recap(ui: UI, summary: GameSummary) -> None:
             str(r.number),
             plain(_clip(r.challenge, 60)),
             plain(_clip(r.player_plan, 45)),
-            "Jev" if r.judge == "jev" else ("pretend model" if _is_pretend(summary) else "local model"),
+            _system_one_name(summary) if r.judge == "jev" else ("pretend model" if _is_pretend(summary) else "local model"),
             "progress" if r.made_progress else "not yet",
         )
         for r in summary.rounds
@@ -181,13 +188,14 @@ def _show_details(ui: UI, summary: GameSummary, *, show_jev: bool, show_reasonin
         if index:
             ui.pause("Press Enter for the next round")  # interactive terminals only: one round at a time
         ui.heading(f"Round {record.number}")
-        referee = "Jev" if record.judge == "jev" else _local_name(summary)
+        name = _system_one_name(summary)
+        referee = name if record.judge == "jev" else _local_name(summary)
         verdict = "made progress" if record.made_progress else "no progress"
         ui.say(f"[bold]Challenge:[/bold] {plain(record.challenge)}")
         ui.say(f"[bold]Your plan:[/bold] {plain(record.player_plan)}")
         ui.say(f"[bold]Verdict:[/bold] {verdict}, according to {referee}. {plain(record.judge_explanation)}")
         if show_jev:
-            tip_shown = _show_jev_round(ui, record, tip_shown, shown)
+            tip_shown = _show_jev_round(ui, record, tip_shown, shown, name)
         if show_reasoning:
             _show_reasoning(ui, record.llm_calls)
         elif show_answers:
@@ -201,7 +209,8 @@ def _show_details(ui: UI, summary: GameSummary, *, show_jev: bool, show_reasonin
         _show_reasoning(ui, summary.ending_calls)
 
 
-def _show_jev_round(ui: UI, record: RoundRecord, tip_shown: bool, shown: Optional[dict] = None) -> bool:
+def _show_jev_round(ui: UI, record: RoundRecord, tip_shown: bool, shown: Optional[dict] = None,
+                    service_name: str = "Jev") -> bool:
     """Show one round's Jev exchange. Returns whether the reading tip has been shown.
 
     The three questions Jev is asked (with their long instructions) are the
@@ -211,14 +220,14 @@ def _show_jev_round(ui: UI, record: RoundRecord, tip_shown: bool, shown: Optiona
     shown = shown if shown is not None else {"questions": False}
     exchange = _round_exchange(record)
     if exchange is None:
-        ui.say("[dim]Refereed by your local model - no Jev call this round.[/dim]")
+        ui.say(f"[dim]Refereed by your local model - no {service_name} call this round.[/dim]")
         return tip_shown
     view = _exchange_to_dict(exchange, _raw_secrets_in([exchange]))
     if record.jev is None:
-        ui.warn("This Jev call failed, so your local model refereed instead. Here's what was sent and what came back:")
+        ui.warn(f"This {service_name} call failed, so your local model refereed instead. Here's what was sent and what came back:")
     method = "POST" if view["request_body"] else "GET"
     body = view["request_body"]
-    title = f"Round {record.number}: request to Jev"
+    title = f"Round {record.number}: request to {service_name}"
     if isinstance(body, dict) and isinstance(body.get("questions"), dict):
         if shown.get("questions"):
             body = {**body, "questions": "(the same three questions as in the first request above)"}
@@ -233,7 +242,7 @@ def _show_jev_round(ui: UI, record: RoundRecord, tip_shown: bool, shown: Optiona
     response = {"status": view["status"], "elapsed_s": view["elapsed_s"], "body": view["response_body"]}
     if view["error"]:
         response["error"] = view["error"]
-    ui.json(response, title=f"Round {record.number}: Jev's response")
+    ui.json(response, title=f"Round {record.number}: {service_name}'s response")
     if record.jev is not None and not tip_shown:
         ui.info(
             "Tip: answers.made_progress.noul is the single number that decided this round - "
@@ -379,6 +388,7 @@ def summary_to_dict(summary: GameSummary, *, secrets: Iterable[str] = ()) -> dic
         "intro_calls": [_call_to_dict(p, r) for p, r in summary.intro_calls],
         "rounds": [_round_to_dict(r, secrets) for r in summary.rounds],
         "ending_calls": [_call_to_dict(p, r) for p, r in summary.ending_calls],
+        "referee_name": _system_one_name(summary),
     }
     return _hide_home(_scrub(_jsonable(data), secrets))
 
@@ -395,7 +405,8 @@ def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, inclu
         out += _markdown_reasoning(summary.intro_calls)
 
     for record in summary.rounds:
-        referee = "Jev" if record.judge == "jev" else _local_name(summary)
+        name = _system_one_name(summary)
+        referee = name if record.judge == "jev" else _local_name(summary)
         verdict = "made progress" if record.made_progress else "no progress"
         out += [
             f"## Round {record.number}",
@@ -411,7 +422,7 @@ def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, inclu
             "",
         ]
         if include_jev:
-            out += _markdown_jev(record, secrets)
+            out += _markdown_jev(record, secrets, name)
         if include_reasoning:
             out += _markdown_reasoning(record.llm_calls)
 
@@ -429,10 +440,10 @@ def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, inclu
     return _scrub(safe_text("\n".join(out)), secrets)
 
 
-def _markdown_jev(record: RoundRecord, secrets: set[str]) -> list[str]:
+def _markdown_jev(record: RoundRecord, secrets: set[str], service_name: str = "Jev") -> list[str]:
     exchange = _round_exchange(record)
     if exchange is None:
-        return ["_Refereed by your local model - no Jev call this round._", ""]
+        return [f"_Refereed by your local model - no {service_name} call this round._", ""]
     view = _exchange_to_dict(exchange, secrets)
     note = "" if record.jev is not None else " (this call failed, so the local model refereed instead)"
     request = {"url": view["url"], "headers": view["request_headers"], "body": view["request_body"]}
@@ -440,11 +451,11 @@ def _markdown_jev(record: RoundRecord, secrets: set[str]) -> list[str]:
     if view["error"]:
         response["error"] = view["error"]
     return [
-        f"### Jev request{note}",
+        f"### {service_name} request{note}",
         "",
         _fenced(json.dumps(request, indent=2, ensure_ascii=False, default=str), "json"),
         "",
-        "### Jev response",
+        f"### {service_name} response",
         "",
         _fenced(json.dumps(response, indent=2, ensure_ascii=False, default=str), "json"),
         "",

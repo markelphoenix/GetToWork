@@ -59,10 +59,10 @@ that ships with the game, so the story is written on the player's machine rather
 in-game model menu only offers popular, instruction-tuned chat models, and it leaves out models that \
 are marketed as uncensored, have had their safety training removed, or are made for adult content; \
 such a model is refused even when a player names it themselves. \
-Optionally, players can connect their own account for TypeSafe AI's Jev referee service: it then \
-receives the player's plan and a short summary of the story, and returns only numbers and labels that \
-decide each round - it writes no text that appears in the story. The game creates no AI images, audio \
-or voices.
+Optionally, players can connect their own account for a System One referee, TypeSafe AI's Jev or \
+Laya Studio's Laya: it then receives the player's plan and a short summary of the story, and returns \
+only numbers and labels that decide each round - it writes no text that appears in the story. The game \
+creates no AI images, audio or voices.
 
 Guardrails for the live-generated text:
 - Every request tells the model to write farcical, family-friendly slapstick in which nobody gets hurt, \

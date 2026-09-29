@@ -48,6 +48,7 @@ def test_settings_round_trip(home):
 
 def test_repr_never_shows_the_api_key():
     assert KEY not in repr(Settings(jev_api_key=KEY)) and KEY not in str(Settings(jev_api_key=KEY))
+    assert KEY not in repr(Settings(laya_api_key=KEY)) and KEY not in str(Settings(laya_api_key=KEY))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")

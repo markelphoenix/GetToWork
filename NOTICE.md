@@ -109,7 +109,9 @@ Notes:
 |---------|----------|-------|
 | Hugging Face Hub | Searching for models and downloading model files | Hugging Face's terms of service, https://huggingface.co/terms-of-service, and each model's license |
 | GitHub | Hosting the (private) source repository and its test builds; for copies run from source, listing llama.cpp releases (`api.github.com`) and downloading the engine | GitHub's terms of service, https://docs.github.com/en/site-policy/github-terms/github-terms-of-service |
-| TypeSafe AI, Jev API (optional, paid) | Judging each round when you enable Jev | TypeSafe AI's own terms and pricing, https://typesafe.ai |
+| TypeSafe AI, Jev API (optional, paid) | Judging each round when you choose Jev | TypeSafe AI's own terms and pricing, https://typesafe.ai |
+| Laya Studio (optional, paid) | Judging each round when you choose hosted Laya. The open weights are Convai Innovations' Laya (Apache-2.0); Laya Studio hosts them. Not bundled. | Laya Studio's own terms and pricing, https://laya.studio |
+| Laya and PyTorch (optional, only if you install Laya on this computer) | A private Python environment and the English checkpoint, downloaded when you ask. Apache-2.0 (Laya weights) and PyTorch's license. Not bundled. | https://pypi.org/project/laya/ and https://huggingface.co/convaiinnovations/laya |
 | Steam (Valve) | Distributing the free game, when released there | The Steam Subscriber Agreement, https://store.steampowered.com/subscriber_agreement/ |
 
 ## Referenced, not bundled
@@ -129,7 +131,7 @@ Notes:
 ## Not affiliated
 
 Get To Work is an independent project. It is **not affiliated with, endorsed
-by or sponsored by** TypeSafe AI, Hugging Face, ggml-org / the llama.cpp
+by or sponsored by** TypeSafe AI, Laya Studio, Convai Innovations, Hugging Face, ggml-org / the llama.cpp
 project, Ollama, Valve / Steam, the Python Software Foundation, the Tcl/Tk
 or PyInstaller projects, NVIDIA, AMD, Intel, Apple, Microsoft, GitHub, or any
 model author or publisher. All product names, logos and trademarks belong to

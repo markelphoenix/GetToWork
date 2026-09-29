@@ -35,6 +35,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__, catalog, config, crashlog, launcher, onboarding, perf, runtime_install
+from .jev import JEV_API_KEY_ENV, LAYA_API_KEY_ENV
+from .laya_local import LocalLaya
 from .config import Settings, command_name
 from .setup_flow import (
     planned_engine_key,
@@ -105,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gettowork",
         description=(  # line breaks by hand: RawDescriptionHelpFormatter doesn't re-wrap text
             "Get To Work: a farcical race to the office, and a friendly hands-on tour of\n"
-            "local AI models (and, optionally, the Jev typed-judgment API).\n\n"
+            "local AI models (and, optionally, a System One referee: Jev or Laya).\n\n"
             "Just run it with no options: the game checks your computer, suggests models\n"
             "that fit, and sets everything up for you."
         ),
@@ -122,9 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     play = parser.add_argument_group("playing")
     play.add_argument("--mock", action="store_true", help="play with a built-in pretend model: offline, instant, no downloads")
-    play.add_argument("--no-jev", action="store_true", help="skip the optional Jev question and play local-only")
+    play.add_argument("--no-jev", action="store_true",
+                      help="skip the optional System One referee (Jev or Laya) and play local-only")
     play.add_argument("--jev", action="store_true",
-                      help="ask about the optional Jev referee again (after you chose the local model only)")
+                      help="ask about the optional System One referee again (Jev or Laya; after you chose local-only)")
     play.add_argument("--target", type=_target, default=5, metavar="N", help="steps needed to reach work (default: 5)")
     play.add_argument("--think", action="store_true",
                       help="let a thinking model think out loud even on a slow computer (turns take longer)")
@@ -448,6 +451,7 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
     ui = ui or UI()
     services = services or SetupServices()
     backend = None
+    local_laya: Optional[LocalLaya] = None
     restore_signals = _stop_politely_on_termination()
     try:
         if args.reset:
@@ -486,15 +490,20 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
             # A pretend-model game is a trial: a "no" to Jev there isn't remembered, so the first
             # game with a real model still offers it.
             trial = getattr(backend, "name", "") == "mock"
+            if local_laya is None:
+                local_laya = LocalLaya()
             jev = None if args.no_jev else onboarding.run_jev_onboarding(
                 ui, settings, local_model_elsewhere=_remote_ollama(backend),
-                ask_again=args.jev or getattr(result, "ask_jev", False), remember_no=not trial)
+                ask_again=args.jev or getattr(result, "ask_jev", False), remember_no=not trial,
+                specs=result.specs, offer_local=not trial, local_laya=local_laya)
             # The player's API key in every form it could appear: masked in the
             # review and transcripts, and refused if it's pasted as a plan.
             secret_values = getattr(jev, "secret_values", None)
             secrets = set(secret_values()) if callable(secret_values) else set()
-            secrets |= {k.strip() for k in (settings.jev_api_key, os.environ.get(onboarding.JEV_API_KEY_ENV))
-                        if k and k.strip()}
+            secrets |= {k.strip() for k in (
+                settings.jev_api_key, settings.laya_api_key,
+                os.environ.get(JEV_API_KEY_ENV), os.environ.get(LAYA_API_KEY_ENV),
+            ) if k and k.strip()}
             # One game per loop: the model (and Jev) stay ready, so "Play again?"
             # starts a brand-new morning straight away. Each game gets its own review.
             # (A pretend model picked from the menu also offers the way on to a real one;
@@ -565,6 +574,11 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
                 _offer_fresh_start(ui)
         return EXIT_ERROR
     finally:
+        if local_laya is not None:
+            try:
+                local_laya.close()  # a Laya the game started on this computer
+            except Exception:
+                pass
         if backend is not None:
             try:
                 backend.close()  # always stop the local model's engine

@@ -201,10 +201,12 @@ def _badge_labels(sym: Symbols) -> dict[str, str]:
 WELCOME_BACK_JEV_OPTIONS = (
     ("yes", "Yes, play"),
     ("no", "Pick a different model"),
-    ("jev", "Play with Jev on this time (the optional AI referee)"),
+    # The window's button is the part before " (". "jev" still picks this: the next
+    # screen is System One Model Options (Jev or Laya).
+    ("jev", "Play with Jev or Laya this time (a System One referee)"),
 )
 _WELCOME_BACK_ALIASES = {"y": "yes", "yeah": "yes", "sure": "yes", "ok": "yes", "n": "no", "nope": "no",
-                         "different": "no", "other": "no", "referee": "jev"}
+                         "different": "no", "other": "no", "referee": "jev", "laya": "jev", "system": "jev"}
 
 
 @dataclass

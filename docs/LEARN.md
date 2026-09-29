@@ -783,10 +783,16 @@ That's a common pattern, but notice its weak spots:
   asked for `"confidence": 0.9`, that number would just be more generated
   text, not a measurement.
 
-### Way 2: ask for a typed, calibrated judgment (Jev)
+### Way 2: ask for a typed, calibrated judgment (Jev or Laya)
 
-**Jev**, from TypeSafe AI, is built for judging rather than chatting. You
-define the *type* of answer you want, and it answers in exactly that type:
+**Jev**, from TypeSafe AI, is built for judging rather than chatting. **Laya**
+(open weights, hosted by Laya Studio) answers the same `POST /v1/systemone`
+request. In the game you pick one under **System One Model Options**. The
+examples below use Jev (`jev-latest`); Laya's default model id is `english`,
+and it only reads about the first 512 tokens, so the game puts the plan first.
+If the computer has room, the same menu can install those open weights and run
+them locally, so the plans never leave the machine.
+You define the *type* of answer you want, and it answers in exactly that type:
 
 - a **Noul** (yes/no) returns the **probability of yes**;
 - a **Choice** returns one of *your* labels, plus a probability for each;

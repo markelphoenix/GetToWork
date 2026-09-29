@@ -1,24 +1,27 @@
-"""The optional "turn on Jev?" step, designed for someone who has never seen an API key.
+"""The optional System One referee step: Jev or Laya, for someone new to API keys.
 
 Principles:
 
 * **Local-only is always one step away.** Every menu has a "play with the local
-  model only" option, and Ctrl+C at any prompt here simply skips Jev.
+  model only" option, and Ctrl+C at any prompt here simply skips the referee.
+* **The player picks the model.** System One Model Options are Jev (TypeSafe AI)
+  and Laya (Laya Studio). They speak the same request; each has its own key.
 * **Hand-holding, not walls of text.** Short explanations, numbered steps, and
   the browser is opened for you.
 * **The key stays secret.** It's typed with hidden input (and if this window
   can't hide input, the player is told before pasting), only ever shown as
   ``****abcd``, and saved to disk only if the player says so (default: no).
-  A saved key the player replaces, or that Jev rejects, is forgotten.
-* **Informed consent.** Before Jev is switched on, the player is told what it
-  sends over the internet (their plan, the challenge, a story summary) and to whom.
+  A saved key the player replaces, or that the service rejects, is forgotten.
+* **Informed consent.** Before a referee is switched on, the player is told what
+  it sends over the internet (their plan, the challenge, a story summary) and to whom.
 
-Jev is a paid third-party API from TypeSafe AI with its own pricing and terms;
-Get To Work isn't affiliated with TypeSafe AI.
+Jev and Laya are paid third-party services with their own pricing and terms.
+Get To Work isn't affiliated with TypeSafe AI or Laya Studio.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 import platform
 import urllib.parse
@@ -28,29 +31,39 @@ from rich.markup import escape
 
 from .config import Settings, command_name
 from .jev import (
-    JEV_API_KEY_ENV,
-    JEV_BASE_URL_ENV,
-    JEV_DEFAULT_BASE_URL,
-    JEV_DOCS_URL,
-    JEV_HOME_URL,
-    JEV_MODEL_ENV,
-    TEACH_JEV,
+    JEV_OPTION,
+    LAYA_LOCAL_OPTION,
+    LAYA_OPTION,
+    SYSTEM_ONE_OPTIONS,
+    SystemOneOption,
     JevClient,
     JevError,
+    other_system_one,
     redact_key,
+    system_one_lesson,
+    system_one_option,
     validate_api_key_format,
 )
+from .laya_local import LocalLaya, LocalLayaError, LocalLayaFit
+from .types import SystemSpecs
 from .ui import UI, UserQuit, WindowClosed, looks_like_secret
 
-ClientFactory = Callable[[str], JevClient]
+ClientFactory = Callable[..., JevClient]
 
 LOCAL_ONLY_LABEL = "Never mind, play with the local model only (free, nothing leaves this computer)"
+SYSTEM_ONE_PROMPT = "System One Model Options"
+
+# The welcome-back button (setup_flow.WELCOME_BACK_JEV_OPTIONS). The window shows
+# the part before " (", so this sentence has to quote that shorter label.
+_WELCOME_BACK_BUTTON = "Play with Jev or Laya this time"
 
 # Typed at the hidden key prompt, these mean "take me back", not "here's my key".
 _NAVIGATION_WORDS = frozenset({"back", "b", "skip", "cancel", "no", "n", "quit", "q", "exit", "help", "h", "menu", "?"})
 
 # What the key-entry steps can ask the menu to do next.
 _PASTE, _HELP, _MENU, _LOCAL = "paste", "help", "menu", "local"
+# The player said no to installing local Laya: show the model menu again.
+_AGAIN = "again"
 
 
 def run_jev_onboarding(
@@ -62,6 +75,9 @@ def run_jev_onboarding(
     local_model_elsewhere: Optional[str] = None,
     ask_again: bool = False,
     remember_no: bool = True,
+    specs: Optional[SystemSpecs] = None,
+    offer_local: bool = False,
+    local_laya: Optional[LocalLaya] = None,
 ) -> Optional[JevClient]:
     """Ask whether to enable Jev and, if so, get a working API key.
 
@@ -87,11 +103,18 @@ def run_jev_onboarding(
         remember_no: save a "no" (``jev_enabled = False``). False for a
             pretend-model trial game: declining Jev there must not stop the
             first real game from offering it.
+        specs: this computer, after the story model is loaded. Used only to
+            decide whether Laya can be installed and run here.
+        offer_local: show that option when ``specs`` say it fits. Off for a
+            pretend-model trial, which shouldn't start a multi-GB install.
+        local_laya: the installer/server. Tests pass a fake.
     """
     env = os.environ if env is None else env
     factory = client_factory or _default_factory(env)
-    flow = _JevOnboarding(ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
-                          remember_no=remember_no)
+    flow = _JevOnboarding(
+        ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
+        remember_no=remember_no, specs=specs, offer_local=offer_local, local_laya=local_laya,
+    )
     try:
         return flow.run()
     except WindowClosed:
@@ -109,46 +132,86 @@ def run_jev_onboarding(
 
 
 def _default_factory(env: Mapping[str, str]) -> ClientFactory:
-    def make(key: str) -> JevClient:
+    def make(key: str, option: SystemOneOption = JEV_OPTION) -> JevClient:
         return JevClient(
             key,
-            base_url=(env.get(JEV_BASE_URL_ENV) or "").strip() or None,
-            model=(env.get(JEV_MODEL_ENV) or "").strip() or None,
+            option=option,
+            base_url=(env.get(option.base_url_env) or "").strip() or None,
+            model=(env.get(option.model_env) or "").strip() or None,
         )
 
     return make
+
+
+def _call_factory(factory: ClientFactory, key: str, option: SystemOneOption) -> JevClient:
+    """``factory(key, option)`` when it accepts the option, otherwise ``factory(key)``."""
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return factory(key)
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters.values()):
+        return factory(key, option)
+    positional = [
+        p for p in parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) >= 2:
+        return factory(key, option)
+    return factory(key)
 
 
 def clean_pasted_key(text: str) -> str:
     """Tidy common copy-paste accidents around a key.
 
     Strips surrounding whitespace and quotes, and a leading ``Bearer `` or
-    ``TYPESAFE_API_KEY=`` in case a whole line was copied from docs or a shell.
+    ``TYPESAFE_API_KEY=`` / ``LAYA_API_KEY=`` in case a whole line was copied
+    from docs or a shell.
     """
     key = (text or "").strip()
-    for prefix in (f"export {JEV_API_KEY_ENV}=", f"{JEV_API_KEY_ENV}=", "Bearer ", "bearer "):
+    prefixes = ["Bearer ", "bearer "]
+    for option in SYSTEM_ONE_OPTIONS:
+        prefixes.extend((f"export {option.api_key_env}=", f"{option.api_key_env}="))
+    for prefix in prefixes:
         if key.startswith(prefix):
             key = key[len(prefix):].strip()
+            break
     if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
         key = key[1:-1].strip()
     return key
 
 
-def privacy_notice(env: Mapping[str, str]) -> str:
-    """What Jev sends over the internet, and to whom - shown before the player turns it on.
-
-    Never raises: a mistyped ``TYPESAFE_BASE_URL`` (say, ``http://[::1``,
-    which the URL parser rejects) is shown as it is, flagged as odd.
-    """
-    raw = (env.get(JEV_BASE_URL_ENV) or "").strip() or JEV_DEFAULT_BASE_URL
+def _host_for(env: Mapping[str, str], option: SystemOneOption) -> str:
+    """The host a referee's requests go to, even when the address is mistyped."""
+    raw = (env.get(option.base_url_env) or "").strip() or option.default_base_url
     try:
-        host = urllib.parse.urlsplit(raw if "://" in raw else "https://" + raw).hostname or raw
+        return urllib.parse.urlsplit(raw if "://" in raw else "https://" + raw).hostname or raw
     except ValueError:
-        host = f"{raw} - an address that doesn't look valid; check {JEV_BASE_URL_ENV}"
+        return f"{raw} - an address that doesn't look valid; check {option.base_url_env}"
+
+
+def privacy_notice(env: Mapping[str, str], option: SystemOneOption = JEV_OPTION) -> str:
+    """What one System One referee sends, and to whom.
+
+    Never raises: a mistyped base URL (say, ``http://[::1``, which the URL
+    parser rejects) is shown as it is, flagged as odd.
+    """
+    host = _host_for(env, option)
     return (
-        f"Privacy: with Jev on, each round sends the plan you type, the current challenge, a short summary "
-        f"of the story and your progress over the internet to TypeSafe AI ({host}), under their terms and "
+        f"Privacy: with {option.name} on, each round sends the plan you type, the current challenge, a short summary "
+        f"of the story and your progress over the internet to {option.vendor} ({host}), under their terms and "
         "privacy policy. With the local model only, everything stays on this computer."
+    )
+
+
+def system_one_privacy(env: Mapping[str, str]) -> str:
+    """Both referees, before the player has picked one."""
+    return (
+        "Privacy: a System One referee sends the plan you type, the current challenge, a short summary "
+        "of the story and your progress over the internet. "
+        f"Jev goes to TypeSafe AI ({_host_for(env, JEV_OPTION)}). "
+        f"Laya goes to Laya Studio ({_host_for(env, LAYA_OPTION)}). "
+        "Each service has its own terms and privacy policy. "
+        "With the local model only, everything stays on this computer."
     )
 
 
@@ -159,6 +222,9 @@ _BACK_OUT_ALIASES = {w: "no" for w in ("back", "b", "skip", "cancel", "quit", "e
 # open the tips in the game and the lessons at the model menu.
 _HELP_ALIASES = {w: "learn" for w in ("help", "h", "?", "info", "what", "explain", "more", "tell me more")}
 _ENABLE_ALIASES = {**_BACK_OUT_ALIASES, **_HELP_ALIASES}
+# "yes" used to mean "turn Jev on". It still picks Jev, so old answers keep working.
+_YES_TO_JEV = {w: "jev" for w in ("y", "yes", "yeah", "yep", "sure")}
+_SYSTEM_ONE_ALIASES = {**_ENABLE_ALIASES, **_YES_TO_JEV}
 # "Use it?" is asked as a yes/no question: a yes means "use" (a no already means "no").
 _USE_IT_ALIASES = {**_ENABLE_ALIASES, **{w: "use" for w in ("y", "yes", "yeah", "yep", "sure", "ok", "okay")}}
 # ...and at menus whose way out is called 'back'.
@@ -178,7 +244,8 @@ class _JevOnboarding:
 
     def __init__(self, ui: UI, settings: Settings, env: Mapping[str, str], factory: ClientFactory,
                  local_model_elsewhere: Optional[str] = None, *, ask_again: bool = False,
-                 remember_no: bool = True) -> None:
+                 remember_no: bool = True, specs: Optional[SystemSpecs] = None,
+                 offer_local: bool = False, local_laya: Optional[LocalLaya] = None) -> None:
         self.ui = ui
         self.ask_again = ask_again
         self.remember_no = remember_no
@@ -186,6 +253,10 @@ class _JevOnboarding:
         self.settings = settings
         self.env = env
         self.factory = factory
+        self.specs = specs
+        self.offer_local = offer_local
+        self.local_laya = local_laya if local_laya is not None else LocalLaya()
+        self.option = self._remembered_option() or JEV_OPTION
         # "nothing leaves this computer" is only true when the local model runs here:
         # an Ollama on another machine (OLLAMA_HOST) gets the plans too.
         if local_model_elsewhere:
@@ -202,24 +273,54 @@ class _JevOnboarding:
             # A returning player who chose the local referee: straight into the game, with
             # one line on how to change their mind (asked again only with --jev).
             self.ui.info("Jev (the optional, paid AI referee) is off - you chose your local model last time. "
-                         + self._how_to_turn_jev_on())
+                         "Laya stays off too. " + self._how_to_turn_jev_on())
             return None
-        self.ui.heading("Optional extra: Jev, the AI referee")
-        existing = self._existing_key()
-        if existing:
-            key, source = existing
-            choice = self._offer_existing_key(source, key)
-            if choice == "use":
-                result = self._try_key(key, source)
-                return self._continue_from(result)
-            if choice == "no":
+        self.ui.heading("Optional extra: a System One referee")
+        known = self._known_credentials()
+        if len(known) == 1:
+            self.option, key, source = known[0]
+            return self._after_existing_offer(key, source)
+        if len(known) > 1:
+            return self._ask_and_dispatch(short=self.settings.jev_enabled is False and not self._remembered_option(),
+                                          known=known)
+
+        return self._ask_and_dispatch(short=self.settings.jev_enabled is False, known=known)
+
+    def _ask_and_dispatch(self, *, short: bool, known: list[tuple[SystemOneOption, str, str]]) -> Optional[JevClient]:
+        while True:
+            picked = self._ask_model(short=short)
+            if picked is None:
                 return self._go_local()
-            # "new": fall through to the normal key menu
+            if picked.id == "laya-local":
+                started = self._start_local_laya()
+                if started is _AGAIN:
+                    continue
+                return started
+            match = next((item for item in known if item[0].id == picked.id), None)
+            if match is not None:
+                self.option = picked
+                return self._after_existing_offer(match[1], match[2])
+            self.option = picked
             return self._key_menu()
 
-        if not self._ask_enable():
+    def _after_existing_offer(self, key: str, source: str) -> Optional[JevClient]:
+        choice = self._offer_existing_key(source, key)
+        if choice == "use":
+            result = self._try_key(key, source)
+            return self._continue_from(result)
+        if choice == "no":
             return self._go_local()
+        if choice == "laya-local":
+            started = self._start_local_laya()
+            if started is _AGAIN:
+                return self._ask_and_dispatch(short=False, known=self._known_credentials())
+            return started
         return self._key_menu()
+
+    def _remembered_option(self) -> Optional[SystemOneOption]:
+        if self.settings.jev_enabled is not True:
+            return None
+        return system_one_option(self.settings.system_one)
 
     def _continue_from(self, result: "JevClient | str") -> Optional[JevClient]:
         """After a key check: a client means done; anything else is a next step."""
@@ -232,48 +333,73 @@ class _JevOnboarding:
     # -- step: an API key we already know about -------------------------------------------
 
     def _key_in_env(self) -> bool:
-        """A key in TYPESAFE_API_KEY: set on purpose for this run, so it's always offered."""
-        return bool((self.env.get(JEV_API_KEY_ENV) or "").strip())
+        """A key set on purpose for this run (Jev or Laya), so it's always offered."""
+        return any((self.env.get(option.api_key_env) or "").strip() for option in SYSTEM_ONE_OPTIONS)
 
     def _how_to_turn_jev_on(self) -> str:
         if getattr(self.ui, "in_window", False):
-            return ("To turn it on, choose 'Play with Jev on this time' when the game welcomes you back - or start "
+            return (f"To turn one on, choose '{_WELCOME_BACK_BUTTON}' when the game welcomes you back - or start "
                     "it once with --jev (on Steam: right-click Get To Work > Properties > General > Launch Options).")
-        return (f"To turn it on, choose jev ('Play with Jev on this time') when the game welcomes you back, or start "
+        return (f"To turn one on, choose jev ('{_WELCOME_BACK_BUTTON}') when the game welcomes you back, or start "
                 f"the game with [bold]{command_name()} --jev[/bold].")
 
-    def _existing_key(self) -> Optional[tuple[str, str]]:
-        env_key = (self.env.get(JEV_API_KEY_ENV) or "").strip()
+    def _saved_key(self, option: SystemOneOption) -> str:
+        raw = self.settings.laya_api_key if option.id == "laya" else self.settings.jev_api_key
+        return (raw or "").strip()
+
+    def _store_key(self, key: Optional[str], option: Optional[SystemOneOption] = None) -> None:
+        option = option or self.option
+        if option.id == "laya":
+            self.settings.laya_api_key = key
+        else:
+            self.settings.jev_api_key = key
+
+    def _credential(self, option: SystemOneOption) -> Optional[tuple[str, str]]:
+        """(key, source) for one model: an env key beats a saved one. None if neither is usable."""
+        env_key = (self.env.get(option.api_key_env) or "").strip()
         if env_key:
             if validate_api_key_format(env_key) is None:
                 return env_key, "env"
             self.ui.warn(
-                f"Your {JEV_API_KEY_ENV} environment variable is set, but the value doesn't look like an "
+                f"Your {option.api_key_env} environment variable is set, but the value doesn't look like an "
                 "API key, so I'll ignore it."
             )
-        saved = (self.settings.jev_api_key or "").strip()
+        saved = self._saved_key(option)
         if saved and validate_api_key_format(saved) is None:
             return saved, "saved"
         return None
 
+    def _known_credentials(self) -> list[tuple[SystemOneOption, str, str]]:
+        found: list[tuple[SystemOneOption, str, str]] = []
+        for option in SYSTEM_ONE_OPTIONS:
+            credential = self._credential(option)
+            if credential is not None:
+                found.append((option, credential[0], credential[1]))
+        return found
+
     def _offer_existing_key(self, source: str, key: str) -> str:
+        option = self.option
+        other = other_system_one(option)
         where = (
-            f"in your {JEV_API_KEY_ENV} environment variable"
+            f"in your {option.api_key_env} environment variable"
             if source == "env"
             else "that you saved last time"
         )
         self.ui.say(
-            "Jev is TypeSafe AI's typed-judgment API. It can referee your plans with numbers instead "
+            f"{option.name} is {option.vendor}'s System One model. It can referee your plans with numbers instead "
             "of words (an optional, paid, third-party service)."
         )
-        self.ui.say(f"[dim]{escape(privacy_notice(self.env))}[/dim]")
-        self.ui.info(f"I found a Jev API key {where} (ending {escape(redact_key(key))}).")
+        self.ui.say(f"[dim]{escape(privacy_notice(self.env, option))}[/dim]")
+        self.ui.info(f"I found a {option.name} API key {where} (ending {escape(redact_key(key))}).")
         options = [
-            ("use", "Check the key and turn on Jev"),
+            ("use", f"Check the key and turn on {option.name}"),
             ("new", "Use a different key"),
+            ("switch", f"Use {other.name} instead"),
             ("no", f"No thanks, play with the local model only ({self._local_note})"),
-            ("learn", "What's Jev? Tell me more first"),
+            ("learn", "What's a System One model? Tell me more first"),
         ]
+        if self._local_fit().ok:
+            options.append(("laya-local", "Laya on this computer instead (free, stays on this machine)"))
         if source == "saved":
             options.append(("forget", "Forget the saved key and play with the local model only"))
         while True:
@@ -284,70 +410,177 @@ class _JevOnboarding:
             if choice == "forget":
                 self._forget_saved_key("Done - the saved key is gone from this computer.")
                 return "no"
+            if choice == "switch":
+                self.option = other
+                self.ui.say(f"[dim]{escape(privacy_notice(self.env, other))}[/dim]")
+                return "new"
+            if choice == "laya-local":
+                return "laya-local"
             if choice != "learn":
                 return choice
-            self.ui.teach("What is Jev?", TEACH_JEV)
+            self.ui.teach("System One models", system_one_lesson())
 
-    # -- step: do you want Jev at all? ---------------------------------------------------------
+    # -- step: which System One model, if any? -----------------------------------------------
 
-    def _ask_enable(self) -> bool:
+    def _local_fit(self) -> LocalLayaFit:
+        cached = getattr(self, "_fit_cache", None)
+        if cached is not None:
+            return cached
+        if not self.offer_local or self.specs is None:
+            fit = LocalLayaFit(False)
+        else:
+            fit = self.local_laya.fit(self.specs)
+        self._fit_cache = fit
+        return fit
+
+    def _with_local_option(self, options: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Insert the on-this-computer choice just before the way out, when it fits."""
+        if not self._local_fit().ok:
+            return options
+        local = ("laya-local", "Laya on this computer (free; install it here if it isn't yet)")
+        no_at = next((i for i, item in enumerate(options) if item[0] == "no"), None)
+        if no_at is None or no_at == 0:
+            # The short "you said no last time" menu leads with no: keep that first.
+            learn_at = next((i for i, item in enumerate(options) if item[0] == "learn"), len(options))
+            return [*options[:learn_at], local, *options[learn_at:]]
+        return [*options[:no_at], local, *options[no_at:]]
+
+    def _model_options(self) -> list[tuple[str, str]]:
+        return self._with_local_option([
+            (option.id, option.summary)
+            for option in SYSTEM_ONE_OPTIONS
+        ] + [
+            ("no", f"No thanks, play with the local model only ({self._local_note})"),
+            ("learn", "Tell me more about System One models first"),
+        ])
+
+    def _ask_model(self, *, short: bool) -> Optional[SystemOneOption]:
+        """The System One Model Options menu. None means play local-only."""
         ui = self.ui
-        if self.settings.jev_enabled is False:
+        fit = self._local_fit()
+        if self.offer_local and self.specs is not None and not fit.ok and fit.reason:
+            ui.info(escape(fit.reason) + ", so Laya on this computer isn't offered.")
+        if short:
             # A returning player who asked to be asked again (--jev): one short
             # question, not the whole introduction again (it's behind "learn").
-            ui.say("Jev (the optional, paid AI referee) is off - last time you chose to play with your local model only.")
-            choice = ui.choose(
-                "Turn Jev on this time?",
-                [
-                    ("no", f"No thanks, play with the local model only ({self._local_note})"),
-                    ("yes", "Yes, let Jev referee my plans (needs an API key)"),
-                    ("learn", "What's Jev? Tell me more first"),
-                ],
-                default="no",
-                aliases=_ENABLE_ALIASES,
-            )
-            if choice == "no":
-                return False
-            if choice == "yes":
-                ui.say(f"[dim]{escape(privacy_notice(self.env))}[/dim]")
-                return True
-            ui.teach("What is Jev?", TEACH_JEV)
+            ui.say("System One referees are off - last time you chose to play with your local model only.")
+            options = self._with_local_option([
+                ("no", f"No thanks, play with the local model only ({self._local_note})"),
+                ("jev", "Jev - referee my plans (needs a TypeSafe API key)"),
+                ("laya", "Laya - referee my plans (needs a Laya Studio API key)"),
+                ("learn", "What's a System One model? Tell me more first"),
+            ])
+            while True:
+                choice = ui.choose(
+                    SYSTEM_ONE_PROMPT, options, default="no", aliases=_SYSTEM_ONE_ALIASES,
+                )
+                if choice == "learn":
+                    ui.teach("System One models", system_one_lesson())
+                    continue
+                if choice == "no":
+                    return None
+                picked = system_one_option(choice)
+                if picked.id != "laya-local":
+                    ui.say(f"[dim]{escape(privacy_notice(self.env, picked))}[/dim]")
+                return picked
         ui.say(
-            "[bold]Jev[/bold] is an AI from TypeSafe AI that gives [bold]typed judgments[/bold]: instead "
-            "of chatting, it answers questions with numbers."
+            "A [bold]System One[/bold] model doesn't write the story. It gives [bold]typed judgments[/bold]: "
+            "instead of chatting, it answers questions with numbers."
         )
         ui.say(
-            "Turn it on and Jev referees each of your plans three ways - a [bold]Noul[/bold] (yes/no: did "
+            "Turn one on and it referees each of your plans three ways - a [bold]Noul[/bold] (yes/no: did "
             "you make progress?), a [bold]Choice[/bold] (what kind of outcome?) and a [bold]Score[/bold] "
             "(how creative, 0-4) - so you can see how each one works."
         )
         ui.say(
-            "Heads-up: Jev is a paid, third-party service with its own pricing and terms. "
-            "This game isn't affiliated with TypeSafe AI."
+            "[bold]Jev[/bold] (TypeSafe AI) reads a long story. [bold]Laya[/bold] (Laya Studio) is an "
+            "open-weight model on the same kind of API, and it reads a shorter one. Each is a paid, "
+            "third-party service with its own pricing and terms. This game isn't affiliated with TypeSafe AI "
+            "or Laya Studio."
         )
-        ui.say(escape(privacy_notice(self.env)))
+        ui.say(escape(system_one_privacy(self.env)))
+        if fit.ok:
+            where = {"cpu": "your processor", "mps": "the Apple graphics chip"}.get(fit.device, "this computer")
+            ui.say(
+                f"This computer can also run [bold]Laya[/bold] itself, on {where}. That's free, the weights "
+                "stay here, and your plans don't leave this machine."
+            )
         back_out = ("choose 'no' or 'back'" if getattr(ui, "in_window", False)  # (Ctrl+C copies text there)
                     else "choose 'no' or 'back', or press Ctrl+C")
         ui.say(
-            "The game works fully without it - your local model can referee for free. "
+            "The game works fully without either - your local model can referee for free. "
             f"[dim](You can back out at any step: {back_out}.)[/dim]"
         )
-        remembered_yes = self.settings.jev_enabled is True
+        remembered = self._remembered_option()
+        options = self._model_options()
+        remembered_id = remembered.id if remembered is not None else ""
+        default = remembered_id if any(key == remembered_id for key, _label in options) else "no"
         while True:
-            choice = self.ui.choose(
-                "Enable Jev for this game?",
-                [
-                    ("yes", "Let Jev referee my plans (needs an API key)"),
-                    ("no", f"No thanks, play with the local model only ({self._local_note})"),
-                    ("learn", "Tell me more about Jev first"),
-                ],
-                default="yes" if remembered_yes else "no",
-                aliases=_ENABLE_ALIASES,
+            choice = ui.choose(
+                SYSTEM_ONE_PROMPT,
+                options,
+                default=default,
+                aliases=_SYSTEM_ONE_ALIASES,
             )
             if choice == "learn":
-                ui.teach("What is Jev?", TEACH_JEV)
+                ui.teach("System One models", system_one_lesson())
                 continue
-            return choice == "yes"
+            if choice == "no":
+                return None
+            return system_one_option(choice)
+
+    # -- step: Laya on this computer ------------------------------------------------------------
+
+    def _start_local_laya(self) -> "JevClient | None | str":
+        """Install (if needed) and start a local Laya. ``_AGAIN`` means back to the menu."""
+        ui = self.ui
+        fit = self._local_fit()
+        if not fit.ok:
+            ui.warn(escape(fit.reason or "This computer can't run Laya itself."))
+            return self._go_local()
+        where = {"cpu": "your processor", "mps": "the Apple graphics chip"}.get(fit.device, "this computer")
+        if self.local_laya.installed():
+            ui.say(f"Laya is already installed here. I'll start it on {where}.")
+            ui.say("[dim]Privacy: your plans stay on this computer. Nothing is sent to Laya Studio.[/dim]")
+            if not ui.confirm("Let that Laya referee this game?", default=True):
+                ui.info("Okay.")
+                return _AGAIN
+        else:
+            ui.say(
+                "I'll set Laya up in the game's folder: a private Python environment (a few GB, from PyPI, "
+                "the first time only) and the English checkpoint (about 0.8 GB, Apache-2.0, from Hugging Face)."
+            )
+            ui.say(f"It runs on {where}. A round takes a moment.")
+            ui.say("[dim]Privacy: your plans stay on this computer. Nothing is sent to Laya Studio.[/dim]")
+            if not ui.confirm("Install Laya on this computer and let it referee?", default=True):
+                ui.info("Okay - not installing Laya.")
+                return _AGAIN
+        while True:
+            try:
+                client = self.local_laya.start(ui, device=fit.device, threads=fit.threads)
+            except LocalLayaError as exc:
+                ui.error(escape(exc.message))
+                choice = ui.choose(
+                    "What would you like to do?",
+                    [("retry", "Try again"), ("back", self._local_only_label)],
+                    default="retry",
+                    aliases=_TO_BACK_ALIASES,
+                )
+                if choice == "retry":
+                    continue
+                return self._go_local()
+            except Exception as exc:
+                ui.error(escape(f"Couldn't start Laya ({type(exc).__name__}: {exc})."))
+                return self._go_local()
+            self.option = LAYA_LOCAL_OPTION
+            self.settings.jev_enabled = True
+            self.settings.system_one = "laya-local"
+            self._save_settings()
+            ui.say(
+                "Laya is on, running on this computer! Each round it will referee your plan with a "
+                "[bold]Noul[/bold], a [bold]Choice[/bold] and a [bold]Score[/bold]."
+            )
+            return client
 
     # -- step: get a key -----------------------------------------------------------------------
 
@@ -360,7 +593,7 @@ class _JevOnboarding:
         while True:
             if step is None:
                 step = self._menu_or_key(self.ui.choose(
-                    "How would you like to add your Jev API key?",
+                    f"How would you like to add your {self.option.name} API key?",
                     [
                         ("paste", "I have a key, let me paste it"),
                         ("help", "I don't have one yet, walk me through getting one"),
@@ -402,7 +635,7 @@ class _JevOnboarding:
                     "(Tip: some terminals paste with right-click or Ctrl+Shift+V.)[/dim]"
                 )
             ui.say("[dim](Press Enter with nothing typed to go back.)[/dim]")
-            raw = ui.secret("Paste your Jev API key and press Enter")
+            raw = ui.secret(f"Paste your {self.option.name} API key and press Enter")
         else:
             # getpass would quietly *show* the key here (an IDE console, piped input...): say so first.
             ui.warn(
@@ -410,7 +643,7 @@ class _JevOnboarding:
                 "screen shares or recordings)."
             )
             ui.say(
-                f"[dim]Safer: set the {JEV_API_KEY_ENV} environment variable and restart the game - "
+                f"[dim]Safer: set the {self.option.api_key_env} environment variable and restart the game - "
                 "it's picked up automatically.[/dim]"
             )
             choice = ui.choose(
@@ -421,7 +654,7 @@ class _JevOnboarding:
             )
             if choice != "paste":
                 return None
-            raw = ui.ask("Paste your Jev API key and press Enter (leave it empty to go back)")
+            raw = ui.ask(f"Paste your {self.option.name} API key and press Enter (leave it empty to go back)")
         return self._key_from(raw)
 
     def _menu_or_key(self, answer: str) -> str:
@@ -459,25 +692,27 @@ class _JevOnboarding:
     def _show_help(self) -> str:
         """Step-by-step directions for getting a key; returns the next step."""
         ui = self.ui
-        ui.heading("Getting a Jev API key - step by step")
-        ui.say(f"  [bold]1.[/bold] Open the TypeSafe AI website: {JEV_HOME_URL}  (choose 'open' below and I'll do it for you)")
+        option = self.option
+        host = urllib.parse.urlsplit(option.home_url).hostname or option.home_url
+        ui.heading(f"Getting a {option.name} API key - step by step")
+        ui.say(f"  [bold]1.[/bold] Open the {option.vendor} website: {option.home_url}  (choose 'open' below and I'll do it for you)")
         ui.say("  [bold]2.[/bold] Sign up for an account, or log in if you already have one.")
         ui.say("  [bold]3.[/bold] In your dashboard, open the API keys section and create a new key.")
         ui.say("  [bold]4.[/bold] Copy the key. Keep it private, like a password - many sites only show it once.")
         ui.say("  [bold]5.[/bold] Come back to this window and choose 'paste'.")
-        ui.say(f"Want to read more first? Jev's documentation is at {JEV_DOCS_URL}")
+        ui.say(f"Want to read more first? {option.name}'s documentation is at {option.docs_url}")
         ui.say(
-            "[dim]Remember: Jev is a paid service with its own pricing and terms - check them on the site "
+            f"[dim]Remember: {option.name} is a paid service with its own pricing and terms - check them on the site "
             "before signing up. You never have to: 'back' plays the game free with your local model.[/dim]"
         )
-        ui.say(f"[dim]{escape(privacy_notice(self.env))}[/dim]")
+        ui.say(f"[dim]{escape(privacy_notice(self.env, option))}[/dim]")
         opened = False
         while True:
             choice = self._menu_or_key(ui.choose(
                 "What next?",
                 [
-                    ("open", "Open typesafe.ai in my browser"),
-                    ("docs", "Open the Jev documentation in my browser"),
+                    ("open", f"Open {host} in my browser"),
+                    ("docs", f"Open the {option.name} documentation in my browser"),
                     ("paste", "I've got my key, paste it now"),
                     ("back", self._local_only_label),
                 ],
@@ -486,11 +721,11 @@ class _JevOnboarding:
                 accept=_pasted_key_shape,
             ))
             if choice == "open":
-                ui.open_url(JEV_HOME_URL)
+                ui.open_url(option.home_url)
                 ui.info("Take your time. When you've copied your key, come back and choose 'paste'.")
                 opened = True
             elif choice == "docs":
-                ui.open_url(JEV_DOCS_URL)
+                ui.open_url(option.docs_url)
                 opened = True
             elif choice == "paste":
                 return _PASTE
@@ -507,7 +742,7 @@ class _JevOnboarding:
         """
         ui = self.ui
         try:
-            client = self.factory(key)
+            client = _call_factory(self.factory, key, self.option)
         except JevError as exc:
             ui.warn(escape(exc.message))
             return _MENU
@@ -517,8 +752,8 @@ class _JevOnboarding:
         while True:
             try:
                 try:
-                    with ui.status("Checking your key with Jev..."):
-                        models = client.list_models()
+                    with ui.status(f"Checking your key with {self.option.name}..."):
+                        models = client.check_key() if hasattr(client, "check_key") else client.list_models()
                 except (JevError, KeyboardInterrupt):
                     raise
                 except Exception as exc:  # treat anything unexpected like network trouble: retry or back out
@@ -583,8 +818,8 @@ class _JevOnboarding:
                     return client
                 return _LOCAL
             else:
-                names = [str(m.get("name")) for m in models if m.get("name")]
-                ui.success("Your key works - Jev is ready!")
+                names = [str(m.get("name")) for m in models if isinstance(m, dict) and m.get("name")]
+                ui.success(f"Your key works - {self.option.name} is ready!")
                 if names:
                     ui.info(escape(f"Models available to your key: {', '.join(names[:5])}"))
                 self._enable(client, key, source, verified=True)
@@ -594,17 +829,18 @@ class _JevOnboarding:
 
     def _enable(self, client: JevClient, key: str, source: str, *, verified: bool) -> None:
         self.settings.jev_enabled = True
+        self.settings.system_one = self.option.id
         if source == "env":
-            self.ui.info(f"Using the key from your {JEV_API_KEY_ENV} environment variable (nothing saved to disk).")
+            self.ui.info(f"Using the key from your {self.option.api_key_env} environment variable (nothing saved to disk).")
         elif source == "pasted" and verified:
             self._offer_to_save(key)
-        elif source == "pasted" and self.settings.jev_api_key and self.settings.jev_api_key != key:
+        elif source == "pasted" and self._saved_key(self.option) and self._saved_key(self.option) != key:
             # A new, unchecked key replaces the saved one for this game: don't keep the old one on disk.
             self._forget_saved_key("The key saved last time has been removed - you're using a new one now.",
                                    save=False)
         self._save_settings()
         self.ui.say(
-            "Jev is on! Each round it will referee your plan with a [bold]Noul[/bold], a "
+            f"{self.option.name} is on! Each round it will referee your plan with a [bold]Noul[/bold], a "
             "[bold]Choice[/bold] and a [bold]Score[/bold]."
         )
 
@@ -618,7 +854,7 @@ class _JevOnboarding:
             protection = "with file permissions set so only your user account can read it"
         ui.say(
             f"[dim]If you say yes, it is stored as plain text in {escape(str(self.settings.path))}, "
-            f"{protection}. Prefer not to? Set the {JEV_API_KEY_ENV} environment variable instead and the "
+            f"{protection}. Prefer not to? Set the {self.option.api_key_env} environment variable instead and the "
             "game will find it automatically.[/dim]"
         )
         choice = ui.choose(
@@ -630,24 +866,24 @@ class _JevOnboarding:
             default="no",
         )
         if choice == "yes":
-            self.settings.jev_api_key = key
+            self._store_key(key)
             where = escape(str(self.settings.path))
             if getattr(ui, "in_window", False):
                 ui.info(f"Saved. (It's in {where} - delete it from there any time.)")
             else:
                 ui.info(f"Saved. (Delete it any time by running [bold]{command_name()} --reset[/bold], "
                         f"or by editing {where}.)")
-        elif self.settings.jev_api_key:
-            self.settings.jev_api_key = None  # the old key was replaced: what's on disk must match what we say
+        elif self._saved_key(self.option):
+            self._store_key(None)  # the old key was replaced: what's on disk must match what we say
             ui.info("Not saved - the key only lives in memory while the game runs, and the key saved last "
                     "time has been removed from this computer.")
         else:
             ui.info("Not saved - the key only lives in memory while the game runs.")
 
     def _forget_saved_key(self, message: str, *, save: bool = True) -> None:
-        if not self.settings.jev_api_key:
+        if not self._saved_key(self.option):
             return
-        self.settings.jev_api_key = None
+        self._store_key(None)
         if save:
             self._save_settings()
         self.ui.info(message)
@@ -670,22 +906,22 @@ class _JevOnboarding:
                 escape(f"Couldn't save your settings ({exc}). No harm done - the game will just ask again next time.")
             )
             return
-        if self.settings.jev_api_key and getattr(self.settings, "key_file_protected", None) is False:
+        if (self.settings.jev_api_key or self.settings.laya_api_key) and getattr(self.settings, "key_file_protected", None) is False:
             # Windows wouldn't give the file an owner-only access list: say so plainly.
             where = escape(str(self.settings.path))
             if not getattr(self.ui, "in_window", False):
                 self.ui.warn(
                     f"Windows wouldn't let me restrict who can read {where}, so other accounts on this PC may be "
                     "able to read your saved key. To be safe, run the game once with --reset and set the "
-                    f"{JEV_API_KEY_ENV} environment variable instead."
+                    f"{self.option.api_key_env} environment variable instead."
                 )
                 return
             # The window has no command line for --reset: offer the safe choice right here.
             self.ui.warn(f"Windows wouldn't let me restrict who can read {where}, so other accounts on this PC "
                          "may be able to read your saved key.")
-            if self.ui.confirm("Forget the saved key? (Jev still works for this session - you'd paste the key "
+            if self.ui.confirm(f"Forget the saved key? ({self.option.name} still works for this session - you'd paste the key "
                                "again next time.)", default=True):
-                self.settings.jev_api_key = None
+                self._store_key(None)
                 try:
                     self.settings.save()
                     self.ui.info("Done - your key isn't saved on this PC any more.")

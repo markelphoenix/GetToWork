@@ -1450,7 +1450,7 @@ def test_closing_the_window_at_the_jev_question_ends_the_game_with_no_more_model
     h = harness(app._default_game, ["--mock"])
     for _ in range(20):  # through the first-launch notice and the pretend-model setup
         prompt = h.wait_prompt("", timeout=30)
-        if "Enable Jev" in prompt.text:
+        if "System One Model Options" in prompt.text:
             break
         h.window.type_answer("")
         h.pump(lambda: h.window.prompt is None or h.window.prompt.id != prompt.id, what="the next question")
