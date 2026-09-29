@@ -227,7 +227,7 @@ def test_existing_key_declined_goes_local(home):
 def test_existing_key_learn_then_use(home):
     h = Harness(answers=["learn", "use"], responses=[MODELS_OK], env={"TYPESAFE_API_KEY": KEY})
     assert h.run() is not None
-    assert "Learn: What is Jev?" in h.output
+    assert "Learn: System One models" in h.output
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ def test_no_means_local_only_and_is_remembered(home):
 def test_learn_then_no(home):
     h = Harness(answers=["learn", "no"])
     assert h.run() is None
-    assert "Learn: What is Jev?" in h.output
+    assert "Learn: System One models" in h.output
     assert "respond with JSON" in h.output
 
 
@@ -262,7 +262,7 @@ def test_enter_defaults_to_yes_if_jev_was_enabled_before(home):
 
 
 def test_options_can_be_picked_by_number(home):
-    h = Harness(answers=["2"])  # 2 = "no"
+    h = Harness(answers=["3"])  # 3 = "no" (1 = Jev, 2 = Laya)
     assert h.run() is None
 
 
@@ -721,13 +721,13 @@ def test_the_window_says_how_to_turn_jev_back_on_without_a_command_line(home):
     ui = UI(console=Console(file=io.StringIO(), width=300), input_fn=script.input, window=True)
     assert run_jev_onboarding(ui, Settings(jev_enabled=False), env={}) is None
     out = " ".join(ui.console.file.getvalue().split())
-    assert "choose 'Play with Jev on this time' when the game welcomes you back" in out
+    assert "choose 'Play with Jev or Laya this time' when the game welcomes you back" in out
     assert "Properties > General > Launch Options" in out
     # ...which is exactly what that welcome-back button says (the window shows a label's part before " (").
     from gettowork.gui.app import button_labels
     from gettowork.setup_flow import WELCOME_BACK_JEV_OPTIONS
 
-    assert "Play with Jev on this time" in button_labels(WELCOME_BACK_JEV_OPTIONS)
+    assert "Play with Jev or Laya this time" in button_labels(WELCOME_BACK_JEV_OPTIONS)
 
 
 def _unprotected_key_file(monkeypatch):
@@ -806,7 +806,7 @@ def test_returning_local_only_players_can_still_turn_jev_on(home):
 def test_returning_local_only_players_can_ask_to_learn_first(home):
     h = _AskAgainHarness(answers=["learn", "no"], settings=Settings(jev_enabled=False))
     assert h.run() is None
-    assert "Learn: What is Jev?" in h.output and "Noul" in h.output
+    assert "Learn: System One models" in h.output and "Noul" in h.output
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +839,7 @@ def test_help_words_open_the_jev_lesson(word):
     h = Harness(answers=[word, "no"])
     assert h.run() is None
     assert "calibrated" in h.output  # the lesson (TEACH_JEV) was shown
-    assert h.script.prompts[0].startswith("[bold]Enable Jev") and len(h.script.prompts) == 2
+    assert h.script.prompts[0].startswith("[bold]System One Model Options") and len(h.script.prompts) == 2
 
 
 def test_closing_the_game_window_during_jev_setup_ends_the_game_instead_of_skipping_jev():
@@ -868,3 +868,82 @@ def test_the_window_gets_its_own_paste_hint_and_no_ctrl_c_advice(monkeypatch):
     assert "Ctrl+C" not in text
     assert "shows as dots" in text and "right-click" in text
     assert "nothing shows on screen" not in text and "Ctrl+Shift+V" not in text
+
+
+# ---------------------------------------------------------------------------
+# Laya, the other System One model
+# ---------------------------------------------------------------------------
+
+LAYA_KEY = "lsk_live_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456wxyz"
+USAGE_OK = (200, {}, json.dumps({"credits": 5}).encode())
+LAYA_MODELS = (200, {}, json.dumps({
+    "object": "list",
+    "data": [{"id": "english", "context_tokens": 512, "default": True}],
+}).encode())
+
+
+def _laya_factory(transport):
+    def factory(key, option):
+        return JevClient(key, option=option, transport=transport, max_retries=0, sleep=lambda s: None)
+
+    return factory
+
+
+def test_system_one_menu_offers_jev_and_laya(home):
+    h = Harness(answers=["3"])  # no
+    assert h.run() is None
+    labels = " ".join(label for _, label in h.ui.menus[0][1])
+    assert h.ui.menus[0][0] == "System One Model Options"
+    assert "Jev (TypeSafe AI)" in labels and "Laya (Laya Studio)" in labels
+    assert "api.typesafe.ai" in h.output and "api.laya.studio" in h.output
+
+
+def test_choosing_laya_checks_usage_then_models_and_can_save_the_key(home):
+    h = Harness(answers=["laya", "paste", "yes"], secrets=[LAYA_KEY], responses=[USAGE_OK, LAYA_MODELS])
+    client = run_jev_onboarding(h.ui, h.settings, env={}, client_factory=_laya_factory(h.transport))
+    assert client is not None and client.service_name == "Laya"
+    assert client.base_url == "https://api.laya.studio" and client.model == "english"
+    assert [call["url"] for call in h.transport.calls] == [
+        "https://api.laya.studio/v1/usage",
+        "https://api.laya.studio/v1/models",
+    ]
+    assert h.transport.calls[0]["headers"]["Authorization"] == f"Bearer {LAYA_KEY}"
+    assert "Laya is on!" in h.output and "english" in h.output
+    data = saved(home)
+    assert data["system_one"] == "laya" and data["jev_enabled"] is True
+    assert data["laya_api_key"] == LAYA_KEY and data["jev_api_key"] is None
+    if os.name == "posix":
+        assert stat.S_IMODE((home / "settings.json").stat().st_mode) == 0o600
+    h.assert_no_leak(LAYA_KEY)
+
+
+def test_a_laya_key_in_the_environment_is_offered(home):
+    h = Harness(answers=[""], responses=[USAGE_OK, LAYA_MODELS], env={"LAYA_API_KEY": LAYA_KEY})
+    client = run_jev_onboarding(h.ui, h.settings, env=h.env, client_factory=_laya_factory(h.transport))
+    assert client is not None and client.model == "english"
+    assert "LAYA_API_KEY" in h.output and saved(home)["laya_api_key"] is None
+    assert saved(home)["system_one"] == "laya"
+    h.assert_no_leak(LAYA_KEY)
+
+
+def test_a_saved_jev_key_can_switch_to_laya(home):
+    settings = Settings(jev_api_key=KEY, jev_enabled=True, system_one="jev")
+    h = Harness(answers=["switch", "paste", "no"], secrets=[LAYA_KEY], responses=[USAGE_OK, LAYA_MODELS],
+                settings=settings)
+    client = run_jev_onboarding(h.ui, h.settings, env={}, client_factory=_laya_factory(h.transport))
+    assert client is not None and client.service_name == "Laya"
+    assert "api.laya.studio" in h.output
+    data = saved(home)
+    assert data["jev_api_key"] == KEY  # the Jev key stays; this one wasn't saved
+    assert data["laya_api_key"] is None and data["system_one"] == "laya"
+    h.assert_no_leak(KEY, LAYA_KEY)
+
+
+def test_yes_still_means_jev(home):
+    h = Harness(answers=["yes", "back"])
+    assert h.run() is None
+    assert any(prompt.startswith("How would you like to add your Jev") for prompt, _ in h.ui.menus)
+
+
+def test_clean_pasted_key_strips_a_laya_assignment():
+    assert clean_pasted_key(f"export LAYA_API_KEY='{LAYA_KEY}'") == LAYA_KEY

@@ -34,7 +34,7 @@ to what was actually used, and list any AI-made art, music or store images.)
 step with it):
 
 ```text
-Get To Work uses generative AI to write story text live while you play. The text is written by an open-weight language model that runs locally on the player's own computer, through the llama.cpp engine that ships with the game, so the story is written on the player's machine rather than on a server. The in-game model menu only offers popular, instruction-tuned chat models, and it leaves out models that are marketed as uncensored, have had their safety training removed, or are made for adult content; such a model is refused even when a player names it themselves. Optionally, players can connect their own account for TypeSafe AI's Jev referee service: it then receives the player's plan and a short summary of the story, and returns only numbers and labels that decide each round - it writes no text that appears in the story. The game creates no AI images, audio or voices.
+Get To Work uses generative AI to write story text live while you play. The text is written by an open-weight language model that runs locally on the player's own computer, through the llama.cpp engine that ships with the game, so the story is written on the player's machine rather than on a server. The in-game model menu only offers popular, instruction-tuned chat models, and it leaves out models that are marketed as uncensored, have had their safety training removed, or are made for adult content; such a model is refused even when a player names it themselves. Optionally, players can connect their own account for a System One referee, TypeSafe AI's Jev or Laya Studio's Laya: it then receives the player's plan and a short summary of the story, and returns only numbers and labels that decide each round - it writes no text that appears in the story. The game creates no AI images, audio or voices.
 
 Guardrails for the live-generated text:
 - Every request tells the model to write farcical, family-friendly slapstick in which nobody gets hurt, and the player's typed plan is always quoted as an in-story action, never followed as an instruction.
@@ -47,17 +47,18 @@ Guardrails for the live-generated text:
 **Adult Only Sexual Content:** not applicable - the game has none, and the
 filter above blocks it.
 
-## Optional third-party service: Jev
+## Optional third-party service: Jev or Laya
 
-The game works fully offline with the player's local model. Jev is optional, so
-don't tick "requires a third-party account". Put this notice in "About this
-game":
+The game works fully offline with the player's local model. Jev and Laya are
+optional, so don't tick "requires a third-party account". Put this notice in
+"About this game":
 
-> **Optional:** Get To Work can use **Jev**, TypeSafe AI's typed-judgment API,
-> as an extra referee. Jev is a paid third-party service: it needs your own
-> TypeSafe AI account and API key and has its own pricing, terms and privacy
-> policy. It is off unless you turn it on, and the whole game is free to play
-> without it. Get To Work isn't affiliated with TypeSafe AI.
+> **Optional:** Get To Work can use a **System One** referee - **Jev** (TypeSafe
+> AI's typed-judgment API) or **Laya** (Laya Studio, an open-weight model on the
+> same kind of API). Each is a paid third-party service: it needs your own
+> account and API key and has its own pricing, terms and privacy policy. It is
+> off unless you turn it on, and the whole game is free to play without it.
+> Get To Work isn't affiliated with TypeSafe AI or Laya Studio.
 
 ## Privacy summary
 
@@ -70,10 +71,12 @@ game":
   engine ships inside the game, so no programs are downloaded.
 - **The story is written on the player's computer.** With the local model only,
   nothing the player types leaves the computer.
-- **Jev, only when switched on:** each round sends the typed plan, the current
-  challenge, a short summary of the story and the player's progress to TypeSafe
-  AI (api.typesafe.ai), under their terms and privacy policy. The API key is
-  stored on the computer only if the player asks the game to remember it.
+- **Jev or Laya, only when switched on:** each round sends the typed plan, the
+  current challenge, a short summary of the story and the player's progress to
+  the service they chose - TypeSafe AI (api.typesafe.ai) for Jev, or Laya Studio
+  (api.laya.studio) for Laya - under that service's terms and privacy policy.
+  The API key is stored on the computer only if the player asks the game to
+  remember it.
 - **Settings and models** are saved in the game's own folder on the player's
   computer (`%LOCALAPPDATA%\GetToWork` on Windows,
   `~/Library/Application Support/GetToWork` on macOS, `~/.config/gettowork` on

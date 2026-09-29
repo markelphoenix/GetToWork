@@ -603,6 +603,15 @@ JEV_DEFAULT_MODEL = "jev-latest"
 JEV_API_KEY_ENV = "TYPESAFE_API_KEY"
 JEV_HOME_URL = "https://typesafe.ai"
 JEV_DOCS_URL = "https://docs.typesafe.ai/"
+# Laya (Laya Studio) speaks the same POST /v1/systemone wire format.
+LAYA_DEFAULT_BASE_URL = "https://api.laya.studio"
+LAYA_DEFAULT_MODEL = "english"          # English checkpoint; LAYA_DEFAULT_MODEL overrides
+LAYA_API_KEY_ENV = "LAYA_API_KEY"       # also LAYA_BASE_URL, LAYA_DEFAULT_MODEL
+LAYA_HOME_URL = "https://laya.studio"
+LAYA_DOCS_URL = "https://laya.studio/docs"
+# SYSTEM_ONE_OPTIONS = (JEV_OPTION, LAYA_OPTION); system_one_option(id) -> option
+# JevClient(..., option=LAYA_OPTION). Key check: Jev GET /v1/models; Laya GET /v1/usage
+# (its GET /v1/models is public, body {"data":[{"id":"english", ...}]}).
 class JevError(Exception):
     status: int | None; message: str; exchange: JevExchange | None
     @property is_auth_error -> bool      # 401/403
@@ -637,16 +646,21 @@ TEACH_NOUL: str; TEACH_CHOICE: str; TEACH_SCORE: str; TEACH_JEV: str   # Markdow
 def run_jev_onboarding(ui: UI, settings: Settings, *, env: dict | None = None,
                        client_factory=None) -> JevClient | None
 ```
-- If `TYPESAFE_API_KEY` (env) or a saved key exists, offer to use it (validate).
-- Otherwise explain Jev in 3–4 friendly lines (typed judgments: Noul/Choice/
-  Score; it's a paid third-party API by TypeSafe AI with its own terms/pricing;
-  the game works fully without it). Ask: enable Jev? options:
-  `yes` / `no` (local only) / `learn` (more detail, then re-ask).
-- After yes: `paste` key (hidden input) / `help` (step-by-step: open
-  JEV_HOME_URL to sign up / log in, find the API keys page in the dashboard,
-  create a key, copy it; offer to open JEV_DOCS_URL too; then return to the
-  paste prompt) / `back` (local only).
-- Validate format, then `list_models()` with a spinner. On auth error: explain,
+- If `TYPESAFE_API_KEY` / `LAYA_API_KEY` (env) or a saved key exists, offer to
+  use it (validate). One known key is offered directly, with **Use Laya
+  instead** / **Use Jev instead** to switch. Two known keys go to the model menu.
+- Otherwise explain System One models in a few friendly lines (typed judgments:
+  Noul/Choice/Score; Jev and Laya are paid third-party services with their own
+  terms/pricing; the game works fully without either). Ask **System One Model
+  Options**: `jev` / `laya` / `no` (local only) / `learn`. `yes` still means Jev.
+- After a model is chosen: `paste` key (hidden input) / `help` (step-by-step:
+  open that model's home URL to sign up / log in, find the API keys page,
+  create a key, copy it; offer to open its docs too; then return to the paste
+  prompt) / `back` (local only). The choice is saved as `settings.system_one`
+  (`"jev"` or `"laya"`) next to `jev_enabled`. Keys are `jev_api_key` and
+  `laya_api_key`, saved only if the player opts in.
+- Validate format, then `check_key()` with a spinner (Jev: `list_models()`;
+  Laya: `GET /v1/usage`, then the public model list). On auth error: explain,
   offer retry / help / back. On network error: offer retry / continue without
   validating / back.
 - After success: ask whether to save the key to the settings file (default
@@ -734,7 +748,7 @@ Super-friendly, few decisions:
 1. Returning player with saved settings whose model file / runtime still
    exists → "Welcome back! Play with <model> again? [Y/n]" → start it
    (warm-up) and return. If Jev was turned down last time, that question has a
-   third choice, `jev` - "Play with Jev on this time (the optional AI
+   third choice, `jev` - "Play with Jev or Laya this time (a System One
    referee)" (`WELCOME_BACK_JEV_OPTIONS`; `SetupResult.ask_jev` →
    `run_jev_onboarding(ask_again=True)`): the window has no command line for
    `--jev`. A pretend-model game passes `remember_no=False`, so a "no" to Jev

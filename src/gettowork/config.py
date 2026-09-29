@@ -115,10 +115,12 @@ class Settings:
     model_path: Optional[str] = None  # local GGUF path (managed / llamacpp backends)
     server_exe: Optional[str] = None  # installed llama-server executable (managed backend)
     ollama_model: Optional[str] = None  # model tag used with ollama
-    jev_enabled: Optional[bool] = None  # remembered answer to "enable Jev?"
+    jev_enabled: Optional[bool] = None  # remembered answer to "use a System One referee?"
+    system_one: Optional[str] = None  # "jev" or "laya" when one was chosen
     # Only stored if the player explicitly opted in. Never shown by repr(), so a
     # stray debug print or traceback can't reveal it.
     jev_api_key: Optional[str] = field(default=None, repr=False)
+    laya_api_key: Optional[str] = field(default=None, repr=False)
     models_dir: Optional[str] = None  # where models are kept, when chosen with --models-dir
     extra: dict = field(default_factory=dict)
     # Set by save(): could the saved key's file be made readable by this user only?
@@ -176,7 +178,7 @@ class Settings:
             except OSError:
                 pass
             self.key_file_protected = None
-            if self.jev_api_key:
+            if self.jev_api_key or self.laya_api_key:
                 self.key_file_protected = restrict_to_owner_windows(tmp) if _on_windows() else True
             os.replace(tmp, p)  # (the file keeps its own access list when it's moved into place)
         except BaseException:
@@ -238,7 +240,9 @@ _FIELD_TYPES: dict[str, type | tuple[type, ...]] = {
     "server_exe": str,
     "ollama_model": str,
     "jev_enabled": bool,
+    "system_one": str,
     "jev_api_key": str,
+    "laya_api_key": str,
     "models_dir": str,
     "extra": dict,
 }

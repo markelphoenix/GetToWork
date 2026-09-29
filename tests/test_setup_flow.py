@@ -760,7 +760,7 @@ def test_a_player_who_turned_jev_down_can_turn_it_on_at_welcome_back(tmp_path):
     ui = make_ui(script)
     result = run_setup(ui, settings, args=parse(), services=make_services(factory))
     assert "Welcome back! Play with Qwen3 4B again?" in script.prompts[0]
-    assert "Play with Jev on this time" in output(ui)
+    assert "Play with Jev or Laya this time" in output(ui)
     assert result is not None and result.ask_jev is True and result.entry == QWEN4B
 
 

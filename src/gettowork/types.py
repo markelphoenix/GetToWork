@@ -315,3 +315,4 @@ class GameSummary:
     rounds: list[RoundRecord] = field(default_factory=list)
     intro_calls: list[tuple[str, LLMResult]] = field(default_factory=list)
     ending_calls: list[tuple[str, LLMResult]] = field(default_factory=list)
+    referee_name: str = "Jev"  # System One model that refereed, when one did ("Jev" or "Laya")

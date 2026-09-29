@@ -14,6 +14,9 @@ from gettowork import __version__, jev
 from gettowork.jev import (
     JEV_DEFAULT_BASE_URL,
     JEV_DEFAULT_MODEL,
+    LAYA_DEFAULT_BASE_URL,
+    LAYA_DEFAULT_MODEL,
+    LAYA_OPTION,
     JevClient,
     JevError,
     backoff_delay,
@@ -1004,3 +1007,70 @@ def test_a_localhost_http_jev_address_never_goes_through_an_http_proxy(monkeypat
     finally:
         proxy.shutdown()
         server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Laya: same wire format, different host, model and key check
+# ---------------------------------------------------------------------------
+
+
+def test_laya_client_defaults_and_sends_the_english_checkpoint():
+    client, transport, _ = make_client(reply(body=GOOD_ANSWERS), option=LAYA_OPTION)
+    assert client.base_url == LAYA_DEFAULT_BASE_URL == "https://api.laya.studio"
+    assert client.model == LAYA_DEFAULT_MODEL == "english"
+    assert client.service_name == "Laya" and client.compact_state is True
+    client.system_one("Café", {"q": {"type": "noul", "instructions": "Is it a greeting?"}})
+    sent = json.loads(transport.calls[0]["body"])
+    assert transport.calls[0]["url"] == "https://api.laya.studio/v1/systemone"
+    assert sent["model"] == "english"
+
+
+def test_laya_key_check_reads_usage_then_the_public_model_list():
+    client, transport, _ = make_client(
+        reply(body={"credits": 5}),
+        reply(body={"object": "list", "data": [{"id": "english", "context_tokens": 512}]}),
+        option=LAYA_OPTION,
+    )
+    models = client.check_key()
+    assert models[0]["name"] == "english" and models[0]["id"] == "english"
+    assert [call["url"].rsplit("/", 1)[-1] for call in transport.calls] == ["usage", "models"]
+
+
+def test_laya_key_check_falls_back_to_models_when_usage_is_missing():
+    client, transport, _ = make_client(
+        reply(status=404, body={"detail": "not here"}),
+        reply(body={"models": [{"name": "laya"}]}),
+        option=LAYA_OPTION,
+    )
+    assert client.check_key() == [{"name": "laya"}]
+    assert [call["url"].rsplit("/", 1)[-1] for call in transport.calls] == ["usage", "models"]
+
+
+def test_laya_rejects_a_bad_key_in_its_own_name():
+    client, _, _ = make_client(
+        reply(status=401, body={"error": {"code": "invalid_api_key", "message": "Invalid or revoked API key"}}),
+        option=LAYA_OPTION,
+    )
+    with pytest.raises(JevError) as info:
+        client.check_key()
+    assert info.value.is_auth_error
+    assert "Laya didn't accept the API key" in info.value.message
+    assert "Invalid or revoked API key" in info.value.message
+
+
+def test_laya_refuses_a_plain_http_address():
+    with pytest.raises(JevError) as info:
+        JevClient(KEY, option=LAYA_OPTION, base_url="http://laya.example")
+    assert "Laya address" in str(info.value) and "LAYA_BASE_URL" in str(info.value)
+
+
+def test_laya_round_puts_the_plan_first_and_names_laya():
+    client, transport, _ = make_client(reply(body=GOOD_ANSWERS), option=LAYA_OPTION)
+    verdict = judge_round(
+        client, intro="x" * 5000, challenge="A goose.", plan="I bow.", progress=0, target=5, history=["h" * 1000] * 6,
+    )
+    sent = json.loads(transport.calls[0]["body"])
+    assert list(sent["state"])[0] == "player_plan"
+    assert len(sent["state"]["player_plan"]) <= 500
+    assert len(sent["state"]["recent_rounds"]) == 2
+    assert explain_verdict(verdict, service_name="Laya").startswith("Laya puts the chance")

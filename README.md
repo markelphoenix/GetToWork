@@ -33,7 +33,7 @@ sets everything up for you. **All you do is pick a model.**
 - [What's bundled and what's downloaded](#whats-bundled-and-whats-downloaded)
 - [Where files are stored (and how to delete them)](#where-files-are-stored-and-how-to-delete-them)
 - [Other ways to run the model (optional)](#other-ways-to-run-the-model-optional)
-- [Jev (optional)](#jev-optional)
+- [System One referee: Jev or Laya (optional)](#system-one-referee-jev-or-laya-optional)
 - [How to play](#how-to-play)
 - [How does it know which models fit?](#how-does-it-know-which-models-fit)
 - [Command-line options](#command-line-options)
@@ -157,16 +157,17 @@ through everything:
 3. **picking a model** - press Enter for the recommended one - and one
    confirmation screen, then the **model download** from Hugging Face with a
    progress bar (skipped when you already have one);
-4. a speed test, then the optional **Jev** question (say `no` to play with
-   your local model only);
+4. a speed test, then **System One Model Options** (Jev, Laya, or `no` to play
+   with your local model only);
 5. **the game** - and "Play again?" at the end.
 
 Next time it's one question: *"Welcome back! Play with Qwen3 4B again?"* and
-you're in. (If you said no to Jev, it isn't asked again - choose **Play with
-Jev on this time** (type `jev`) at that Welcome back question to set it up
-after all. A "no" while trying the pretend model isn't remembered: your first
-game with a real model still asks. Tried the pretend model first? After its
-game, choose **Pick a real AI model** to go back to the model menu.)
+you're in. (If you said no to a System One referee, it isn't asked again -
+choose **Play with Jev or Laya this time** (type `jev`) at that Welcome back
+question to set one up after all. A "no" while trying the pretend model isn't
+remembered: your first game with a real model still asks. Tried the pretend
+model first? After its game, choose **Pick a real AI model** to go back to the
+model menu.)
 
 **The builds aren't code-signed yet**, so the first launch may need an extra
 step:
@@ -299,11 +300,11 @@ automatic, explained in plain English, and reversible.
    CPU mode), which works everywhere. On a computer where the ready-made
    engine can't run at all (a very old Linux, say), it tells you *before*
    downloading anything.
-8. **Jev (optional)**, then the game, the review, and "Play again?".
+8. **System One Model Options (optional: Jev or Laya)**, then the game, the review, and "Play again?".
 9. **Next time:** *"Welcome back! Play with Qwen3 4B again? [Y/n]"* and you're
-   straight into the game (if you chose to play without Jev last time, that
-   question has a **jev** choice to turn it on after all, and `--jev` asks
-   again too). Each "Learn" panel appears
+   straight into the game (if you chose to play without a System One referee
+   last time, that question has a **jev** choice to pick Jev or Laya after all,
+   and `--jev` asks again too). Each "Learn" panel appears
    once per session, not again after "Play again". When you quit, the engine
    is always stopped.
 
@@ -314,7 +315,7 @@ automatic, explained in plain English, and reversible.
 | The game, Python and its libraries, the window toolkit (Tcl/Tk) | built in | installed by `pip` |
 | The **llama.cpp engine** | **built in** - never downloaded while you play | downloaded from GitHub on first use (after you confirm) |
 | An **AI model** (a GGUF file, from under 1 GB to 20+ GB) | downloaded from Hugging Face on first run, after you pick one and confirm | the same |
-| **Jev** (an online referee) | optional, off unless you turn it on | the same |
+| **Jev or Laya** (an online System One referee) | optional, off unless you turn one on | the same |
 
 The license texts of everything built into the game ship with it in
 `THIRD_PARTY_LICENSES.txt` (see [NOTICE.md](NOTICE.md)).
@@ -335,7 +336,7 @@ Inside it:
 
 | Path | What it is |
 |------|------------|
-| `settings.json` | Your choices (model, backend, whether Jev is on, the window's font size) and the speed calibration measured on this computer. Your Jev key is stored here **only** if you said yes to saving it. |
+| `settings.json` | Your choices (model, backend, whether a System One referee is on, the window's font size) and the speed calibration measured on this computer. Your Jev or Laya key is stored here **only** if you said yes to saving it. |
 | `models/` | Downloaded model files, one folder per Hugging Face repo, e.g. `models/unsloth--Qwen3-4B-GGUF/`. These are the big ones (1-20+ GB). |
 | `runtime/llama.cpp/` | The llama.cpp engine a copy run from source downloaded, one folder per build, e.g. `runtime/llama.cpp/b6000-vulkan/`. When an update replaces a build, the old copy is tidied away once the new one works. (The Steam and test builds keep their engine inside the game instead.) |
 | `runtime/logs/` | The engine's log (`llama-server.log`; on Windows each game writes its own `llama-server-<number>.log`), handy when something goes wrong. |
@@ -393,62 +394,81 @@ engine once by itself (the Steam build gets newer engines with game updates,
 and says so). If nothing works, it offers to try again, pick another model,
 play with the pretend model, or stop, and anything already downloaded is kept.
 
-## Jev (optional)
+## System One referee: Jev or Laya (optional)
 
-**Jev** is a *typed-judgment* model from [TypeSafe AI](https://typesafe.ai).
-Instead of chatting, it answers questions with values code can use directly:
+**Jev** and **Laya** are *System One* models: instead of chatting, they answer
+questions with values code can use directly. They speak the same request
+(`POST /v1/systemone`):
 
 - a **Noul** (yes/no) answer is the *probability of yes*, e.g. `0.93`;
 - a **Choice** answer picks one of your labels, with a probability for each;
 - a **Score** answer rates on your scale, e.g. `2.6` out of `4`.
 
-With Jev turned on, it referees every plan with one question of each type.
+| | **Jev** | **Laya** |
+|---|---|---|
+| Who runs it | [TypeSafe AI](https://typesafe.ai) | [Laya Studio](https://laya.studio) (open weights from Convai Innovations) |
+| Model sent | `jev-latest` | `english` (the English checkpoint; shorter stories than Jev) |
+| API key | `TYPESAFE_API_KEY` | `LAYA_API_KEY` |
+| Address | `https://api.typesafe.ai` | `https://api.laya.studio` |
+| Docs | https://docs.typesafe.ai/ | https://laya.studio/docs |
+
+With one turned on, it referees every plan with one question of each type.
 The Noul decides whether you made progress. The game shows each answer and
 explains it the first time you see it.
 
-**The game never needs Jev.** Without it, your local model referees for free.
+**The game never needs either.** Without them, your local model referees for free.
 
-How to turn it on:
+How to turn one on:
 
-1. After your model is ready, the game asks *"Enable Jev for this game?"*
-   Choose `yes`, `no` (local only) or `learn` (tell me more first). The screen
-   also says what Jev receives each round (your plan, the challenge and a short
-   story summary; see [Privacy](#privacy-what-leaves-your-computer)).
+1. After your model is ready, the game asks **System One Model Options**.
+   Choose `jev`, `laya`, `no` (local only) or `learn` (tell me more first).
+   `yes` still means Jev. The screen also says what each referee receives
+   (your plan, the challenge and a short story summary; see
+   [Privacy](#privacy-what-leaves-your-computer)).
 2. Paste your API key (it stays hidden while you type - the game's window
    masks it; if a terminal can't hide it, for example an IDE's Run console,
    the game warns you first and suggests the environment variable below),
    **or** choose *"walk me through getting one"*: the game opens
-   https://typesafe.ai in your browser and lists the steps (sign up or log in,
-   open the API keys page in your dashboard, create a key, copy it). The
-   documentation is at https://docs.typesafe.ai/.
-3. The key is checked with a quick request. Saving it for next time is
+   https://typesafe.ai or https://laya.studio in your browser and lists the
+   steps (sign up or log in, open the API keys page in your dashboard, create
+   a key, copy it). Jev's documentation is at https://docs.typesafe.ai/.
+   Laya's is at https://laya.studio/docs.
+3. The key is checked with a quick request (`GET /v1/models` for Jev,
+   `GET /v1/usage` for Laya). Saving it for next time is
    **opt-in** (default: no). It would be stored in plain text in
    `settings.json` (readable only by you: file permissions on macOS and Linux, an owner-only access list on Windows). If you switch to
-   a new key without saving it, or Jev stops accepting the saved one, the old
-   key is removed from the file.
+   a new key without saving it, or the service stops accepting the saved one, the old
+   key is removed from the file. Jev and Laya keys are stored separately.
 
 You can back out to local-only at **every** step: choose `no` or `back`,
 press Enter at the key prompt, or press Ctrl+C (even while the key is being
 checked). `gettowork --no-jev` skips the question entirely. Once you've
 chosen to play with your local model only, the game doesn't ask again: choose
-**Play with Jev on this time** (type `jev`) at the *Welcome back* question,
+**Play with Jev or Laya this time** (type `jev`) at the *Welcome back* question,
 or start it with `--jev` (on Steam:
-Properties > General > Launch Options), to set Jev up later. (A "no" given
+Properties > General > Launch Options), to pick one later. (A "no" given
 while trying the pretend model isn't remembered.)
 
-Prefer not to paste the key each time? Set the `TYPESAFE_API_KEY` environment
-variable and the game will offer to use it:
+Prefer not to paste the key each time? Set the environment variable for the
+referee you want and the game will offer to use it:
 
 ```text
-export TYPESAFE_API_KEY="your-key"        # macOS / Linux
-$env:TYPESAFE_API_KEY = "your-key"        # Windows PowerShell
-set TYPESAFE_API_KEY=your-key             # Windows Command Prompt
+export TYPESAFE_API_KEY="your-jev-key"    # macOS / Linux
+export LAYA_API_KEY="your-laya-key"
+$env:TYPESAFE_API_KEY = "your-jev-key"    # Windows PowerShell
+$env:LAYA_API_KEY = "your-laya-key"
+set TYPESAFE_API_KEY=your-jev-key         # Windows Command Prompt
+set LAYA_API_KEY=your-laya-key
 ```
 
-> **Costs and terms are TypeSafe's.** Jev is a paid third-party service with
-> its own pricing and terms of service. Check them on their website before
-> signing up. Get To Work is not affiliated with TypeSafe AI, and any charges
-> for using Jev are between you and TypeSafe.
+`TYPESAFE_BASE_URL` / `LAYA_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` /
+`LAYA_DEFAULT_MODEL` override the address and model id (handy if you run Laya
+yourself). A plain `http://` address is only allowed for localhost.
+
+> **Costs and terms are the provider's.** Jev and Laya are paid third-party
+> services with their own pricing and terms of service. Check them on their
+> websites before signing up. Get To Work is not affiliated with TypeSafe AI
+> or Laya Studio, and any charges are between you and that provider.
 
 ## How to play
 
@@ -466,16 +486,16 @@ set TYPESAFE_API_KEY=your-key             # Windows Command Prompt
 - Type `help` for tips, or `quit` (also `q` or `exit`) to stop early. You
   still get the behind-the-scenes review.
 
-**Who's the referee?** With Jev on, one request per round asks the Noul,
+**Who's the referee?** With Jev or Laya on, one request per round asks the Noul,
 Choice and Score questions, and progress counts when the Noul's probability is
-at least 0.5. Without Jev, your local model is asked for a tiny JSON verdict.
+at least 0.5. Without one, your local model is asked for a tiny JSON verdict.
 If anything goes wrong mid-game (a network hiccup, an unreadable answer), the
 game falls back gracefully so you never lose a round to a glitch.
 
 **After the game** you can look behind the scenes. Each question appears only
 when there is something to show:
 
-1. See Jev's request and response for each round? (if Jev refereed)
+1. See the referee's request and response for each round? (if Jev or Laya refereed)
 2. See the local model's reasoning (chain-of-thought) for each round? (if it
    thought out loud)
 3. See the local model's verdict (its JSON answer) for each round? (when it
@@ -566,8 +586,8 @@ through **Properties > General > Launch Options**.
 | `--refresh-models` | Ignore the saved Hugging Face results and search again. |
 | `--offline` | Don't go online for the model list: use the saved results or the built-in list. Downloads then only work for files you already have. |
 | `--all-licenses` | Also show models whose licenses aren't Apache-2.0 or MIT. Each license is shown clearly; complying with it is up to you. (A model you name yourself with `custom` or `--model` can have any license too, always with a warning.) |
-| `--no-jev` | Don't ask about Jev; the local model referees. |
-| `--jev` | Ask about Jev again, after you chose to play with the local model only. |
+| `--no-jev` | Don't ask about a System One referee (Jev or Laya); the local model referees. |
+| `--jev` | Ask again, after you chose to play with the local model only. You still pick Jev or Laya. |
 | `--models-dir DIR` | Keep downloaded models in this folder from now on (a bigger drive, say); remembered. |
 | `--think` | Let a "thinking" model think out loud even on a slow computer (each turn takes longer). |
 | `--target N` | Steps needed to win (default 5). |
@@ -618,7 +638,7 @@ Steam store page uses is in [`notices.py`](src/gettowork/notices.py)
 
 ## Privacy: what leaves your computer
 
-The story and your plans stay on your computer unless you turn on Jev. The
+The story and your plans stay on your computer unless you turn on Jev or Laya. The
 model runs locally and is only reachable at `127.0.0.1`.
 
 | When | Sent to | What |
@@ -627,8 +647,10 @@ model runs locally and is only reachable at `127.0.0.1`.
 | Downloading a model | Hugging Face | Requests for the model file(s) you confirmed. |
 | Downloading the engine (copies run from source only: first time, or a new build) | GitHub (`api.github.com`, `github.com` and its download servers) | A request for the list of recent llama.cpp releases, then the download of one archive. If you set `GITHUB_TOKEN`, it's sent only to `api.github.com`. The Steam and test builds never do this: their engine is built in. |
 | Each round, **only if Jev is enabled** | TypeSafe AI (`api.typesafe.ai`) | This round's state: a trimmed "story so far", the current challenge, your plan, your progress and a short summary of recent rounds (including your earlier plans), plus the three questions and your API key (in the `Authorization` header). The key is only ever sent over https to that address: the game never follows a redirect elsewhere. |
+| Each round, **only if Laya is enabled** | Laya Studio (`api.laya.studio`) | The same kind of state, with your plan and the challenge first and the rest trimmed (Laya reads a shorter story), plus the three questions and your API key. Same rule: https only, and the game never follows a redirect. |
 | Checking your Jev key | TypeSafe AI | One `GET /v1/models` request with your key. |
-| "Open the website" in the Jev help, or a link you click | Your web browser | Only when you ask; it opens typesafe.ai, its docs, or the link. |
+| Checking your Laya key | Laya Studio | One `GET /v1/usage` request with your key, then `GET /v1/models` (that list is public; it does not prove the key). |
+| "Open the website" in the referee help, or a link you click | Your web browser | Only when you ask; it opens typesafe.ai, laya.studio, their docs, or the link. |
 | The **Keyboard** button (Steam Deck) | The Steam app on your computer | A `steam://open/keyboard` request, so Steam shows its on-screen keyboard. |
 | **Report a problem** in the game's window | Your web browser | Only when you click it: it opens the game's Steam Discussions. |
 
