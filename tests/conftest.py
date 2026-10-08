@@ -7,6 +7,60 @@ import os
 
 import pytest
 
+# This environment sets TERM=dumb, NO_COLOR, and FORCE_COLOR=0. Rich then
+# ignores an explicit width (80 columns, so assertion strings wrap) and drops
+# colour even when a test asked for it. Live updates also skip a dumb terminal,
+# so spinners never erase. Tests set COLUMNS and treat the terminal as capable.
+# A console that was given a width still uses that width.
+os.environ["COLUMNS"] = "200"
+os.environ.pop("NO_COLOR", None)
+os.environ.pop("FORCE_COLOR", None)
+
+
+def pytest_configure() -> None:
+    import rich.console as rich_console
+
+    original_property = rich_console.Console.size
+    original = original_property.fget
+
+    def size(self):
+        # Rich returns 80x25 for a dumb terminal as soon as height is unset,
+        # even when width was passed in. Honor an explicit width. When width
+        # was left unset, use COLUMNS or 200.
+        if self.is_dumb_terminal and not (self._width is not None and self._height is not None):
+            if self._width is not None:
+                width = self._width
+            else:
+                columns = os.environ.get("COLUMNS", "")
+                width = int(columns) if columns.isdigit() else 200
+            if self._height is not None:
+                height = self._height
+            else:
+                lines = os.environ.get("LINES", "")
+                height = int(lines) if lines.isdigit() else 25
+            return rich_console.ConsoleDimensions(width, height)
+        return original(self)
+
+    def not_dumb(self) -> bool:
+        return False
+
+    rich_console.Console.size = property(size, original_property.fset)
+    rich_console.Console.is_dumb_terminal = property(not_dumb)
+
+@pytest.fixture(autouse=True)
+def _no_real_gpu_probes(monkeypatch):
+    """No test may load NVML, the Windows display registry, or DXGI.
+
+    The defaults return empty. A test that needs a fake reading replaces the
+    helper itself. The real functions still refuse if something calls them.
+    """
+    import gettowork.specs as specs
+
+    monkeypatch.setattr(specs, "_nvml_device_records", lambda: [])
+    monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {})
+
+
 # The biggest file any test leaves behind today is well under 1 MB.
 MAX_TMP_PATH_BYTES = 64 * 1024**2
 

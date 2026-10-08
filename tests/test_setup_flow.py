@@ -878,7 +878,9 @@ def test_custom_repo_with_a_restrictive_license_is_flagged(tmp_path):
 NEWFAM = dataclasses.replace(QWEN4B, key="unsloth/NewFam9-4B-GGUF", hf_repo="unsloth/NewFam9-4B-GGUF",
                              display_name="NewFam9 4B", family="NewFam9", architecture="newfam9",
                              source="huggingface", downloads=900_000)
-ENGINE_ARCHS = frozenset({"llama", "qwen3", "qwen3moe", "phi3", "gpt-oss", "gemma3"})
+# qwen35 is the Qwen3.8 seed. b11485 loads it, so a built game that can run
+# the curated list must include it. newfam9 stays unknown on purpose.
+ENGINE_ARCHS = frozenset({"llama", "qwen3", "qwen3moe", "qwen35", "phi3", "gpt-oss", "gemma3"})
 
 
 def test_a_built_game_only_offers_models_its_engine_can_load(tmp_path):
@@ -1624,6 +1626,24 @@ def test_the_confirmation_screen_prices_cuda_builds_and_their_backups_honestly(t
     assert "0.6-0.8 GB" in lines[0]
     assert "NVIDIA CUDA 12 (roughly 0.6-0.8 GB" in text  # the backup is a big download too
     assert "quietly" not in text
+    assert "not run under emulation" not in text  # an x64 host never gets the Arm note
+
+
+def test_an_arm64_engine_menu_names_the_arm64_build_and_refuses_x64_emulation(tmp_path):
+    spark = dataclasses.replace(
+        make_specs(ram=32.0), os_name="Windows", arch="arm64",
+        gpus=[GPUInfo(name="NVIDIA RTX Spark", vendor="nvidia", vram_gb=22.4, driver_version="580.95",
+                      bandwidth_gbs=301.0, unified_pool=True)],
+        unified_memory=True,
+    )
+    _title, lines, _needs = _flow(tmp_path, spark)._engine_step(setup_flow._Choice(entry=QWEN4B))
+    text = " ".join(lines)
+    assert "arm64 CUDA build" in text and "not run under emulation" in text
+    old = dataclasses.replace(spark, gpus=[dataclasses.replace(spark.gpus[0], driver_version="572.16")])
+    _title, old_lines, _needs = _flow(tmp_path, old)._engine_step(setup_flow._Choice(entry=QWEN4B))
+    old_text = " ".join(old_lines)
+    assert "Vulkan arm64" in old_text and "driver 580" in old_text
+    assert "An x64 engine is not run under emulation." in old_text
 
 
 def test_built_in_graphics_are_described_the_same_way_everywhere(tmp_path):

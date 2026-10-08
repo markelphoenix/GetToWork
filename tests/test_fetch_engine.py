@@ -427,9 +427,10 @@ def test_the_committed_pin_has_a_fingerprint_for_every_archive_the_game_builds_u
     all fetch --tag pinned: each archive they use needs its SHA-256 in llama_cpp_tag.txt."""
     pin = fe.pinned_release()
     t = pin.tag
-    assert set(pin.digests) == {f"llama-{t}-bin-win-vulkan-x64.zip", f"llama-{t}-bin-win-cpu-x64.zip",
-                                f"llama-{t}-bin-ubuntu-vulkan-x64.tar.gz", f"llama-{t}-bin-ubuntu-x64.tar.gz",
-                                f"llama-{t}-bin-macos-arm64.tar.gz"}
+    game_builds = {f"llama-{t}-bin-win-vulkan-x64.zip", f"llama-{t}-bin-win-cpu-x64.zip",
+                   f"llama-{t}-bin-ubuntu-vulkan-x64.tar.gz", f"llama-{t}-bin-ubuntu-x64.tar.gz",
+                   f"llama-{t}-bin-macos-arm64.tar.gz"}
+    assert game_builds <= set(pin.digests)
     for os_name, arch, variants in (("Windows", "x64", (ri.VULKAN, ri.CPU)), ("Linux", "x64", (ri.VULKAN, ri.CPU)),
                                     ("Darwin", "arm64", (ri.METAL,))):
         for variant in variants:  # the names runtime_install really picks for each build

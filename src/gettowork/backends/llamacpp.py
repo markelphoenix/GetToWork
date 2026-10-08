@@ -227,6 +227,7 @@ class LlamaCppBackend(LLMBackend):
     def _ensure_model_file(self, ui: UI) -> Path:
         if self.model_path is not None:
             if self.model_path.is_file():
+                self._refuse_unusable_gguf(self.model_path)
                 return self.model_path
             if self.entry is None:
                 raise BackendError(f"I can't find the model file {self.model_path}.")
@@ -244,7 +245,16 @@ class LlamaCppBackend(LLMBackend):
         except Exception as exc:  # DownloadError and friends already carry a friendly message
             raise BackendError(f"The model download didn't work: {exc}") from exc
         self.model_path = Path(path)
+        self._refuse_unusable_gguf(self.model_path)
         return self.model_path
+
+    def _refuse_unusable_gguf(self, path: Path) -> None:
+        """Refuse a file that is not a GGUF before it is loaded."""
+        from .llamaserver import gguf_file_problem, gguf_refusal
+
+        problem = gguf_file_problem(path)
+        if problem:
+            raise gguf_refusal(path, problem)
 
     def _load(self, factory: Callable[..., Any], ui: Optional[UI]) -> None:
         assert self.model_path is not None

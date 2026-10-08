@@ -63,6 +63,12 @@ __all__ = [
     "recommend",
     "explain_fit",
     "speed_breakdown",
+    "SYSTEM_ONE_CATALOG",
+    "get_system_one",
+    "is_decision_model",
+    "reserve_for_loaded_model",
+    "recommend_system_one",
+    "rank_system_one",
 ]
 
 # ---------------------------------------------------------------------------
@@ -154,18 +160,83 @@ def quant_bits(tag: Optional[str]) -> Optional[float]:
     return QUANT_BITS.get(_normalise_quant(tag))
 
 
-def quant_quality(tag: Optional[str]) -> float:
-    """Rough quality retained (0-1) by a quant: 0.995 for Q8_0, 0.96 for Q4_K_M, 0.90 for Q3_K_M..."""
-    key = _normalise_quant(tag)
-    if key in _QUANT_QUALITY:
-        return _QUANT_QUALITY[key]
-    bits = QUANT_BITS.get(key)
-    if bits is None:
-        return 0.9  # unknown tag: assume a middling quant
-    for min_bits, quality in ((8, 0.995), (6.5, 0.99), (5.5, 0.98), (4.7, 0.96), (4.2, 0.95), (3.8, 0.90), (3.4, 0.86), (2.9, 0.80), (2.2, 0.70)):
+# An unrecognised label used to score 0.9, near Q3_K_M. That overrates a
+# 2-bit mix whose name we don't have a row for. Unknown labels stay at the
+# bottom of the ladder until the file size says otherwise.
+UNKNOWN_QUANT_QUALITY = 0.55
+_BIT_QUALITY = ((8.0, 0.995), (6.5, 0.99), (5.5, 0.98), (4.7, 0.96), (4.2, 0.95),
+                (3.8, 0.90), (3.4, 0.86), (2.9, 0.80), (2.2, 0.70))
+
+
+def measured_bits_per_weight(file_bytes: Optional[float], params: Optional[float]) -> Optional[float]:
+    """Bits per weight from the file itself: ``bytes × 8 ÷ parameter count``.
+
+    None when either number is missing. This is the average across every
+    tensor, including the few kept at higher precision, so it can disagree
+    with the name (a file called IQ3_S can really be 3.5 bits).
+    """
+    if file_bytes is None or params is None:
+        return None
+    try:
+        nbytes = float(file_bytes)
+        count = float(params)
+    except (TypeError, ValueError):
+        return None
+    if nbytes <= 0 or count <= 0:
+        return None
+    return nbytes * 8.0 / count
+
+
+def _measured_bits(tag: Optional[str], *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+                   file_bytes: Optional[float] = None, params: Optional[float] = None) -> Optional[float]:
+    """Measured bits when the size and the parameter count are both known."""
+    if file_bytes is not None and params is not None:
+        return measured_bits_per_weight(file_bytes, params)
+    if size_gb and params_b and size_gb > 0 and params_b > 0:
+        return measured_bits_per_weight(float(size_gb) * 1e9, float(params_b) * 1e9)
+    return None
+
+
+def _quality_from_bits(bits: float) -> float:
+    for min_bits, quality in _BIT_QUALITY:
         if bits >= min_bits:
             return quality
-    return 0.55
+    return UNKNOWN_QUANT_QUALITY
+
+
+def quant_quality(
+    tag: Optional[str], *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+    file_bytes: Optional[float] = None, params: Optional[float] = None,
+) -> float:
+    """Quality retained (0-1). Uses the file's real bits per weight when the
+    size and the parameter count are known, and the label only when they aren't.
+
+    An unknown label with no size scores ``UNKNOWN_QUANT_QUALITY``, not a
+    middling 0.9.
+
+    A known name is not scored *above* its label when the file is only a
+    little larger (tokenizer and metadata). A last-resort name, an unknown
+    name, and a file that measures worse than its name keep the measured
+    score, so a 2.35-bit mix cannot hide behind a Q4 label.
+    """
+    measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
+    key = _normalise_quant(tag)
+    if measured is None:
+        if key in _QUANT_QUALITY:
+            return _QUANT_QUALITY[key]
+        bits = QUANT_BITS.get(key)
+        if bits is None:
+            return UNKNOWN_QUANT_QUALITY
+        return _quality_from_bits(bits)
+    measured_quality = _quality_from_bits(measured)
+    if quant_bits(tag) is None:
+        return measured_quality
+    label_quality = _QUANT_QUALITY.get(key)
+    if label_quality is None:
+        label_quality = _quality_from_bits(quant_bits(tag) or 0.0)
+    if measured_quality > label_quality and _tier_from_label(tag) != "last":
+        return label_quality
+    return measured_quality
 
 
 def estimate_quant_size_gb(params_b: float, quant: Optional[str]) -> Optional[float]:
@@ -177,8 +248,24 @@ def estimate_quant_size_gb(params_b: float, quant: Optional[str]) -> Optional[fl
     return round(params_b * bits / 8 * 1.05, 2)
 
 
-def _quant_tier(tag: str) -> str:
-    """Sort quants into rungs of the ladder: high / standard / low / last / full."""
+_TIER_RANK = {"last": 0, "low": 1, "standard": 2, "high": 3, "full": 4}
+
+
+def _tier_from_bits(bits: float) -> str:
+    """Rung for a measured bits-per-weight figure."""
+    if bits > 9:
+        return "full"
+    if bits >= 5.5:
+        return "high"
+    if bits >= 4.3:
+        return "standard"
+    if bits >= 3.5:
+        return "low"
+    return "last"
+
+
+def _tier_from_label(tag: str) -> str:
+    """Rung from the quant name, used when the file size is unknown."""
     bits = quant_bits(tag) or 4.8
     if bits > 9:
         return "full"  # F16/BF16/F32: twice the size of Q8_0 for no visible gain
@@ -190,6 +277,38 @@ def _quant_tier(tag: str) -> str:
     if quality >= 0.87:
         return "low"  # ~3.7-3.9 bits: Q3_K_M, IQ3_M
     return "last"  # below ~3.7 bits: only if nothing else fits
+
+
+def _quant_tier(
+    tag: str, *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+    file_bytes: Optional[float] = None, params: Optional[float] = None,
+) -> str:
+    """Sort quants into rungs of the ladder: high / standard / low / last / full.
+
+    When the file size and the parameter count are known, the rung follows
+    those bits. A file named IQ3_S that is really about 3.5 bits per weight
+    is the low rung, not a last resort. Below 3.5 bits (a 2.35-bit mix, for
+    example) stays last resort. An unknown name uses the file, never an
+    optimistic guess.
+
+    A known name is not promoted by a slightly larger file: a Q4_K_M GGUF
+    measures above its 4.8-bit label because of the tokenizer, and treating
+    that as Q5 made an 8 GB laptop offer full Clef. A last-resort name is
+    still promoted when the bytes are really at least 3.5 bits. A file that
+    measures *worse* than its name keeps the measured rung.
+    """
+    measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
+    if measured is None:
+        return _tier_from_label(tag)
+    measured_tier = _tier_from_bits(measured)
+    if quant_bits(tag) is None:
+        return measured_tier
+    label_tier = _tier_from_label(tag)
+    if _TIER_RANK[measured_tier] > _TIER_RANK[label_tier]:
+        if label_tier == "last" and measured >= 3.5:
+            return measured_tier
+        return label_tier
+    return measured_tier
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +325,24 @@ GIB_PER_GB = 1e9 / 2**30  # 0.931
 OVERHEAD_GB = 0.6  # llama.cpp itself, scratch buffers, tokenizer...
 GPU_COMPUTE_BUFFER_GB = 0.3  # extra scratch space when running on a GPU
 GPU_VRAM_RESERVE_GB = 0.8  # leave room for your desktop, browser, etc.
+# AMD, Intel, the Windows registry, and DXGI often cannot say how much video
+# memory is already taken. A reported 0 then means "unknown", not "empty".
+# Hold about 2 GiB back instead of the 0.8 GiB measured reserve.
+UNKNOWN_VRAM_IN_USE_GB = 2.0
+# On Windows, llama.cpp b11485's own projection ran about 2.9 GB under the
+# memory a Clef launch actually used, and CUDA's "free" figure ignored apps
+# nvidia-smi could see. Keep this much extra unused on each Windows card.
+WINDOWS_VRAM_MARGIN_GB = 3.0
+# Clef Q4 on an RTX 5090: the context cache was 0 MiB and the compute buffer
+# was 1,317 MiB at physical batch 4096. It tracks ``-ub``, which the game caps,
+# so a longer context does not grow this number.
+CLEF_COMPUTE_BUFFER_GB = 1317 / 1024
+# One forward pass of Clef Q4_K_M (19.23 GB file) on an RTX 5090: about 0.6 s
+# fully on the GPU, about 1.0 s at a 75% split, about 55 s on 8 CPU cores.
+CLEF_REF_WEIGHTS_GB = 19.23
+CLEF_GPU_DECISION_S = 0.6
+CLEF_SPLIT75_DECISION_S = 1.0
+CLEF_CPU8_DECISION_S = 55.0
 OS_RAM_HEADROOM_GB = 2.5  # leave room for the operating system and other apps (macOS / Linux)
 WINDOWS_RAM_HEADROOM_GB = 3.5  # Windows typically keeps 3-4 GB busy even when idle
 DISK_SPARE_GB = 1.0  # never fill the disk to the brim
@@ -275,6 +412,7 @@ _KV_SHAPES: tuple[tuple[str, tuple[int, int, int]], ...] = (
     (r"qwen3-4b", (36, 8, 128)),
     (r"qwen3-8b", (36, 8, 128)),
     (r"qwen3-14b", (40, 8, 128)),
+    (r"qwen3\.8-27b", (64, 4, 256)),  # Qwen3.8-27B text config: 64 layers, 4 KV heads, head dim 256
     (r"qwen3-32b", (64, 8, 128)),
     (r"qwen2\.5-0\.5b", (24, 2, 64)),
     (r"qwen2\.5-1\.5b", (28, 2, 128)),
@@ -344,6 +482,9 @@ def kv_cache_gb(model: ModelEntry, context_tokens: Optional[int] = None) -> floa
     attention head (OLMo-2, StableLM...) get ``0.18 × params_b^0.6`` GB per
     1,024 tokens instead, 3-5x more.
     """
+    if is_decision_model(model):
+        # Measured 0 MiB of context cache. Do not grow a KV estimate with ``-c``.
+        return 0.0
     ctx = int(context_tokens or model.context_tokens or 4096)
     if model.native_context:
         ctx = min(ctx, int(model.native_context))
@@ -374,6 +515,49 @@ def turn_tokens_per_s(tokens_per_s: Optional[float], placement: str, *, thinking
     written = TURN_ANSWER_TOKENS + max(0, int(thinking_tokens))
     seconds = written / tokens_per_s + TURN_PROMPT_TOKENS / (tokens_per_s * speedup)
     return TURN_ANSWER_TOKENS / seconds
+
+
+def decision_seconds(
+    specs: Optional[SystemSpecs],
+    *,
+    placement: str,
+    gpu_share: float,
+    weights_gb: float,
+) -> float:
+    """Estimated seconds for one referee decision.
+
+    A scoring model does one forward pass and does not generate tokens, so a
+    chat-model "tokens/s" figure is the wrong unit. The anchors are one
+    RTX 5090 running Clef Q4_K_M. Other files scale with weight size. CPU
+    time scales from 8 cores. This is an estimate, not a measurement of the
+    computer in front of you.
+    """
+    scale = max(0.15, float(weights_gb or CLEF_REF_WEIGHTS_GB) / CLEF_REF_WEIGHTS_GB)
+    cores = 8.0
+    if specs is not None:
+        cores = float(specs.cpu_cores_physical or specs.cpu_cores_logical or 8)
+    cores = max(1.0, cores)
+    gpu_s = CLEF_GPU_DECISION_S * scale
+    split_s = CLEF_SPLIT75_DECISION_S * scale
+    cpu_s = CLEF_CPU8_DECISION_S * scale * (8.0 / cores)
+    if placement in ("gpu", "unified"):
+        return gpu_s
+    if placement != "partial":
+        return cpu_s
+    share = max(0.0, min(1.0, float(gpu_share or 0.0)))
+    if share >= SPLIT_RECOMMENDED_MIN_GPU_SHARE:
+        span = 1.0 - SPLIT_RECOMMENDED_MIN_GPU_SHARE
+        t = (share - SPLIT_RECOMMENDED_MIN_GPU_SHARE) / span
+        return split_s + (gpu_s - split_s) * t
+    t = share / SPLIT_RECOMMENDED_MIN_GPU_SHARE
+    return cpu_s + (split_s - cpu_s) * t
+
+
+def format_decision_seconds(seconds: float) -> str:
+    """``about 0.6 seconds per decision`` or ``about 55 seconds per decision``."""
+    if seconds < 10:
+        return f"about {seconds:.1f} seconds per decision"
+    return f"about {seconds:.0f} seconds per decision"
 
 
 def model_turn_tokens_per_s(model: ModelEntry, tokens_per_s: Optional[float], placement: str) -> float:
@@ -420,16 +604,109 @@ class _Plan:
     disk_ok: bool
     on_disk: bool = False  # this exact version is already downloaded
     context: Optional[int] = None  # conversation memory planned for (None = the model's usual)
+    params_b: float = 0.0  # so quality can use the file's real bits per weight
+
+
+def _vram_contributors(specs: SystemSpecs) -> list:
+    """GPUs whose memory `_dedicated_vram_gb` adds together.
+
+    The primary card, plus every other card from the same vendor with at least
+    4 GB. Apple unified memory is not summed this way (it isn't dedicated VRAM).
+    """
+    return perf.pooled_gpus(specs)
 
 
 def _dedicated_vram_gb(specs: SystemSpecs) -> float:
-    """Usable dedicated VRAM. llama.cpp splits a model across several GPUs of the
-    same kind, so we add up same-vendor cards with >= 4 GB each."""
-    main = perf.primary_gpu(specs)
-    if main is None or main.vendor == "apple":
-        return 0.0
-    same = [g.vram_gb for g in specs.gpus if g.vendor == main.vendor and g.vram_gb >= 4 and g is not main]
-    return main.vram_gb + sum(same)
+    """Dedicated VRAM before the per-card reserve. Same-vendor cards with >= 4 GB
+    are added together, because llama.cpp can split a model across them."""
+    return sum(g.vram_gb for g in _vram_contributors(specs))
+
+
+def _vram_in_use_gb(gpu) -> float:
+    """Video memory other programs already occupy on this card. 0 if unknown."""
+    return max(0.0, float(getattr(gpu, "vram_used_gb", 0.0) or 0.0))
+
+
+def _vram_used_known(gpu) -> bool:
+    """False when this card's in-use figure was never read.
+
+    Hand-built cards default to True, so a stated 0 stays "empty" and the
+    measured 0.8 GB reserve still applies. Detection sets False when the
+    probe had no used-memory reading.
+    """
+    return getattr(gpu, "vram_used_known", True) is not False
+
+
+def _card_holdback_gb(gpu, extra_gb: float = 0.0) -> float:
+    """GiB this card must keep free.
+
+    A measured card keeps the 0.8 GB reserve plus whatever is already in use.
+    An unmeasured card keeps about 2 GiB instead, so a zero that means
+    "unknown" is not treated as an empty card. ``extra_gb`` is the Windows
+    Clef margin, added on top of either figure.
+    """
+    extra = max(0.0, float(extra_gb))
+    if not _vram_used_known(gpu):
+        return UNKNOWN_VRAM_IN_USE_GB + extra
+    return GPU_VRAM_RESERVE_GB + _vram_in_use_gb(gpu) + extra
+
+
+def windows_vram_margin_gb(specs: SystemSpecs) -> float:
+    """Extra per-card margin on Windows. 0 everywhere else."""
+    if (specs.os_name or "").lower().startswith("win"):
+        return WINDOWS_VRAM_MARGIN_GB
+    return 0.0
+
+
+def _usable_vram_gb(specs: SystemSpecs, *, extra_per_card_gb: float = 0.0) -> float:
+    """Video memory a model may use.
+
+    Each measured card keeps ``GPU_VRAM_RESERVE_GB`` free and loses whatever
+    nvidia-smi, NVML, or the AMD sysfs file already shows as in use. A card
+    whose in-use figure was never read keeps ``UNKNOWN_VRAM_IN_USE_GB``
+    instead. ``extra_per_card_gb`` is the Clef projection margin on Windows
+    (see ``windows_vram_margin_gb``). Story models do not take that extra
+    cut: it was measured on Clef, and taking it from a 6 GB card would drop
+    the story below the published 4B recommendation. The "needs ~X of Y GB"
+    line uses this Y, so Y is free memory, not the card's total.
+    """
+    extra = max(0.0, extra_per_card_gb)
+    return sum(
+        max(0.0, g.vram_gb - _card_holdback_gb(g, extra)) for g in _vram_contributors(specs)
+    )
+
+
+def _fit_target_counts_in_use(specs: Optional[SystemSpecs]) -> bool:
+    """Whether ``--fit-target`` should add memory other programs already hold.
+
+    Windows CUDA reported its free figure as if those programs were not there
+    (about 30,991 MiB free while nvidia-smi showed 1–6 GB in use), so the
+    target has to add them. On Linux the free figure already excludes them,
+    and adding the nvidia-smi number again would keep that memory spare twice.
+    This card has no separate CUDA-free reading, so the split is the OS.
+    """
+    return specs is not None and (specs.os_name or "").lower().startswith("win")
+
+
+def fit_target_mib(specs: Optional[SystemSpecs] = None, *, decision: bool = False) -> int:
+    """MiB to pass as llama.cpp ``--fit-target``.
+
+    With no specs this is the 819 MiB menu reserve, which is what the docs
+    show. On Windows a live launch adds in-use memory, because CUDA's free
+    figure there ignores other programs. When that probe never read in-use
+    memory, the Windows target is about 2 GiB instead of 0.8 GiB. On Linux
+    the target stays the 0.8 GiB reserve: CUDA's free figure already excludes
+    other programs. A Clef launch (``decision=True``) also adds
+    ``WINDOWS_VRAM_MARGIN_GB`` on Windows, because that run used about 2.9 GB
+    more than llama.cpp projected. Story launches do not, so the engine
+    margin stays the one the story menu already counted. The menu budget
+    (``_usable_vram_gb``) still subtracts in-use memory on every OS.
+    """
+    extra = windows_vram_margin_gb(specs) if specs is not None and decision else 0.0
+    gpu = perf.primary_gpu(specs) if specs is not None else None
+    if gpu is None or not _fit_target_counts_in_use(specs):
+        return max(1, round((GPU_VRAM_RESERVE_GB + extra) * 1024))
+    return max(1, round(_card_holdback_gb(gpu, extra) * 1024))
 
 
 def _os_headroom_gb(specs: SystemSpecs) -> float:
@@ -440,28 +717,41 @@ def _ram_budget_gb(specs: SystemSpecs) -> float:
     return max(0.0, specs.ram_total_gb - _os_headroom_gb(specs))
 
 
-def _place(specs: SystemSpecs, base_need_gb: float) -> tuple[str, float, float, float]:
+def _place(
+    specs: SystemSpecs, base_need_gb: float, *, compute_gb: float = GPU_COMPUTE_BUFFER_GB,
+    extra_vram_gb: float = 0.0,
+) -> tuple[str, float, float, float]:
     """Decide where a model needing `base_need_gb` runs.
 
     Returns (placement, need_gb, budget_gb, offload_fraction). Order of
     preference: whole model on the GPU, Apple unified memory, GPU+RAM split,
-    CPU only, or "none" if it doesn't fit anywhere.
+    CPU only, or "none" if it doesn't fit anywhere. ``compute_gb`` is the
+    GPU scratch buffer (Clef's is the measured batch-4096 buffer, not the
+    story-model default).
     """
-    gpu_need = base_need_gb + GPU_COMPUTE_BUFFER_GB
+    gpu_need = base_need_gb + compute_gb
     ram_budget = _ram_budget_gb(specs)
     gpu = perf.primary_gpu(specs)
+    # Apple, RTX Spark, Strix Halo, Lunar Lake: one RAM pool. The GPU budget
+    # is already a share of that pool, so it is not added to system RAM.
+    # ``extra_vram_gb`` is the Windows Clef margin (0 for a story model, and
+    # 0 on a Mac).
+    one_pool = gpu is not None and (
+        gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+    )
 
-    if gpu is not None and gpu.vendor == "apple":
-        if gpu_need <= gpu.vram_gb:
-            return "unified", gpu_need, gpu.vram_gb, 1.0
-        # Past the share macOS lets the GPU use, llama.cpp's Metal build keeps
-        # what fits on the GPU and runs the rest on the processor - in the same
-        # memory. So it's a split ("partial"), never a separate CPU plan.
-        if gpu.vram_gb >= PARTIAL_MIN_GPU_SHARE * gpu_need and gpu_need <= ram_budget:
-            return "partial", gpu_need, ram_budget, gpu.vram_gb / gpu_need
-        return "none", base_need_gb, max(ram_budget, gpu.vram_gb), 0.0
+    if one_pool:
+        gpu_budget = max(0.0, gpu.vram_gb - extra_vram_gb)
+        if gpu_need <= gpu_budget:
+            return "unified", gpu_need, gpu_budget, 1.0
+        # Past the share the GPU may wire, the rest still runs in the same
+        # memory (Metal on a Mac, CUDA or Vulkan on the other chips). A split
+        # ("partial"), never a separate pool of VRAM plus RAM.
+        if gpu_budget >= PARTIAL_MIN_GPU_SHARE * gpu_need and gpu_need <= ram_budget:
+            return "partial", gpu_need, ram_budget, gpu_budget / gpu_need
+        return "none", base_need_gb, max(ram_budget, gpu_budget), 0.0
     elif gpu is not None:
-        vram_budget = _dedicated_vram_gb(specs) - GPU_VRAM_RESERVE_GB
+        vram_budget = _usable_vram_gb(specs, extra_per_card_gb=extra_vram_gb)
         if vram_budget > 0 and gpu_need <= vram_budget:
             return "gpu", gpu_need, vram_budget, 1.0
         share = vram_budget / gpu_need if vram_budget > 0 else 0.0
@@ -480,10 +770,10 @@ def _place(specs: SystemSpecs, base_need_gb: float) -> tuple[str, float, float, 
 
     # Doesn't fit: report against the biggest budget we could have offered.
     budgets = [ram_budget]
-    if gpu is not None and gpu.vendor == "apple":
-        budgets.append(gpu.vram_gb)
+    if one_pool:
+        budgets.append(max(0.0, gpu.vram_gb - extra_vram_gb))
     elif gpu is not None:
-        budgets.append(max(0.0, _dedicated_vram_gb(specs) - GPU_VRAM_RESERVE_GB) + ram_budget)
+        budgets.append(_usable_vram_gb(specs, extra_per_card_gb=extra_vram_gb) + ram_budget)
     return "none", base_need_gb, max(budgets), 0.0
 
 
@@ -492,9 +782,17 @@ def _is_apple(specs: SystemSpecs) -> bool:
     return gpu is not None and gpu.vendor == "apple"
 
 
+def _one_memory_pool(specs: SystemSpecs) -> bool:
+    """True when the GPU budget is a share of system RAM, not a second pool."""
+    gpu = perf.primary_gpu(specs)
+    return gpu is not None and (
+        gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+    )
+
+
 def _shares_system_ram(specs: SystemSpecs, placement: str) -> bool:
     """Is the memory this placement fills the computer's own RAM?"""
-    return placement in ("cpu", "unified") or (placement == "partial" and _is_apple(specs))
+    return placement in ("cpu", "unified") or (placement == "partial" and _one_memory_pool(specs))
 
 
 def _verdict_for(ratio: float) -> str:
@@ -516,9 +814,14 @@ def _plan(specs: SystemSpecs, model: ModelEntry, quant: str, size_gb: float, *,
     """Where (quant, size) runs and how fast. `on_disk`: already downloaded (needs no disk space)."""
     kv = kv_cache_gb(model, context)
     base_need = (size_gb + kv) * GIB_PER_GB + OVERHEAD_GB  # in the computer's own (binary) units
-    placement, need, budget, offload = _place(specs, base_need)
+    decision = is_decision_model(model)
+    compute = CLEF_COMPUTE_BUFFER_GB if decision else GPU_COMPUTE_BUFFER_GB
+    # The extra Windows margin is the Clef projection error (~2.9 GB), not a
+    # cut every story model takes.
+    extra = windows_vram_margin_gb(specs) if decision else 0.0
+    placement, need, budget, offload = _place(specs, base_need, compute_gb=compute, extra_vram_gb=extra)
     ratio = need / budget if budget > 0 else math.inf
-    if placement == "partial" and _is_apple(specs):
+    if placement == "partial" and _one_memory_pool(specs):
         # A Mac's split runs past the GPU's share into the rest of the same RAM,
         # so it's always a squeeze of the whole computer's memory: snug.
         ratio = max(1.0, ratio)
@@ -540,7 +843,7 @@ def _plan(specs: SystemSpecs, model: ModelEntry, quant: str, size_gb: float, *,
     if placement != "none":
         tps = perf.estimate_tokens_per_s(specs, active_gb=active, placement=placement, offload_fraction=offload)
     return _Plan(quant, size_gb, kv, need, placement, budget, ratio, verdict, offload, active, tps, disk_ok,
-                 on_disk, context)
+                 on_disk, context, model.params_b)
 
 
 def _quant_options(model: ModelEntry) -> list[tuple[str, float]]:
@@ -565,9 +868,9 @@ def _best(plans: Iterable[_Plan], keep: Callable[[_Plan], bool] = lambda p: True
     candidates = [p for p in plans if keep(p)]
     if not candidates:
         return None
-    top = max(quant_quality(p.quant) for p in candidates)
-    tied = [p for p in candidates if quant_quality(p.quant) >= top - QUALITY_TIE - 1e-9]
-    return min(tied, key=lambda p: (p.size_gb, -quant_quality(p.quant)))
+    top = max(_plan_quality(p) for p in candidates)
+    tied = [p for p in candidates if _plan_quality(p) >= top - QUALITY_TIE - 1e-9]
+    return min(tied, key=lambda p: (p.size_gb, -_plan_quality(p)))
 
 
 def _pick_home(plans: list[_Plan], keep: Callable[[_Plan], bool] = lambda p: True) -> Optional[_Plan]:
@@ -583,13 +886,23 @@ def _pick_home(plans: list[_Plan], keep: Callable[[_Plan], bool] = lambda p: Tru
     chosen = _best(home, _comfortable) or _best(home)
     assert chosen is not None
     slower = [p for p in candidates if _PLACEMENT_RANK[p.placement] > top
-              and quant_quality(p.quant) >= quant_quality(chosen.quant) + PLACEMENT_QUALITY_MARGIN]
+              and _plan_quality(p) >= _plan_quality(chosen) + PLACEMENT_QUALITY_MARGIN]
     return _best(slower, _comfortable) or _best(slower) or chosen
 
 
-def _quant_allowed(model: ModelEntry, quant: str) -> bool:
+def _plan_quality(plan: _Plan) -> float:
+    return quant_quality(plan.quant, size_gb=plan.size_gb, params_b=plan.params_b)
+
+
+def _plan_tier(plan: _Plan) -> str:
+    return _quant_tier(plan.quant, size_gb=plan.size_gb, params_b=plan.params_b)
+
+
+def _quant_allowed(model: ModelEntry, quant: str, *, size_gb: Optional[float] = None) -> bool:
     """Is this quant ever worth suggesting for this model? (See MIN_QUANT_BITS.)"""
-    bits = quant_bits(quant)
+    bits = _measured_bits(quant, size_gb=size_gb, params_b=model.params_b)
+    if bits is None:
+        bits = quant_bits(quant)
     if bits is None:
         return True
     if bits < MIN_QUANT_BITS:
@@ -620,9 +933,9 @@ def _choose_plan(specs: SystemSpecs, model: ModelEntry, downloaded: Optional[Dow
             return False
 
     plans = [_plan(specs, model, q, s, on_disk=have(q), context=context) for q, s in _quant_options(model)
-             if not floor or _quant_allowed(model, q)]
+             if not floor or _quant_allowed(model, q, size_gb=s)]
     usable = [p for p in plans if p.verdict != "no"]  # fits in memory AND on disk
-    tier = {p.quant: _quant_tier(p.quant) for p in usable}
+    tier = {p.quant: _plan_tier(p) for p in usable}
     # 0. A version that's already downloaded (and isn't a last resort) wins:
     #    no new download, and no disk space needed.
     ready = [p for p in usable if p.on_disk and tier[p.quant] != "last"]
@@ -656,7 +969,7 @@ def _choose_plan(specs: SystemSpecs, model: ModelEntry, downloaded: Optional[Dow
     upgrade = _best(
         high,
         lambda p: _comfortable(p)
-        and quant_quality(p.quant) > quant_quality(base.quant)
+        and _plan_quality(p) > _plan_quality(base)
         and _PLACEMENT_RANK[p.placement] <= _PLACEMENT_RANK[base.placement]
         and (p.tokens_per_s or 0.0) >= max(UPGRADE_MIN_TOKENS_PER_S, 0.5 * base_speed),
     )
@@ -735,7 +1048,10 @@ def _effective_params_b(model: ModelEntry) -> float:
 
 
 def _quality_points(model: ModelEntry, quant: Optional[str]) -> float:
-    return W_QUALITY * math.log2(1 + _effective_params_b(model)) * quant_quality(quant or model.quant)
+    chosen = quant or model.quant
+    size = next((s for q, s in _quant_options(model) if (q or "").upper() == (chosen or "").upper()), None)
+    return (W_QUALITY * math.log2(1 + _effective_params_b(model))
+            * quant_quality(chosen, size_gb=size, params_b=model.params_b))
 
 
 def _is_curated(model: ModelEntry) -> bool:
@@ -851,20 +1167,45 @@ def _reason(specs: SystemSpecs, model: ModelEntry, plan: _Plan, verdict: str) ->
         return f"Too big for this computer: it needs about {need} GB of memory and you have about {budget} GB to spare."
 
     tps = plan.tokens_per_s or 0.0
-    if tps >= 1.5:
+    if is_decision_model(model):
+        seconds = decision_seconds(
+            specs, placement=plan.placement, gpu_share=plan.offload_fraction, weights_gb=plan.size_gb,
+        )
+        speed = format_decision_seconds(seconds)
+    elif tps >= 1.5:
         speed = f"roughly {tps:.0f} tokens/s"
     else:
         speed = "about 1 token/s" if tps >= 0.8 else "well under 1 token/s"
     gpu = perf.primary_gpu(specs)
     if plan.placement == "gpu":
-        where = f"Fits on your {gpu.name if gpu else 'graphics card'} (needs ~{need} of {budget} GB video memory)"
+        cards = _vram_contributors(specs)
+        if len(cards) > 1:
+            names = ", ".join(g.name for g in cards)
+            where = (
+                f"Fits across your {len(cards)} graphics cards ({names}) together "
+                f"(needs ~{need} of {budget} GB video memory combined)"
+            )
+        else:
+            where = f"Fits on your {gpu.name if gpu else 'graphics card'} (needs ~{need} of {budget} GB video memory)"
     elif plan.placement == "unified":
-        where = f"Fits in your Mac's unified memory (needs ~{need} of {budget} GB usable)"
-    elif plan.placement == "partial" and gpu is not None and gpu.vendor == "apple":
-        where = (
-            f"Too big for the share of memory your Mac lets its GPU use, so ~{plan.offload_fraction:.0%} of it "
-            f"runs on the GPU and the rest on the processor (needs ~{need} of {budget} GB)"
-        )
+        if gpu is not None and gpu.vendor == "apple":
+            where = f"Fits in your Mac's unified memory (needs ~{need} of {budget} GB usable)"
+        else:
+            where = (
+                f"Fits in shared memory (the graphics chip uses the same RAM as the processor; "
+                f"needs ~{need} of {budget} GB)"
+            )
+    elif plan.placement == "partial" and _one_memory_pool(specs):
+        if _is_apple(specs):
+            where = (
+                f"Too big for the share of memory your Mac lets its GPU use, so ~{plan.offload_fraction:.0%} of it "
+                f"runs on the GPU and the rest on the processor (needs ~{need} of {budget} GB)"
+            )
+        else:
+            where = (
+                f"Too big for the share of shared memory the graphics chip may use, so ~{plan.offload_fraction:.0%} "
+                f"of it stays on the GPU and the rest runs in the same RAM (needs ~{need} of {budget} GB)"
+            )
     elif plan.placement == "partial":
         spill = plan.need_gb * (1.0 - plan.offload_fraction)
         where = (
@@ -881,12 +1222,14 @@ def _reason(specs: SystemSpecs, model: ModelEntry, plan: _Plan, verdict: str) ->
     if always_thinks(model):
         sentence += (", but it always thinks at length before it answers (it can't be asked not to), "
                      "so every turn takes several times longer")
-    elif _quant_tier(plan.quant) == "last":
+    elif _plan_tier(plan) == "last":
         sentence += ", but only a heavily compressed version fits, so the writing may be rough"
     elif verdict == "tight":
         sentence += "; it's a snug fit, so close other big apps first"
-    elif perf.speed_label(tps) in ("slow", "very slow"):
+    elif not is_decision_model(model) and perf.speed_label(tps) in ("slow", "very slow"):
         sentence += ", so expect some waiting"
+    if is_decision_model(model):
+        sentence += " (an estimate for one forward pass, not a measured run on this computer)"
     return sentence + "."
 
 
@@ -904,7 +1247,7 @@ def speed_breakdown(specs: SystemSpecs, fit: FitResult) -> Optional[tuple[float,
         gpu = perf.primary_gpu(specs)
         if gpu is None:
             return None
-        placement = "unified" if gpu.vendor == "apple" else "gpu"
+        placement = "unified" if gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False) else "gpu"
     bandwidth, _source = perf.bandwidth_for(specs, placement)
     return plan.active_gb, perf.efficiency_for(specs, placement) * bandwidth, perf.OVERHEAD_S_PER_TOKEN[placement]
 
@@ -934,12 +1277,12 @@ def evaluate_fit(specs: SystemSpecs, model: ModelEntry, *, downloaded: Optional[
             quant=model.quant or None, download_gb=None, est_tokens_per_s=None, score=-150.0,
         )
     plan = _choose_plan(specs, model, downloaded, floor=quant_floor)
-    if ((plan is None or _quant_tier(plan.quant) == "last")
+    if ((plan is None or _plan_tier(plan) == "last")
             and (model.context_tokens or 4096) > MIN_CONTEXT_TOKENS):
         # A shorter conversation memory beats a heavily compressed model: try it
-        # before settling for a last-resort (sub-3.7-bit) quant.
+        # before settling for a last-resort (sub-3.5-bit) quant.
         short = _choose_plan(specs, model, downloaded, context=MIN_CONTEXT_TOKENS, floor=quant_floor)
-        if short is not None and (plan is None or _quant_tier(short.quant) != "last"):
+        if short is not None and (plan is None or _plan_tier(short) != "last"):
             plan = short
     if plan is None:
         # Nothing fits: explain using the smallest version worth running.
@@ -957,7 +1300,7 @@ def evaluate_fit(specs: SystemSpecs, model: ModelEntry, *, downloaded: Optional[
                      if (model.context_tokens or 4096) > MIN_CONTEXT_TOKENS else None)
         plan.verdict = "no"
     verdict = plan.verdict
-    if verdict != "no" and _quant_tier(plan.quant) == "last":
+    if verdict != "no" and _plan_tier(plan) == "last":
         verdict = "tight"  # only a heavily-compressed version fits
     tps = round(plan.tokens_per_s, 1) if plan.tokens_per_s is not None else None
     return FitResult(
@@ -1036,6 +1379,11 @@ def _pick_recommended(viable: list[FitResult]) -> Optional[FitResult]:
 
     tiers: list[Callable[[FitResult], bool]] = [
         lambda f: f.verdict in ("great", "ok") and settled(f) and tps(f) >= 8,
+        # A split the card does not mostly hold is not the first choice when a
+        # settled model is already quick. It still beats a settled model that
+        # has dropped to a slow crawl, which is what a 4 GB card looks like
+        # once another app is using part of it.
+        lambda f: f.verdict in ("great", "ok") and tps(f) >= 8,
         lambda f: f.verdict in ("great", "ok") and settled(f) and tps(f) >= 3,
         lambda f: tps(f) >= 3,
     ]
@@ -1217,7 +1565,8 @@ def pick_shortlist(ranked: list[FitResult], n: int = 6) -> list[FitResult]:
         fast_pool = quicker or ([recommended] if is_quickest and recommended in fast_pool else [])
     first_addable(_fastest_order(fast_pool), "fastest")
     smartest = sorted(
-        (f for f in viable if _turn_tps(f) >= 5 and not _squeezed(f) and _quant_tier(f.quant or "") != "last"),
+        (f for f in viable if _turn_tps(f) >= 5 and not _squeezed(f)
+         and _quant_tier(f.quant or "", size_gb=f.download_gb, params_b=f.model.params_b) != "last"),
         key=lambda f: (_quality_points(f.model, f.quant), f.model.params_b),
         reverse=True,
     )
@@ -1278,10 +1627,16 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
     )
     budget = f"{plan.budget_gb:.1f} GB"
     verdict_words = _VERDICT_WORDS.get(fit.verdict, fit.verdict)
-    if plan.placement == "partial" and _is_apple(specs):
+    if plan.placement == "partial" and _one_memory_pool(specs):
+        if _is_apple(specs):
+            whose = f"your Mac's memory ({specs.ram_total_gb:.0f} GB, keeping {_os_headroom_gb(specs)} GB for macOS)"
+        else:
+            whose = (
+                f"the shared memory ({specs.ram_total_gb:.0f} GB, keeping {_os_headroom_gb(specs)} GB "
+                "for the operating system)"
+            )
         lines.append(
-            f"- Budget: {budget} of your Mac's memory ({specs.ram_total_gb:.0f} GB, keeping "
-            f"{_os_headroom_gb(specs)} GB for macOS) → {plan.need_gb / max(plan.budget_gb, 0.01):.0%} used → "
+            f"- Budget: {budget} of {whose} → {plan.need_gb / max(plan.budget_gb, 0.01):.0%} used → "
             f"**{verdict_words}** (it runs past the share the GPU may use, into the rest of the same memory)"
         )
     elif plan.placement == "partial":
@@ -1295,16 +1650,40 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
         )
     else:
         where = {
-            "gpu": f"{budget} of video memory ({_dedicated_vram_gb(specs):.0f} GB minus {GPU_VRAM_RESERVE_GB} GB kept free)",
+            "gpu": (
+                f"{budget} of free video memory ({_dedicated_vram_gb(specs):.0f} GB minus "
+                f"{GPU_VRAM_RESERVE_GB:g} GB kept free"
+                + (
+                    f" on each of {len(_vram_contributors(specs))} cards"
+                    if len(_vram_contributors(specs)) > 1 else ""
+                )
+                + (
+                    f", {_fmt_gb(sum(_vram_in_use_gb(g) for g in _vram_contributors(specs)))} GB already in use"
+                    if any(_vram_in_use_gb(g) > 0.05 for g in _vram_contributors(specs)) else ""
+                )
+                + (
+                    f", plus {windows_vram_margin_gb(specs):g} GB extra on Windows"
+                    if is_decision_model(model) and windows_vram_margin_gb(specs) > 0 else ""
+                )
+                + ")"
+            ),
             "unified": f"{budget} of unified memory that the Mac lets its GPU use",
             "cpu": f"{budget} of RAM ({specs.ram_total_gb:.0f} GB minus {_os_headroom_gb(specs)} GB for your system)",
             "none": f"{budget} at most",
         }[plan.placement]
         lines.append(f"- Budget: {where} → {plan.ratio:.0%} used → **{verdict_words}**")
-    if plan.tokens_per_s:
+    if is_decision_model(model) and plan.placement != "none":
+        seconds = decision_seconds(
+            specs, placement=plan.placement, gpu_share=plan.offload_fraction, weights_gb=plan.size_gb,
+        )
+        lines.append(
+            f"- Speed: one forward pass, {format_decision_seconds(seconds)} "
+            "(Clef does not write tokens, so this is not a tokens/s figure)."
+        )
+    elif plan.tokens_per_s:
         moe = " (only the active experts are read)" if _active_share(model) < 1 else ""
         if plan.placement == "partial":
-            gpu_bw, _ = perf.bandwidth_for(specs, "gpu")
+            gpu_bw, _ = perf.bandwidth_for(specs, "gpu", demand_gb=plan.active_gb * plan.offload_fraction)
             cpu_bw, _ = perf.bandwidth_for(specs, "cpu")
             lines.append(
                 f"- Speed: {plan.offload_fraction:.0%} on the GPU (~{gpu_bw:.0f} GB/s) and the rest on the CPU "
@@ -1312,7 +1691,9 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
                 f"**{plan.tokens_per_s:.0f} tokens/s** ({fit.est_speed})"
             )
         else:
-            bw, source = perf.bandwidth_for(specs, plan.placement)
+            bw, source = perf.bandwidth_for(
+                specs, plan.placement, demand_gb=plan.active_gb if plan.placement == "gpu" else None,
+            )
             eff = perf.efficiency_for(specs, plan.placement)
             lines.append(
                 f"- Speed: {eff:.2f} × {bw:.0f} GB/s ({source}) ÷ {plan.active_gb:.1f} GB read per token{moe}, "
@@ -1331,7 +1712,8 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
             f"- A story turn (reading ~{TURN_PROMPT_TOKENS:,} tokens of prompt, writing ~{TURN_ANSWER_TOKENS}) "
             f"takes roughly **{turn:.0f} seconds**{note}."
         )
-    tier = "only" if len(_quant_options(model)) == 1 else _quant_tier(quant)
+    tier = "only" if len(_quant_options(model)) == 1 else _quant_tier(
+        quant, size_gb=fit.download_gb, params_b=model.params_b)
     if fit.verdict == "no":
         tier = "disk" if not plan.disk_ok else "none"
     why = {
@@ -1345,6 +1727,15 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
         "disk": "even the smallest version needs more free disk space than you have",
     }[tier]
     lines.append(f"- Why {quant}: {why}.")
+    if (model.architecture or "").lower() == "clef":
+        lines.append(
+            "- Decision model: one forward pass that scores the referee's questions. It does not write the story. "
+            "The tokens/s figure is this game's chat-model estimate, not a Clef latency. "
+            "Cloudflare has not published local video-memory use at the full 65,536-token window; "
+            "this plan asks for "
+            f"{context:,} tokens. The KV-cache shape for architecture clef is not published, so the cache "
+            "line above is the grouped-query rule of thumb (unverified for Clef)."
+        )
     lines.append("- *A home-grown estimate (MIT licensed), not a guarantee.*")
     return "\n".join(lines)
 
@@ -1464,6 +1855,11 @@ MODEL_CATALOG: list[ModelEntry] = [
           "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF", "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
           "Apache-2.0", "A polished, imaginative writer for machines with plenty of memory.",
           (25.1, 19.3, 16.8, 14.3, 12.8, 11.5), architecture="llama", native_context=131072),
+    _seed("qwen3.8-27b", "Qwen3.8 27B", "Qwen3", 27.32, "unsloth/Qwen3.8-27B-GGUF", "Qwen/Qwen3.8-27B", "Apache-2.0",
+          "A strong 27B storyteller for a big graphics card, and it can show its thinking.",
+          (29.05, 21.98, 19.77, 16.46, 14.25), reasoning=True,
+          quants=("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "IQ4_XS"),
+          gguf_file="Qwen3.8-27B-UD-Q4_K_M.gguf", architecture="qwen35", native_context=262144),
     _seed("qwen3-30b-a3b", "Qwen3 30B-A3B (MoE)", "Qwen3", 30.5, "unsloth/Qwen3-30B-A3B-GGUF", "Qwen/Qwen3-30B-A3B",
           "Apache-2.0", "A big Mixture-of-Experts brain that only wakes ~3B parameters per word, so it's quick.",
           (32.5, 25.1, 21.7, 18.6, 16.4, 14.7), active_params_b=3.3, reasoning=True, architecture="qwen3moe",
@@ -1483,3 +1879,374 @@ def get_model(key: str) -> Optional[ModelEntry]:
         if wanted in (model.key.lower(), model.hf_repo.lower()):
             return model
     return None
+
+
+# ---------------------------------------------------------------------------
+# System One (the referee), not the storyteller
+# ---------------------------------------------------------------------------
+#
+# Clef does not write free-form text, so it must not join MODEL_CATALOG: the
+# story recommender would otherwise offer it as the narrator. Specs below are
+# taken from Cloudflare's model card / blog and the ggml-org GGUF repos.
+# Anything Cloudflare did not publish is marked unverified at the point of use
+# (KV-cache shape, local VRAM at 64k context, Ollama / vLLM / LM Studio).
+#
+# GGUF byte lengths (Hugging Face file sizes, decimal GB = bytes / 1e9):
+#   ggml-org/Clef-GGUF
+#     Clef-Q4_K_M.gguf      19,232,219,200
+#     Clef-Q8_0.gguf        28,732,215,360
+#     Clef-BF16.gguf        54,064,664,640
+#   ggml-org/Clef-Flash-GGUF
+#     Clef-Flash-Q4_K_M.gguf   6,486,448,288
+#     Clef-Flash-Q8_0.gguf     9,657,260,192
+#     Clef-Flash-BF16.gguf    18,164,488,352
+# Parameter totals from the GGUF headers: 27,024,054,788 and 9,075,566,084.
+# Published context is 65,536 tokens (Cloudflare: "64K"). The GGUF header's
+# 262,144 is the Qwen backbone figure and is not used here — whether the
+# decision head was trained at that length was not verified.
+# The text referee does not need the optional mmproj vision file.
+# ollama_ref follows this catalog's hf.co pattern. Whether Ollama (or vLLM,
+# or LM Studio) can load architecture "clef" was not verified.
+# llama.cpp text support is the b11371 release note ("text-only", 2026-10-03).
+# Requested context is 4,096: a short referee call. Full-64k KV memory is
+# not published, so it is not claimed here.
+
+def is_decision_model(model: ModelEntry) -> bool:
+    """True for Clef-style referees, which must not be offered as the storyteller."""
+    return (model.architecture or "").strip().lower() == "clef"
+
+
+def get_system_one(key: str) -> Optional[ModelEntry]:
+    """A System One option by key ("clef", "clef-flash") or GGUF repo id."""
+    wanted = (key or "").strip().lower()
+    for model in SYSTEM_ONE_CATALOG:
+        if wanted in (model.key.lower(), model.hf_repo.lower()):
+            return model
+    return None
+
+
+SYSTEM_ONE_CATALOG: list[ModelEntry] = [
+    _seed(
+        "clef-flash", "Clef-flash", "Clef", 9.08,
+        "ggml-org/Clef-Flash-GGUF", "Cloudflare/clef-flash", "Apache-2.0",
+        "Cloudflare's smaller decision model (Apache-2.0). It scores the referee's "
+        "questions in one forward pass and does not write the story.",
+        (6.49, 9.66, 18.16),
+        quants=("Q4_K_M", "Q8_0", "BF16"),
+        default_quant="Q4_K_M",
+        gguf_file="Clef-Flash-Q4_K_M.gguf",
+        architecture="clef",
+        native_context=65536,
+    ),
+    _seed(
+        "clef", "Clef", "Clef", 27.02,
+        "ggml-org/Clef-GGUF", "Cloudflare/clef", "Apache-2.0",
+        "Cloudflare's 27B decision model (Apache-2.0). It scores the referee's "
+        "questions in one forward pass and does not write the story.",
+        (19.23, 28.73, 54.06),
+        quants=("Q4_K_M", "Q8_0", "BF16"),
+        default_quant="Q4_K_M",
+        gguf_file="Clef-Q4_K_M.gguf",
+        architecture="clef",
+        native_context=65536,
+    ),
+]
+# _seed leaves context_tokens at 4,096 (a short referee call, not the published
+# 65,536) and thinking at "none" because reasoning is false. ModelEntry is frozen.
+
+
+def _subtract_vram(gpus: list, vendor: str, amount: float) -> list:
+    """Take `amount` GB off the largest cards of `vendor` first."""
+    if amount <= 0:
+        return list(gpus)
+    order = sorted(
+        (i for i, gpu in enumerate(gpus) if gpu.vendor == vendor),
+        key=lambda i: gpus[i].vram_gb,
+        reverse=True,
+    )
+    updated = list(gpus)
+    left = amount
+    for index in order:
+        gpu = updated[index]
+        take = min(gpu.vram_gb, left)
+        updated[index] = replace(gpu, vram_gb=max(0.0, gpu.vram_gb - take))
+        left -= take
+        if left <= 0:
+            break
+    return updated
+
+
+def reserve_for_loaded_model(specs: SystemSpecs, story_fit: Optional[FitResult]) -> SystemSpecs:
+    """Memory and disk still free once the story model is loaded.
+
+    The referee is chosen after the story model is already running, but the
+    hardware snapshot was taken before that download. Subtract the story fit's
+    estimated memory from the placement it uses, and its download size from
+    free disk (skipped when free disk is unknown, ``disk_free_gb < 0``).
+
+    A GPU+RAM split subtracts the whole estimate from system RAM as well as
+    from video memory. That is conservative: part of the model is not in RAM.
+    Two-model memory is an estimate, not a measurement after the load.
+    """
+    if story_fit is None:
+        return specs
+    used = max(0.0, float(story_fit.est_memory_gb or 0.0))
+    disk = specs.disk_free_gb
+    if disk >= 0 and story_fit.download_gb:
+        disk = max(0.0, disk - float(story_fit.download_gb) * GIB_PER_GB)
+    gpus = list(specs.gpus)
+    ram = float(specs.ram_total_gb)
+    placement = story_fit.placement
+    gpu = perf.primary_gpu(specs)
+    one_pool = gpu is not None and (
+        gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+    )
+    if used and placement in ("gpu", "partial") and gpu is not None and not one_pool:
+        gpus = _subtract_vram(gpus, gpu.vendor, used)
+        if placement == "partial":
+            ram = max(0.0, ram - used)
+    elif used and placement in ("unified", "cpu", "partial"):
+        ram = max(0.0, ram - used)
+        # One pool: the GPU share and the CPU plan are the same RAM, so the
+        # story model comes out of both figures.
+        if one_pool and placement in ("unified", "cpu", "partial"):
+            gpus = _subtract_vram(gpus, gpu.vendor, used)
+    available = min(float(specs.ram_available_gb), ram)
+    return replace(specs, gpus=gpus, ram_total_gb=ram, ram_available_gb=max(0.0, available), disk_free_gb=disk)
+
+
+def _decision_comfortable(fit: FitResult) -> bool:
+    """A referee fit we will actually recommend.
+
+    Comfortable means great or ok, and not a thin GPU+RAM split. Decision
+    models are not gated on the story menu's 8 tokens/s chat-speed floor:
+    Clef does not generate those tokens.
+    """
+    if fit.verdict not in ("great", "ok"):
+        return False
+    if fit.placement == "partial" and (fit.gpu_share or 0.0) < SPLIT_RECOMMENDED_MIN_GPU_SHARE:
+        return False
+    return fit.placement != "none"
+
+
+def _decision_home(fit: FitResult) -> int:
+    """0 = wholly on the graphics card, 1 = any GPU+RAM split, 2 = processor only.
+
+    A split is never the same home as a model that still fits entirely on the
+    card. Treating a 75% split as "on the card" made a tighter machine
+    recommend the larger Clef: with Qwen3 8B loaded, full Clef was a snug
+    full-GPU fit and Clef-flash won; with Qwen3 14B loaded, full Clef became
+    a 75% split and won instead. More memory pressure must not pick a bigger
+    referee.
+    """
+    if fit.placement in ("gpu", "unified"):
+        return 0
+    if fit.placement == "partial":
+        return 1
+    if fit.placement == "cpu":
+        return 2
+    return 3
+
+
+# A card-resident referee at least this many times quicker (in seconds per
+# decision) than the CPU fit wins even when the CPU fit is the larger
+# comfortable model.
+REFEREE_CARD_SPEED_RATIO = 4.0
+# When both referees are on the CPU, the larger file is not worth a long wait.
+# Clef Q4 is about three times the weights of Clef-flash, so its CPU estimate
+# is about three times as long. Prefer the faster one when the larger is more
+# than this many times slower, or when the larger is over the second figure.
+REFEREE_CPU_SLOW_RATIO = 2.0
+REFEREE_CPU_SLOW_SECONDS = 30.0
+
+
+def _fit_decision_seconds(specs: Optional[SystemSpecs], fit: FitResult) -> float:
+    return decision_seconds(
+        specs,
+        placement=fit.placement,
+        gpu_share=fit.gpu_share or 0.0,
+        weights_gb=float(fit.download_gb or fit.model.file_size_gb or 0.0),
+    )
+
+
+def _prefer_fast_card(
+    pool: list[FitResult], fits: list[FitResult], specs: Optional[SystemSpecs],
+) -> list[FitResult]:
+    """Swap a CPU pool for a much faster fit that uses the graphics card.
+
+    A partial split counts. On a 32 GB card with a big story already loaded,
+    full Clef only fits in system RAM (~half a minute) while Clef-flash still
+    has most of its layers on the card (a couple of seconds). The CPU model
+    stays when the card is not at least ``REFEREE_CARD_SPEED_RATIO`` times quicker.
+    """
+    best_home = min(_decision_home(fit) for fit in pool)
+    if best_home < 2:
+        return pool
+    cpu_seconds = min(
+        _fit_decision_seconds(specs, fit) for fit in pool if _decision_home(fit) == best_home
+    )
+    fast = []
+    for fit in fits:
+        seconds = _fit_decision_seconds(specs, fit)
+        if fit.verdict not in ("great", "ok", "tight") or _decision_home(fit) >= 2:
+            continue
+        if seconds > 0 and cpu_seconds >= REFEREE_CARD_SPEED_RATIO * seconds:
+            fast.append(fit)
+    return fast or pool
+
+
+def _prefer_faster_cpu(pool: list[FitResult], specs: Optional[SystemSpecs]) -> list[FitResult]:
+    """Drop a much slower larger model when every candidate is on the CPU.
+
+    A partial-GPU fit is handled by :func:`_prefer_fast_card` and is not in
+    this comparison. On an 8-core RTX 5090 with the story model loaded and
+    about 2.1 GiB already in use, both Clef files land on the CPU: about 55 s
+    for Clef Q4 and about 19 s for Clef-flash Q4. The larger file used to win
+    because it is larger. It loses when it is more than
+    ``REFEREE_CPU_SLOW_RATIO`` times slower, or when it is over
+    ``REFEREE_CPU_SLOW_SECONDS``.
+    """
+    if len(pool) < 2 or any(_decision_home(fit) != 2 for fit in pool):
+        return pool
+
+    def seconds(fit: FitResult) -> float:
+        return _fit_decision_seconds(specs, fit)
+
+    largest = max(pool, key=lambda fit: (fit.model.params_b, seconds(fit)))
+    big = seconds(largest)
+    others = [fit for fit in pool if fit is not largest and seconds(fit) > 0]
+    if not others:
+        return pool
+    fastest = min(seconds(fit) for fit in others)
+    if big > REFEREE_CPU_SLOW_RATIO * fastest or big > REFEREE_CPU_SLOW_SECONDS:
+        return [fit for fit in pool if fit is not largest]
+    return pool
+
+
+def _latency_clause(chosen: FitResult, fits: list[FitResult], specs: Optional[SystemSpecs]) -> str:
+    """Why a faster card was preferred, or why a CPU fit was kept. Empty if neither applies."""
+    others = [fit for fit in fits if fit.model.key != chosen.model.key and fit.verdict != "no"]
+    bigger_on_cpu = [
+        fit for fit in others
+        if fit.model.params_b > chosen.model.params_b and fit.placement == "cpu"
+    ]
+    if bigger_on_cpu and _decision_home(chosen) < 2:
+        big = max(bigger_on_cpu, key=lambda fit: fit.model.params_b)
+        if chosen.placement == "partial":
+            share = chosen.gpu_share or 0.0
+            where = (
+                f"{chosen.model.display_name} keeps about {share:.0%} of its layers "
+                "on the graphics card and the rest in system RAM"
+            )
+        else:
+            where = f"{chosen.model.display_name} stays on the graphics card"
+        return (
+            f"{big.model.display_name} is larger, but it would run on the CPU "
+            f"({format_decision_seconds(_fit_decision_seconds(specs, big))}). "
+            f"{where} "
+            f"({format_decision_seconds(_fit_decision_seconds(specs, chosen))}), "
+            "so the referee call should come back sooner. "
+            "That figure is an estimate for one forward pass, not a measured run on this computer."
+        )
+    slower_cpu = [
+        fit for fit in others
+        if fit.model.params_b > chosen.model.params_b and fit.placement == "cpu" and chosen.placement == "cpu"
+    ]
+    if slower_cpu:
+        big = max(slower_cpu, key=lambda fit: fit.model.params_b)
+        big_s = _fit_decision_seconds(specs, big)
+        small_s = _fit_decision_seconds(specs, chosen)
+        if small_s > 0 and (big_s > REFEREE_CPU_SLOW_RATIO * small_s or big_s > REFEREE_CPU_SLOW_SECONDS):
+            return (
+                f"{big.model.display_name} is larger, but on the CPU it would take "
+                f"{format_decision_seconds(big_s)}. "
+                f"{chosen.model.display_name} is the faster CPU fit "
+                f"({format_decision_seconds(small_s)}), so the referee call should come back sooner. "
+                "That figure is an estimate for one forward pass, not a measured run on this computer."
+            )
+    cards = [fit for fit in others if _decision_home(fit) == 0 and chosen.placement == "cpu"]
+    if cards:
+        fast = min(cards, key=lambda fit: _fit_decision_seconds(specs, fit))
+        card_s = _fit_decision_seconds(specs, fast)
+        cpu_s = _fit_decision_seconds(specs, chosen)
+        if card_s <= 0 or cpu_s <= REFEREE_CARD_SPEED_RATIO * card_s:
+            return ""
+        return (
+            f"{fast.model.display_name} would stay on the graphics card "
+            f"({format_decision_seconds(card_s)}). "
+            f"This pick stays on the CPU ({format_decision_seconds(cpu_s)}) "
+            f"because the card is not at least {REFEREE_CARD_SPEED_RATIO:.0f} times faster. "
+            "That figure is an estimate for one forward pass, not a measured run on this computer."
+        )
+    return ""
+
+
+def _with_latency_reason(
+    chosen: FitResult, fits: list[FitResult], specs: Optional[SystemSpecs],
+) -> FitResult:
+    extra = _latency_clause(chosen, fits, specs)
+    if not extra or extra in chosen.reason:
+        return chosen
+    reason = chosen.reason if chosen.reason.endswith(".") else chosen.reason + "."
+    return replace(chosen, reason=f"{reason} {extra}")
+
+
+def _pick_system_one(fits: list[FitResult], specs: Optional[SystemSpecs] = None) -> Optional[FitResult]:
+    """Best referee that fits. Never a verdict of "no".
+
+    Comfortable (great/ok, and not a thin split) beats a snug fit. On the same
+    kind of home, the larger model wins, so Clef beats Clef-flash when both
+    fit wholly on the graphics card. A split does not count as that home, so
+    more memory pressure cannot promote the larger model. A partial-GPU fit
+    that is several times quicker replaces a CPU fit (see
+    ``_prefer_fast_card``). When both fits are on the CPU, a much slower
+    larger model loses to the faster one (see ``_prefer_faster_cpu``).
+    """
+    comfortable = [fit for fit in fits if _decision_comfortable(fit)]
+    pool = comfortable or [fit for fit in fits if fit.verdict == "tight"]
+    if not pool:
+        return None
+    pool = _prefer_fast_card(pool, fits, specs)
+    pool = _prefer_faster_cpu(pool, specs)
+    best_home = min(_decision_home(fit) for fit in pool)
+    housed = [fit for fit in pool if _decision_home(fit) == best_home]
+
+    def rank(fit: FitResult) -> tuple:
+        return (fit.model.params_b, quant_quality(fit.quant or ""), -fit.est_memory_gb)
+
+    return max(housed, key=rank)
+
+
+def recommend_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = None) -> Optional[FitResult]:
+    """The local System One option that fits best, or None if none fit.
+
+    Prefers Clef over Clef-flash when both fit comfortably on the same kind of
+    home, because Clef is the larger model. A fast graphics-card fit is not
+    passed over for a much slower CPU fit. When both fits are on the CPU, a
+    larger model that is more than twice as slow, or over about 30 seconds,
+    loses to the faster one. Does not use the story recommender's chat-speed
+    gate as a hard reject.
+    """
+    reserved = reserve_for_loaded_model(specs, story_fit)
+    fits = [evaluate_fit(reserved, model) for model in SYSTEM_ONE_CATALOG]
+    chosen = _pick_system_one(fits, reserved)
+    if chosen is None:
+        return None
+    chosen = _with_latency_reason(chosen, fits, reserved)
+    return replace(chosen, badges=tuple(dict.fromkeys(("recommended",) + tuple(chosen.badges))))
+
+
+def rank_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = None) -> list[FitResult]:
+    """Every System One option, recommended first, then the rest by size.
+
+    Models that do not fit stay in the list so the menu can explain why.
+    """
+    reserved = reserve_for_loaded_model(specs, story_fit)
+    fits = [evaluate_fit(reserved, model) for model in SYSTEM_ONE_CATALOG]
+    chosen = _pick_system_one(fits, reserved)
+    ordered = sorted(fits, key=lambda fit: (fit.verdict == "no", -fit.model.params_b))
+    if chosen is None:
+        return ordered
+    chosen = _with_latency_reason(chosen, fits, reserved)
+    marked = replace(chosen, badges=tuple(dict.fromkeys(("recommended",) + tuple(chosen.badges))))
+    return [marked] + [fit for fit in ordered if fit.model.key != marked.model.key]

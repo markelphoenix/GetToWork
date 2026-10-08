@@ -250,7 +250,17 @@ automatic, explained in plain English, and reversible.
 
 1. **Hardware check (about a second).** Your operating system, CPU (and which
    speed-up instructions it has), RAM, graphics card(s) and video memory,
-   Apple Silicon unified memory, and free disk space. A 0.3-second memory
+   Apple Silicon unified memory, and free disk space. NVIDIA RTX Spark
+   (and DGX Spark / GB300) and a shared-memory laptop (Ryzen AI Max, Lunar
+   Lake, a generic iGPU) are planned from one share of RAM, not from VRAM
+   added on top of RAM. A laptop with both a built-in chip and a separate
+   graphics card is planned on the separate card, even when Windows reports
+   a large shared-memory number for the built-in chip. The engine is then started on the card or cards that plan
+   counted, so a built-in chip beside them is not given part of the model.
+   The referee is started the same way, on the card its own plan counted,
+   which can be a different card once the story model is loaded.
+   Steam Deck's graphics chip shares its 16 GB with the
+   processor, so the plan uses that shared memory. A 0.3-second memory
    speed test measures how fast your RAM is. Nothing is sent anywhere.
 2. **Live Hugging Face search.** The game asks the free
    [Hugging Face Hub](https://huggingface.co) API for today's most popular
@@ -410,10 +420,14 @@ explains it the first time you see it.
 
 How to turn it on:
 
-1. After your model is ready, the game asks *"Enable Jev for this game?"*
-   Choose `yes`, `no` (local only) or `learn` (tell me more first). The screen
-   also says what Jev receives each round (your plan, the challenge and a short
-   story summary; see [Privacy](#privacy-what-leaves-your-computer)).
+1. After your model is ready, the game asks who should referee.
+   On a real model that is the **System One** menu: **Clef**, **Clef-flash**
+   (both local; see below), **Jev**, or **no** (your story model referees).
+   `yes` still means Jev. Enter keeps the story model, so it does not start a
+   download. A pretend-model game (`--mock`) keeps the shorter question
+   *"Enable Jev for this game?"* with `yes`, `no` or `learn`. Either way the
+   screen says what Jev receives each round (your plan, the challenge and a
+   short story summary; see [Privacy](#privacy-what-leaves-your-computer)).
 2. Paste your API key (it stays hidden while you type - the game's window
    masks it; if a terminal can't hide it, for example an IDE's Run console,
    the game warns you first and suggests the environment variable below),
@@ -449,6 +463,84 @@ set TYPESAFE_API_KEY=your-key             # Windows Command Prompt
 > its own pricing and terms of service. Check them on their website before
 > signing up. Get To Work is not affiliated with TypeSafe AI, and any charges
 > for using Jev are between you and TypeSafe.
+
+### Clef (optional local referee)
+
+**Clef** and **Clef-flash** are Cloudflare's open-weight decision models
+([announcement](https://blog.cloudflare.com/clef-decision-models/),
+[Clef model card](https://huggingface.co/Cloudflare/clef),
+[Clef-flash model card](https://huggingface.co/Cloudflare/clef-flash)).
+They answer the same kind of typed questions Jev does (a probability, not a
+paragraph). They do **not** write the story, so they are not in the story
+model menu.
+
+| | Clef-flash | Clef |
+|--|--|--|
+| Parameters (GGUF header) | 9.08B | 27.02B |
+| License | Apache-2.0 | Apache-2.0 |
+| Weights | [ggml-org/Clef-Flash-GGUF](https://huggingface.co/ggml-org/Clef-Flash-GGUF) | [ggml-org/Clef-GGUF](https://huggingface.co/ggml-org/Clef-GGUF) |
+| Q4_K_M file | 6.49 GB | 19.23 GB |
+| Q8_0 file | 9.66 GB | 28.73 GB |
+| BF16 file | 18.16 GB | 54.06 GB |
+
+Those sizes are the files on Hugging Face (bytes ÷ 1e9, rounded to 0.01 GB).
+Published context is **65,536** tokens. The game asks the server for **4,096**
+for a short referee call. Cloudflare has not published how much video memory
+a local run needs at the full window, and the GGUF header's 262,144-token
+figure is not used here (it was not verified for the decision head). The
+game's "fits / doesn't fit" line is its usual estimate, with one change
+for Clef: a local run measured **0** for the context cache, so that part
+does not grow with the context window. The estimate is the file size, plus
+about 1.3 GB of compute buffer at the 4,096 batch, plus engine overhead.
+It also subtracts the story model that is already loaded, and video memory
+other programs are already using.
+
+The menu shows an estimated **seconds per decision**, from one forward pass.
+Clef does not write tokens, so that line is not a tokens/s chat speed. It is
+an estimate (about 0.6 seconds fully on a 32 GB card for Clef Q4, about a
+second for a 75% split, about a minute on 8 CPU cores for the same file),
+not a measurement of your machine.
+
+The server context (`-c`) can stay large. The physical batch (`-b` and
+`-ub`) is capped at 4,096 tokens, which is enough for a referee request
+(about 1,200 tokens). A batch as large as the context made the compute
+buffer fill the card. The game trims the request so it cannot exceed that
+batch. On the processor the game waits up to 3 minutes for a score; a
+partial GPU split waits 2 minutes. If that runs out, the message talks about
+hardware speed, not a slow connection to Jev.
+
+"Needs ~X of Y GB" uses video memory that is actually free: the card's total,
+minus what other programs are already using, minus 0.8 GB kept spare. When
+the computer cannot say how much is already in use, the plan keeps about
+2 GB spare instead of 0.8 GB. On
+Windows the Clef line also keeps another 3 GB spare, because a measured run
+used about 2.9 GB more than the engine projected. Story models do not take
+that extra cut. On Windows, `llama-server --fit-target` is told to leave the
+same spare memory free, because CUDA's free figure there ignored programs
+`nvidia-smi` could see. A Clef launch on Windows includes the extra 3 GB. A
+story launch on Windows adds only the memory already in use. On Linux the
+engine's free figure already excludes those programs, so `--fit-target` stays
+the 0.8 GB reserve and does not add the in-use number again.
+
+The text referee does not need the optional `mmproj` vision file. llama.cpp
+**b11371** (3 October 2026) is the first release whose notes say it can load
+Clef, and those notes say **text-only**. Image input landed later, in
+[PR 29969](https://github.com/ggml-org/llama.cpp/pull/29969) (merged 5 October
+2026). This game pins **b11485** (8 October 2026). That tag is the newest
+release that publishes the Windows Vulkan, Windows CPU, Linux Vulkan, Linux
+CPU, and macOS arm64 archives this game requires. GitHub's compare view shows
+the image-support commit is an ancestor of it. The two commits after b11483
+are chat-template fixes, not server-flag changes. The referee in the game
+stays text-only. If the engine actually installed is older than b11371, the
+referee menu says so and offers to download b11485 when this copy of the game
+is allowed to download engines. It
+does not download Clef until the engine can load it. Whether Ollama, vLLM or
+LM Studio can load `clef` was not verified.
+
+Running Clef stays on `127.0.0.1`. The download is from Hugging Face. The
+game does not send plans to Cloudflare. Before the download you get the
+license link, a hardware warning, an "AS IS" line, and a reminder that you
+are responsible for AI output.
 
 ## How to play
 
@@ -521,9 +613,12 @@ and [perf.py](src/gettowork/perf.py), and explained step by step in
 - **Memory needed** = the model file's size + the KV cache (the model's
   short-term memory of the conversation) + about 0.6 GB of overhead (plus
   0.3 GB on a graphics card).
-- **Memory available** = your video memory minus 0.8 GB, *or* the share of a
-  Mac's unified memory its GPU may use, *or* your RAM minus 2.5 GB (3.5 GB on
-  Windows) for your system. Using up to 60% of it is *great*, up to 85% *ok*,
+- **Memory available** = your video memory minus 0.8 GB, *or* the share of
+  unified memory the GPU may use (about 65% on an 8 GB Mac, 70% up to 48 GB,
+  75% from 64 GB, about 80% from 128 GB — the same idea on RTX Spark and
+  other shared-memory chips, never that share plus the RAM again), *or* your
+  RAM minus 2.5 GB (3.5 GB on Windows) for your system. Using up to 60% of
+  it is *great*, up to 85% *ok*,
   up to 100% *tight*.
 - **Speed**: writing each word-piece means reading the model's weights from
   memory, so `tokens/sec ≈ efficiency × memory bandwidth ÷ GB read per token`.
@@ -628,6 +723,7 @@ model runs locally and is only reachable at `127.0.0.1`.
 | Downloading the engine (copies run from source only: first time, or a new build) | GitHub (`api.github.com`, `github.com` and its download servers) | A request for the list of recent llama.cpp releases, then the download of one archive. If you set `GITHUB_TOKEN`, it's sent only to `api.github.com`. The Steam and test builds never do this: their engine is built in. |
 | Each round, **only if Jev is enabled** | TypeSafe AI (`api.typesafe.ai`) | This round's state: a trimmed "story so far", the current challenge, your plan, your progress and a short summary of recent rounds (including your earlier plans), plus the three questions and your API key (in the `Authorization` header). The key is only ever sent over https to that address: the game never follows a redirect elsewhere. |
 | Checking your Jev key | TypeSafe AI | One `GET /v1/models` request with your key. |
+| Downloading Clef or Clef-flash (only if you confirm, and only if the engine can load it) | Hugging Face | The GGUF file you confirmed. Inference stays at `127.0.0.1`. The game does not send plans to Cloudflare. |
 | "Open the website" in the Jev help, or a link you click | Your web browser | Only when you ask; it opens typesafe.ai, its docs, or the link. |
 | The **Keyboard** button (Steam Deck) | The Steam app on your computer | A `steam://open/keyboard` request, so Steam shows its on-screen keyboard. |
 | **Report a problem** in the game's window | Your web browser | Only when you click it: it opens the game's Steam Discussions. |
@@ -851,7 +947,8 @@ src/gettowork/
   reasoning.py       separates chain-of-thought from answers
   backends/          llamaserver.py (default), ollama.py, llamacpp.py, mock.py
   jev.py             Jev API client, the game's three questions, verdicts
-  onboarding.py      the friendly "enable Jev?" flow
+  system_one.py      optional local Clef referee (same question shape, on this computer)
+  onboarding.py      the friendly "enable Jev?" flow, and the System One menu
   prompts.py         every word the game says to the local model
   safety.py          the family-friendly filter for AI text and typed plans
   safety_terms.py    its word lists (scrambled with ROT13, so they're not on show)
@@ -891,8 +988,9 @@ build in `THIRD_PARTY_LICENSES.txt` - are listed in [NOTICE.md](NOTICE.md).
 >   and model recommendations are home-grown heuristics. They may be inaccurate
 >   for your computer, and a recommended model may still run slowly or fail.
 > - **Not affiliated.** This project is not affiliated with, endorsed by or
->   sponsored by TypeSafe AI, Hugging Face, ggml-org / the llama.cpp project,
->   Ollama, Valve / Steam, or any model author or publisher. Product and
+>   sponsored by TypeSafe AI, Hugging Face, Cloudflare, ggml-org / the llama.cpp project,
+>   Ollama, Valve / Steam, or any model author or publisher (including Qwen, whose
+>   models Clef is trained on top of). Product and
 >   company names are trademarks of their respective owners and are used only
 >   to identify their products and services.
 > - **Third-party downloads are your responsibility.** No model weights are
@@ -905,7 +1003,11 @@ build in `THIRD_PARTY_LICENSES.txt` - are listed in [NOTICE.md](NOTICE.md).
 >   license (and, for NVIDIA CUDA builds, NVIDIA's terms).
 > - **Jev may cost money.** Using Jev may incur charges under TypeSafe AI's own
 >   pricing and terms. The game works fully without it.
+> - **Hardware.** A local model uses your processor, graphics card, memory, disk
+>   and power. It can make the computer hot, loud, slow or unstable, and a model
+>   that does not fit can make that worse. Close other heavy programs first.
+>   You are responsible for how you use your own machine.
 > - **AI output is unpredictable.** The prompts ask for farcical, family-friendly
 >   stories and a filter checks what the model writes, but AI models can still
->   produce odd, wrong or inappropriate text. Nothing the game or a model says
->   is advice.
+>   be wrong. You are responsible for what you do with that output. Nothing the
+>   game or a model says is advice.

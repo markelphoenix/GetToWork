@@ -309,6 +309,10 @@ def test_primary_gpu_prefers_the_biggest_dedicated_card():
     igpu = GPUInfo(name="Intel UHD Graphics", vendor="intel", vram_gb=0.0)
     assert perf.primary_gpu(make_specs(gpus=[igpu, small, big])) is big
     assert perf.primary_gpu(make_specs(gpus=[igpu])) is None
+    # Windows sometimes reports the integrated chip's shared memory as if it
+    # were VRAM, larger than the discrete card. The matcher still uses the card.
+    bloated = GPUInfo(name="Intel Iris Xe Graphics", vendor="intel", vram_gb=16.0)
+    assert perf.primary_gpu(make_specs(gpus=[bloated, small])) is small
     mac = apple("Apple M2 GPU", 11.2)
     assert perf.primary_gpu(make_specs(unified=True, gpus=[mac])) is mac
 

@@ -441,9 +441,9 @@ def plan_names(specs):
         (make_specs("Windows", "AMD64", [AMD]), ["vulkan", "cpu"]),
         (make_specs("Windows", "AMD64", [INTEL]), ["vulkan", "cpu"]),
         (make_specs("Windows", "AMD64", []), ["cpu"]),
-        (make_specs("Windows", "ARM64", [NVIDIA]), ["cuda-13", "cpu"]),
-        (make_specs("Windows", "ARM64", [NVIDIA], notes=["NVIDIA driver 572.16"]), ["cpu"]),
-        (make_specs("Windows", "ARM64", [AMD]), ["cpu"]),
+        (make_specs("Windows", "ARM64", [NVIDIA]), ["cuda-13", "vulkan", "cpu"]),
+        (make_specs("Windows", "ARM64", [NVIDIA], notes=["NVIDIA driver 572.16"]), ["vulkan", "cpu"]),
+        (make_specs("Windows", "ARM64", [AMD]), ["vulkan", "cpu"]),
         (make_specs("Windows", "AMD64", [PASCAL], notes=["NVIDIA driver 580.95"]), ["cuda-12", "vulkan", "cpu"]),
         (make_specs("Linux", "x86_64", [PASCAL], notes=["NVIDIA driver 580.95.05"]), ["cuda-12", "cpu"]),
         (make_specs("Linux", "x86_64", [TURING], notes=["NVIDIA driver 580.95.05"]), ["cuda-13", "cuda-12", "cpu"]),
@@ -462,6 +462,31 @@ def plan_names(specs):
 )
 def test_plan_variants(specs, expected):
     assert plan_names(specs) == expected
+
+
+def test_arm64_never_selects_an_x64_engine():
+    for os_name, arch in (("Windows", "ARM64"), ("Linux", "aarch64"), ("Darwin", "arm64")):
+        for variant in (CUDA13, CUDA12, VULKAN, CPU, METAL, ROCM):
+            chosen = select_assets(ALL_ASSETS, variant, os_name, arch)
+            for asset in chosen:
+                assert "x64" not in asset["name"].lower()
+                assert "amd64" not in asset["name"].lower()
+
+
+def test_arm64_menu_names_the_real_build_and_the_fallback():
+    spark = make_specs("Windows", "ARM64", [GPUInfo(name="NVIDIA RTX Spark", vendor="nvidia", vram_gb=22.4)])
+    assert ri.arm64_build_note(spark).startswith("Windows on Arm uses the arm64 CUDA build")
+    assert "not run under emulation" in ri.arm64_build_note(spark)
+    old = make_specs(
+        "Windows", "ARM64",
+        [GPUInfo(name="NVIDIA RTX Spark", vendor="nvidia", vram_gb=22.4, driver_version="572.16")],
+    )
+    note = ri.arm64_build_note(old)
+    assert "Vulkan arm64" in note and "driver 580" in note
+    linux = make_specs("Linux", "aarch64", [GPUInfo(name="NVIDIA GB10", vendor="nvidia", vram_gb=102.4)], flags=["vulkan"])
+    assert ri.arm64_build_note(linux).startswith("Linux on Arm uses the arm64 CUDA build")
+    assert ri.arm64_build_note(make_specs("Darwin", "arm64", [APPLE])) is None
+    assert ri.arm64_build_note(make_specs("Windows", "AMD64", [NVIDIA])) is None
 
 
 def test_plan_reads_gpu_driver_version_field():
@@ -2029,6 +2054,100 @@ def test_install_marker_records_bundled_builds_and_license_files():
     assert marked["bundled"] is True and marked["license_files"] == ["licenses/LICENSE"]
     assert marked["exe"] == "bin/llama-server" and marked["tag"] == "b7000"
     assert marked["source"].endswith("/releases/tag/b7000")
+
+
+# Archives the Clef installer can select from llama.cpp b11485, plus decoys it must ignore.
+_B11485_PUBLISHED = [
+    "llama-b11485-bin-win-vulkan-x64.zip",
+    "llama-b11485-bin-win-vulkan-arm64.zip",
+    "llama-b11485-bin-win-cpu-x64.zip",
+    "llama-b11485-bin-win-cpu-arm64.zip",
+    "llama-b11485-bin-ubuntu-vulkan-x64.tar.gz",
+    "llama-b11485-bin-ubuntu-vulkan-arm64.tar.gz",
+    "llama-b11485-bin-ubuntu-x64.tar.gz",
+    "llama-b11485-bin-ubuntu-arm64.tar.gz",
+    "llama-b11485-bin-macos-arm64.tar.gz",
+    "llama-b11485-bin-macos-x64.tar.gz",
+    "llama-b11485-bin-win-cuda-13.4-x64.zip",
+    "llama-b11485-bin-win-cuda-13.4-arm64.zip",
+    "llama-b11485-bin-ubuntu-cuda-13.4-x64.tar.gz",
+    "llama-b11485-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+    "cudart-llama-bin-win-cuda-13.4-x64.zip",
+    "cudart-llama-bin-win-cuda-13.4-arm64.zip",
+    "cudart-llama-b11485-bin-ubuntu-cuda-13.4-x64.tar.gz",
+    "cudart-llama-b11485-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+    "llama-b11485-bin-win-cuda-12.4-x64.zip",
+    "llama-b11485-bin-ubuntu-cuda-12.8-x64.tar.gz",
+    "cudart-llama-bin-win-cuda-12.4-x64.zip",
+    "cudart-llama-b11485-bin-ubuntu-cuda-12.8-x64.tar.gz",
+    "llama-b11485-bin-win-rocm-10.0-x64.zip",
+    "llama-b11485-bin-ubuntu-sycl-fp32-x64.tar.gz",
+]
+
+
+def test_the_pin_covers_every_archive_the_clef_installer_can_download():
+    tag, digests = ri.load_engine_pin()
+    assert tag == "b11485"
+    assert digests["llama-b11485-bin-win-vulkan-x64.zip"] == (
+        "2adedc3469288620cd3877d79a1001dd052e91a7546fac2a0227e08f7371ccdd"
+    )
+    assert digests["llama-b11485-bin-win-cpu-x64.zip"] == (
+        "ac51218237b4e9fdd0525e7a6ef56ba10c450cab200398d848fee6e7dd81c917"
+    )
+    assets = [{"name": name, "state": "uploaded"} for name in _B11485_PUBLISHED]
+    required = (
+        ("Windows", "x64", CUDA13),
+        ("Windows", "x64", CUDA12),
+        ("Windows", "x64", VULKAN),
+        ("Windows", "x64", CPU),
+        ("Windows", "arm64", CUDA13),
+        ("Windows", "arm64", CPU),
+        ("Linux", "x64", CUDA13),
+        ("Linux", "x64", CUDA12),
+        ("Linux", "x64", VULKAN),
+        ("Linux", "x64", CPU),
+        ("Linux", "arm64", CUDA13),
+        ("Linux", "arm64", VULKAN),
+        ("Linux", "arm64", CPU),
+        ("Darwin", "arm64", METAL),
+        ("Darwin", "arm64", CPU),
+        ("Darwin", "x64", CPU),
+    )
+    for os_name, arch, variant in required:
+        chosen = select_assets(assets, variant, os_name, arch)
+        assert chosen, (os_name, arch, variant.name)
+        for asset in chosen:
+            assert asset["name"] in digests, asset["name"]
+            assert "rocm" not in asset["name"] and "sycl" not in asset["name"]
+    checked = ri.require_pinned_assets(
+        [{"name": "llama-b11485-bin-ubuntu-x64.tar.gz"}], digests,
+    )
+    assert checked[0]["digest"] == "sha256:" + digests["llama-b11485-bin-ubuntu-x64.tar.gz"]
+
+
+def test_a_pin_mismatch_fails_closed_before_download(monkeypatch):
+    tag, digests = ri.load_engine_pin()
+    name = "llama-b11485-bin-ubuntu-x64.tar.gz"
+    release = {
+        "tag_name": tag,
+        "assets": [{
+            "name": name,
+            "state": "uploaded",
+            "size": 10,
+            "digest": "sha256:" + "ab" * 32,
+            "browser_download_url": "https://example.invalid/nope",
+        }],
+    }
+    monkeypatch.setattr(ri, "downloads_allowed", lambda: True)
+    monkeypatch.setattr(ri, "fetch_release", lambda *args, **kwargs: release)
+    with pytest.raises(RuntimeInstallError, match="different SHA-256"):
+        ri.install_tagged_release(make_ui(), make_specs(), tag)
+    monkeypatch.setattr(ri, "load_engine_pin", lambda path=None: (tag, {}))
+    release["assets"][0]["digest"] = "sha256:" + digests[name]
+    with pytest.raises(RuntimeInstallError, match="pins no SHA-256"):
+        ri.install_tagged_release(make_ui(), make_specs(), tag)
+    with pytest.raises(RuntimeInstallError, match="only downloads the pinned"):
+        ri.install_tagged_release(make_ui(), make_specs(), "b1")
 
 
 def test_available_plan_lists_only_what_a_built_game_ships(tmp_path, monkeypatch):

@@ -21,6 +21,7 @@ Get To Work is not affiliated with TypeSafe AI; the names identify their product
 
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import math
@@ -399,6 +400,8 @@ class JevClient:
         max_retries: int = 2,
         sleep: Optional[Callable[[float], None]] = None,
         clock: Optional[Callable[[], float]] = None,
+        local_referee: bool = False,
+        max_prompt_tokens: Optional[int] = None,
     ) -> None:
         problem = validate_api_key_format(api_key)
         if problem:
@@ -416,6 +419,8 @@ class JevClient:
         self._timeout = float(timeout)
         self._transport: Transport = transport or urllib_transport
         self._max_retries = max_retries
+        self._local_referee = bool(local_referee)
+        self._max_prompt_tokens = int(max_prompt_tokens) if max_prompt_tokens else None
         self._sleep = sleep or time.sleep
         self._clock = clock or time.monotonic
 
@@ -472,7 +477,12 @@ class JevClient:
         if not isinstance(state, (str, dict, list)):
             raise JevError("The state sent to Jev must be text, a JSON object or a list.", kind="config")
         _check_questions(questions)
-        payload = {"state": state, "model": self._model, "questions": dict(questions)}
+        questions = dict(questions)
+        if self._max_prompt_tokens:
+            state, questions = bound_system_one_request(
+                state, questions, self._model, self._max_prompt_tokens,
+            )
+        payload = {"state": state, "model": self._model, "questions": questions}
         body, exchange = self._request("POST", SYSTEM_ONE_PATH, payload)
         if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
             raise self._bad_response("Jev's reply didn't contain an 'answers' object.", exchange)
@@ -584,6 +594,14 @@ class JevClient:
         reason = getattr(exc, "reason", None)
         tried = f" (tried {retries + 1} times)" if retries else ""
         if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
+            if self._local_referee:
+                return JevError(
+                    f"Clef didn't finish scoring within {self._timeout:g} seconds{tried}. "
+                    "A local referee runs on this computer, so a slow call means the hardware "
+                    "is busy — often because the model is on the processor, or only part of it "
+                    "is on the graphics card — not a slow connection.",
+                    kind="timeout",
+                )
             return JevError(
                 f"Jev didn't answer within {self._timeout:g} seconds{tried}. The service may be busy, "
                 "or your connection may be slow.",
@@ -899,6 +917,101 @@ def _probability_map(value: Any) -> dict[str, float]:
     return {str(k): min(1.0, max(0.0, float(p))) for k, p in value.items() if _is_number(p)}
 
 
+# A real referee request was about 3.8 characters per token. Dividing by 3
+# overestimates the count, so a request that passes this check fits in the batch.
+_PROMPT_CHARS_PER_TOKEN = 3
+
+
+def estimate_prompt_tokens(state: Any, questions: Mapping, model: str) -> int:
+    """Conservative token count for one system-one JSON body."""
+    payload = {"state": state, "model": model, "questions": dict(questions)}
+    text = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    return max(1, (len(text) + _PROMPT_CHARS_PER_TOKEN - 1) // _PROMPT_CHARS_PER_TOKEN)
+
+
+def _longest_string(value: Any) -> Optional[tuple[int, tuple]]:
+    best: Optional[tuple[int, tuple]] = None
+
+    def walk(node: Any, path: tuple) -> None:
+        nonlocal best
+        if isinstance(node, str):
+            if node and (best is None or len(node) > best[0]):
+                best = (len(node), path)
+        elif isinstance(node, dict):
+            for key, item in node.items():
+                walk(item, path + (("dict", key),))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, path + (("list", index),))
+
+    walk(value, ())
+    return best
+
+
+def _get_path(root: Any, path: tuple) -> str:
+    node = root
+    for _kind, key in path:
+        node = node[key]
+    return node
+
+
+def _set_path(root: Any, path: tuple, text: str) -> None:
+    node = root
+    for _kind, key in path[:-1]:
+        node = node[key]
+    _kind, key = path[-1]
+    node[key] = text
+
+
+def _shrink_text_tree(value: Any) -> bool:
+    found = _longest_string(value)
+    if found is None:
+        return False
+    length, path = found
+    text = _get_path(value, path)
+    drop = max(1, length // 4)
+    _set_path(value, path, text[: max(0, length - drop)])
+    return True
+
+
+def bound_system_one_request(
+    state: Any, questions: Mapping, model: str, max_tokens: int,
+) -> tuple[Any, dict]:
+    """Shrink a system-one request until its conservative token count fits ``max_tokens``.
+
+    The physical batch has to hold the whole prompt. Hosted Jev does not use
+    this; a local Clef server does, because ``-ub`` is capped.
+    """
+    if max_tokens < 1:
+        raise JevError("The referee batch size must be at least 1 token.", kind="config")
+    questions = copy.deepcopy(dict(questions))
+    if isinstance(state, str):
+        if estimate_prompt_tokens(state, questions, model) <= max_tokens:
+            return state, questions
+        state = {"text": state}
+    elif isinstance(state, (dict, list)):
+        state = copy.deepcopy(state)
+    else:
+        raise JevError("The state sent to Jev must be text, a JSON object or a list.", kind="config")
+
+    for _ in range(20000):
+        if estimate_prompt_tokens(state, questions, model) <= max_tokens:
+            return state, questions
+        if _shrink_text_tree(state):
+            continue
+        if _shrink_text_tree(questions):
+            continue
+        break
+    estimate = estimate_prompt_tokens(state, questions, model)
+    if estimate > max_tokens:
+        raise JevError(
+            f"The referee request is still about {estimate} tokens after trimming, "
+            f"which is more than the batch size ({max_tokens}). It was not sent.",
+            kind="config",
+        )
+    return state, questions
+
+
 def judge_round(client: JevClient, **state_kwargs: Any) -> JevVerdict:
     """Ask Jev about one round and return the verdict.
 
@@ -911,13 +1024,16 @@ def judge_round(client: JevClient, **state_kwargs: Any) -> JevVerdict:
     return parse_verdict(response, exchange)
 
 
-def explain_verdict(v: JevVerdict) -> str:
-    """One friendly paragraph describing Jev's three answers to the player."""
+def explain_verdict(v: JevVerdict, *, who: str = "Jev") -> str:
+    """One friendly paragraph describing the referee's three answers to the player.
+
+    ``who`` is "Jev" for the hosted service and "Clef" for a local decision model.
+    """
     pct = round(v.progress_probability * 100)
     if v.made_progress:
-        first = f"Jev puts the chance that your plan made progress at {pct}% - that counts, you're a step closer to work!"
+        first = f"{who} puts the chance that your plan made progress at {pct}% - that counts, you're a step closer to work!"
     else:
-        first = f"Jev puts the chance that your plan made progress at only {pct}% - not quite enough to count this time."
+        first = f"{who} puts the chance that your plan made progress at only {pct}% - not quite enough to count this time."
     second = f'It filed the outcome under "{v.outcome}" ({round(v.outcome_confidence * 100)}% confident)'
     levels = [int(k) for k in v.creativity_legend if str(k).isdecimal() and len(str(k)) <= 6]
     top = max(levels) if levels else len(CREATIVITY_LEVELS) - 1
@@ -970,7 +1086,7 @@ A **Noul** is a yes/no question - or a statement to check as true or false.
 }
 ```
 
-Jev answers with a single number:
+The referee answers with a single number:
 
 ```json
 "made_progress": {"type": "noul", "noul": 0.91}
@@ -979,7 +1095,7 @@ Jev answers with a single number:
 - `noul` is the **probability of yes** (or true), from 0 to 1. Near 1 means yes,
   near 0 means no, around 0.5 means genuinely unsure.
 - There is **no separate confidence field** - the probability already says how sure
-  Jev is. 0.97 is a confident yes; 0.55 is a shrug that leans yes.
+  the referee is. 0.97 is a confident yes; 0.55 is a shrug that leans yes.
 - `criteria` is optional: short descriptions of what counts as true and as false.
 - **You** pick the cut-off. This game counts progress when `noul >= 0.5`; a stricter
   game could demand 0.8, and a moderation tool might send 0.4-0.6 to a human.
@@ -1011,7 +1127,7 @@ The answer:
 - `choice` - the label with the **highest probability**, always one of *your* labels.
 - `probabilities` - how likely every label is, from 0 to 1, adding up to about 1.
   Great for spotting a close call between two labels.
-- `confidence` - from 0 to 1, how sure Jev is about the selected label. Low values are
+- `confidence` - from 0 to 1, how sure the referee is about the selected label. Low values are
   a signal to double-check (or ask a human).
 """
 
@@ -1043,7 +1159,7 @@ The answer:
   can land between levels (here 1x0.05 + 2x0.3 + 3x0.6 + 4x0.05 = 2.65).
 - `probabilities` - how likely each level is (same keys as `legend`), adding up to about 1.
 - `legend` - your rubric echoed back, so you know what each number means.
-- `confidence` - from 0 to 1, how sure Jev is about the score.
+- `confidence` - from 0 to 1, how sure the referee is about the score.
 
 Because the levels are ordered, 2.9 really means "nearly a 3" - something a plain
 label can't express.

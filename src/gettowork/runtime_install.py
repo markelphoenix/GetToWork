@@ -476,10 +476,16 @@ def plan_variants(specs: SystemSpecs) -> list[RuntimeVariant]:
                 plan.extend(_cuda_variants(specs, arch))
             if non_apple_gpu:
                 plan.append(VULKAN)  # works with NVIDIA, AMD and Intel drivers
-        elif arch == "arm64" and "nvidia" in vendors:
-            # Windows on ARM with an NVIDIA GPU: a CUDA 13 arm64 build is published
-            # (llama-...-bin-win-cuda-13.x-arm64.zip + its cudart); otherwise the CPU build.
-            plan.extend(_cuda_variants(specs, arch))
+        elif arch == "arm64":
+            # Windows on Arm. CUDA 13 arm64 is published for an NVIDIA GPU
+            # (llama-...-bin-win-cuda-13.x-arm64.zip + its cudart) when the
+            # driver can run it. Vulkan arm64 is the fallback (and the build
+            # for AMD/Intel). The CPU entry is the arm64 CPU zip. select_assets
+            # matches this architecture only, so an x64 engine is never chosen.
+            if "nvidia" in vendors:
+                plan.extend(_cuda_variants(specs, arch))
+            if non_apple_gpu:
+                plan.append(VULKAN)
     elif os_key == "linux" and arch is not None:
         glibc = _glibc_version()
 
@@ -493,6 +499,40 @@ def plan_variants(specs: SystemSpecs) -> list[RuntimeVariant]:
 
     plan.append(CPU)  # (if even this can't run here, `platform_problem` says so up front)
     return plan
+
+
+def arm64_build_note(specs: SystemSpecs) -> Optional[str]:
+    """Menu line for a Windows or Linux Arm machine, or None.
+
+    Names the arm64 build the plan will actually run. When the CUDA arm64
+    build is not in the plan (the driver is too old for CUDA 13), says so
+    and names the Vulkan or CPU arm64 fallback. An x64 engine under emulation
+    is never the quiet alternative.
+    """
+    os_key, arch = _os_key(specs.os_name), _arch_key(specs.arch)
+    if arch != "arm64" or os_key not in ("windows", "linux"):
+        return None
+    names = [variant.name for variant in plan_variants(specs)]
+    first = names[0] if names else "cpu"
+    nvidia = any(gpu.vendor == "nvidia" for gpu in specs.gpus)
+    host = "Windows on Arm" if os_key == "windows" else "Linux on Arm"
+    if nvidia and first == "cuda-13":
+        return (
+            f"{host} uses the arm64 CUDA build of the pinned llama.cpp release. "
+            "If that build cannot start, the next try is the arm64 Vulkan build, then the arm64 CPU build. "
+            "An x64 engine is not run under emulation."
+        )
+    if nvidia and "cuda-13" not in names:
+        fallback = "Vulkan arm64" if "vulkan" in names else "CPU arm64"
+        return (
+            f"{host} cannot use the arm64 CUDA build here (it needs an NVIDIA driver 580 or newer). "
+            f"This menu uses the {fallback} build instead. An x64 engine is not run under emulation."
+        )
+    if first == "vulkan":
+        return f"{host} uses the arm64 Vulkan build. An x64 engine is not run under emulation."
+    if first == "cpu":
+        return f"{host} uses the arm64 CPU build. An x64 engine is not run under emulation."
+    return None
 
 
 def engine_can_use_gpu(specs: SystemSpecs) -> bool:
@@ -2075,6 +2115,129 @@ def _install_into(ui: UI, http: Any, release: dict, assets: list[dict], variant:
 
     ui.success(f"The llama.cpp engine {escape(tag)} ({escape(variant.display)} build) is installed in {escape(str(final_dir))}")
     return final_dir / Path(*PurePosixPath(rel_exe).parts)
+
+
+_PIN_DIGEST_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})\s+\*?(\S+)$")
+
+
+def pin_archive_name_ok(tag: str, name: str) -> bool:
+    """True when ``name`` may appear in the pin for ``tag``.
+
+    Windows CUDA runtime zips are published as ``cudart-llama-bin-win-...``
+    with no build number. Every other archive includes ``llama-<tag>-``.
+    """
+    if name.startswith(f"llama-{tag}-") or name.startswith(f"cudart-llama-{tag}-"):
+        return True
+    return name.startswith("cudart-llama-bin-win-")
+
+
+def load_engine_pin(path: Optional[Path] = None) -> tuple[str, dict[str, str]]:
+    """``(tag, {archive name: sha256})`` from ``packaging/llama_cpp_tag.txt``.
+
+    Raises :class:`RuntimeInstallError` when the file is missing, malformed,
+    or names an archive that is not part of that release.
+    """
+    pin_path = path or Path(__file__).resolve().parents[2] / "packaging" / "llama_cpp_tag.txt"
+    try:
+        lines = pin_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeInstallError(
+            f"Couldn't read the pinned llama.cpp release from {pin_path} ({exc})."
+        ) from exc
+    entries = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+    tags = [line for line in entries if re.fullmatch(r"b\d+", line)]
+    if len(tags) != 1 or not entries or entries[0] != tags[0]:
+        raise RuntimeInstallError(
+            f"{pin_path} should name exactly one llama.cpp release, like b7000, on its first "
+            "line (then one '<sha256>  <archive name>' line per archive)."
+        )
+    tag = tags[0]
+    digests: dict[str, str] = {}
+    for line in entries[1:]:
+        match = _PIN_DIGEST_RE.match(line)
+        if match is None:
+            raise RuntimeInstallError(f"{pin_path}: {line!r} isn't a '<sha256>  <archive name>' line.")
+        digest, name = match.group(1).lower(), match.group(2)
+        if not pin_archive_name_ok(tag, name):
+            raise RuntimeInstallError(
+                f"{pin_path}: {name} isn't an archive of the pinned release {tag} - update the "
+                "SHA-256 lines whenever the pin moves."
+            )
+        if name in digests:
+            raise RuntimeInstallError(f"{pin_path} lists {name} twice.")
+        digests[name] = digest
+    return tag, digests
+
+
+def require_pinned_assets(assets: list[dict], digests: dict[str, str]) -> list[dict]:
+    """Copy ``assets`` with each digest forced to the pin. Fail closed otherwise.
+
+    A missing pin line, or a GitHub digest that disagrees with the pin, raises
+    before any download. The returned digest is the pin, so the byte check
+    after the download uses the reviewed checksum, not only GitHub's.
+    """
+    checked = []
+    for asset in assets:
+        name = str(asset.get("name") or "")
+        expected = digests.get(name)
+        if not expected:
+            raise RuntimeInstallError(
+                f"packaging/llama_cpp_tag.txt pins no SHA-256 for {name}. "
+                "The engine was not downloaded."
+            )
+        published = _parse_digest(asset.get("digest"))
+        if published and published != expected:
+            raise RuntimeInstallError(
+                f"GitHub now reports a different SHA-256 for {name} ({published[:12]}...) than the one pinned "
+                f"in packaging/llama_cpp_tag.txt ({expected[:12]}...). The engine was not downloaded."
+            )
+        updated = dict(asset)
+        updated["digest"] = f"sha256:{expected}"
+        checked.append(updated)
+    return checked
+
+
+def install_tagged_release(
+    ui: UI,
+    specs: SystemSpecs,
+    tag: str,
+    *,
+    http: Any = None,
+    runtime_root: Optional[Path] = None,
+) -> tuple[Path, RuntimeVariant]:
+    """Download one published llama.cpp tag and install the best build for this computer.
+
+    This is the game's pin, not whatever GitHub lists as newest. ``update=True``
+    on :func:`ensure_llama_server` still means "newest"; Clef asks for the pin
+    because that is the release the game was tested with.
+    """
+    if not downloads_allowed():
+        raise RuntimeInstallError("This copy of the game does not download a replacement engine.")
+    wanted = (tag or "").strip()
+    if not wanted:
+        raise RuntimeInstallError("No llama.cpp release was named.")
+    pin_tag, pin_digests = load_engine_pin()
+    if wanted != pin_tag:
+        raise RuntimeInstallError(
+            f"This installer only downloads the pinned llama.cpp release ({pin_tag}), not {wanted}."
+        )
+    http = http or UrllibHttp()
+    llama_root = _llama_root(runtime_root)
+    with ui.status(f"Checking GitHub for llama.cpp {escape(wanted)}..."):
+        release = fetch_release(wanted, http=http, ui=ui)
+    broken = unusable_reasons(llama_root.parent)
+    candidates = [variant for variant in plan_variants(specs) if variant.name not in broken]
+    if not candidates:
+        raise RuntimeInstallError(unusable_message(broken))
+    for cand in candidates:
+        chosen = select_assets(release.get("assets") or [], cand, specs.os_name, specs.arch)
+        if not chosen:
+            continue
+        chosen = require_pinned_assets(chosen, pin_digests)
+        return _install(ui, http, release, chosen, cand, llama_root), cand
+    raise RuntimeInstallError(
+        f"llama.cpp {wanted} has no prebuilt engine for {specs.os_name} on {specs.arch}."
+    )
 
 
 def ensure_llama_server(

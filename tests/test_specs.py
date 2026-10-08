@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from gettowork import perf, specs
+from gettowork import catalog, perf, specs
 from gettowork.types import GPUInfo, SystemSpecs
 
 GIB = 1024**3
@@ -139,7 +139,12 @@ def machine(monkeypatch, tmp_path):
         monkeypatch.setattr(specs, "_SYSFS_DRM", drm)
         monkeypatch.setattr(specs, "_vulkan_loader_present", lambda os_name: vulkan)
         monkeypatch.setattr(specs, "_windows_registry_cpu_name", lambda: None)
+        # Empty unless this test replaces them after ``machine(...)`` returns.
+        # nvidia-smi is already faked as missing; without these stubs the NVML
+        # fallback would load the real driver on an NVIDIA PC.
+        monkeypatch.setattr(specs, "_nvml_device_records", lambda: [])
         monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
+        monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {})
         monkeypatch.setattr(specs, "_windows_cpu_flags", lambda arch: ["avx", "avx2"])
         monkeypatch.setattr(specs.perf, "measure_ram_bandwidth", lambda budget_s=0.3: bandwidth)
         # The real benchmark leaves a note behind (e.g. on a low-memory CI runner); the fake leaves none.
@@ -149,7 +154,9 @@ def machine(monkeypatch, tmp_path):
     return build
 
 
-def add_drm_card(tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes: int | None) -> None:
+def add_drm_card(
+    tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes: int | None, *, used_bytes: int | None = None,
+) -> None:
     """Create /sys/class/drm/cardN/device with the files the kernel puts there.
 
     In real sysfs `device` is a symlink to a folder named after the PCI slot
@@ -164,6 +171,8 @@ def add_drm_card(tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes:
     (device / "uevent").write_text(f"DRIVER={driver}\nPCI_CLASS=30000\nPCI_SLOT_NAME={slot}\n")
     if vram_bytes is not None:
         (device / "mem_info_vram_total").write_text(f"{vram_bytes}\n")
+    if used_bytes is not None:
+        (device / "mem_info_vram_used").write_text(f"{used_bytes}\n")
     (tmp_path / "drm" / f"card{index}-DP-1").mkdir()  # connectors must be ignored
 
 
@@ -203,12 +212,142 @@ def test_linux_with_nvidia_gpu(machine, tmp_path):
     assert "16 GB of RAM" in summary and "an NVIDIA GeForce RTX 3060" in summary and "12 GB of video memory" in summary
 
 
+def test_nvidia_smi_used_memory_is_kept_and_old_lines_still_parse():
+    used = specs._parse_nvidia_smi("NVIDIA GeForce RTX 5090, 32607, 6144, 617.14, 12.0\n")
+    assert used[0].vram_gb == pytest.approx(round(32607 * 1024 * 1024 / 2**30, 1))
+    assert used[0].vram_used_gb == pytest.approx(round(6144 * 1024 * 1024 / 2**30, 1))
+    assert used[0].driver_version == "617.14" and used[0].compute_capability == 12.0
+    assert used[0].vram_used_known is True
+    old = specs._parse_nvidia_smi("NVIDIA GeForce GTX 1080, 8192, 580.95.05, 6.1\n")
+    assert old[0].vram_used_gb == 0.0 and old[0].driver_version == "580.95.05"
+    assert old[0].compute_capability == 6.1
+    assert old[0].vram_used_known is False
+    clamped = specs._parse_nvidia_smi(
+        "NVIDIA GeForce RTX 3060, 12288, -4, 550.54, 8.6\n"
+        "NVIDIA GeForce RTX 3060 Ti, 8192, 99999, 550.54, 8.6\n"
+        "NVIDIA Broken, 0, 10, 550.54\n"
+    )
+    assert [gpu.name for gpu in clamped] == ["NVIDIA GeForce RTX 3060", "NVIDIA GeForce RTX 3060 Ti"]
+    assert clamped[0].vram_used_gb == 0.0 and clamped[0].vram_used_known is True
+    assert clamped[1].vram_used_gb == clamped[1].vram_gb
+
+
+def test_real_gpu_probes_refuse_to_run_under_pytest():
+    """The suite stubs the helpers. Calling the real ones must not load a driver."""
+    with pytest.raises(RuntimeError, match="real NVML"):
+        specs._UNPATCHED_NVML_RECORDS()
+    with pytest.raises(RuntimeError, match="real Windows registry"):
+        specs._UNPATCHED_REGISTRY_VRAM()
+    with pytest.raises(RuntimeError, match="real DXGI"):
+        specs._UNPATCHED_DXGI_VRAM()
+
+
 def test_multiple_nvidia_gpus_and_na_memory():
     out = "NVIDIA GeForce RTX 4090, 24564, 580.65\nNVIDIA GH200 480GB, [N/A], 580.65\ngarbage line\n"
     gpus = specs._parse_nvidia_smi(out)
-    assert [g.name for g in gpus] == ["NVIDIA GeForce RTX 4090", "NVIDIA GH200 480GB"]
-    assert gpus[0].vram_gb == 24.0 and gpus[1].vram_gb == 0.0
+    assert [g.name for g in gpus] == ["NVIDIA GeForce RTX 4090"]
+    assert gpus[0].vram_gb == 24.0 and gpus[0].vram_used_known is False
     assert gpus[0].driver_version == "580.65"
+
+
+def _assert_one_pool(found: SystemSpecs) -> None:
+    """The fit budget is the GPU's RAM share, not that share plus the RAM again."""
+    assert catalog._dedicated_vram_gb(found) == 0
+    placement, _need, budget, _off = catalog._place(found, 4.0)
+    assert placement == "unified"
+    assert budget == pytest.approx(perf.primary_gpu(found).vram_gb)
+    assert budget < found.ram_total_gb
+
+
+def test_rtx_spark_na_memory_is_kept_and_budgeted_as_one_pool(machine, tmp_path):
+    machine(
+        system="Windows", machine_name="ARM64", ram_gb=32, processor="ARMv8",
+        commands={"nvidia-smi": "NVIDIA RTX Spark, [N/A], [N/A], 580.95, 10.0\n", "powershell": "[]"},
+        cpuinfo=None,
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.arch == "arm64" and found.unified_memory is True
+    gpu = found.gpus[0]
+    assert gpu.vendor == "nvidia" and "Spark" in gpu.name
+    assert gpu.vram_gb == pytest.approx(22.4)  # 70% of 32 GB, not N/A and not 32+32
+    assert gpu.bandwidth_gbs == 301
+    assert gpu.driver_version == "580.95" and gpu.compute_capability == 10.0
+    assert perf.primary_gpu(found) is gpu
+    _assert_one_pool(found)
+
+
+def test_dgx_spark_whole_pool_reading_is_not_added_to_ram(machine, tmp_path):
+    # 131072 MiB is 128 GiB: nvidia-smi handed us the whole LPDDR pool.
+    machine(
+        system="Linux", machine_name="aarch64", ram_gb=128,
+        commands={"nvidia-smi": "NVIDIA GB10, 131072, 4096, 580.95, 10.0\n"},
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.arch == "arm64" and found.unified_memory is True
+    assert found.gpus[0].vram_gb == pytest.approx(102.4)  # 80% of 128, not 128 and not 128+128
+    assert found.gpus[0].bandwidth_gbs == 301
+    assert found.gpus[0].vram_used_gb == pytest.approx(102.4 * (4 / 128), rel=0.02)
+    _assert_one_pool(found)
+
+
+def test_gb300_matches_the_same_unified_budget(machine, tmp_path):
+    machine(
+        system="Linux", machine_name="aarch64", ram_gb=128,
+        commands={"nvidia-smi": "NVIDIA GB300, [N/A], 580.95\n"},
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is True
+    assert found.gpus[0].vram_gb == pytest.approx(102.4)
+    assert found.gpus[0].bandwidth_gbs == 301
+
+
+def test_strix_halo_carve_out_plus_shared_is_one_capped_pool(machine, monkeypatch, tmp_path):
+    machine(
+        system="Windows", machine_name="AMD64", ram_gb=128,
+        commands={"powershell": '[{"Name":"AMD Radeon 8060S Graphics","AdapterRAM":0}]'},
+        cpuinfo=None,
+    )
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {"AMD Radeon 8060S Graphics": (64.0, 32.0)})
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is True
+    assert found.arch == "x86_64"
+    # 64 + 32 = 96, under the 80% cap of 128 GB (102.4). Not 64, and not 64+128.
+    assert found.gpus[0].vram_gb == pytest.approx(96.0)
+    assert found.gpus[0].bandwidth_gbs == 256
+    _assert_one_pool(found)
+
+
+def test_lunar_lake_tiny_carve_out_uses_dedicated_plus_shared(machine, monkeypatch, tmp_path):
+    machine(
+        system="Windows", machine_name="AMD64", ram_gb=32,
+        commands={"powershell": '[{"Name":"Intel Arc 140V GPU","AdapterRAM":134217728}]'},
+        cpuinfo=None,
+    )
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {"Intel Arc 140V GPU": (0.125, 15.5)})
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is True
+    assert found.gpus[0].vram_gb == pytest.approx(15.6)  # 0.125 + 15.5, not 0.125 and not 32
+    assert found.gpus[0].bandwidth_gbs == 136
+    assert found.gpus[0].vram_gb < found.ram_total_gb
+    _assert_one_pool(found)
+
+
+def test_discrete_card_still_beats_a_shared_memory_chip(machine, tmp_path):
+    machine(
+        commands={
+            "nvidia-smi": "NVIDIA GeForce GTX 1650, 4096, 0, 550.54, 7.5\n",
+            "lspci": (
+                "00:02.0 VGA compatible controller: Intel Corporation Alder Lake-P GT2 [Iris Xe Graphics]\n"
+                "01:00.0 VGA compatible controller: NVIDIA Corporation TU117 [GeForce GTX 1650]\n"
+            ),
+        },
+        vulkan=True,
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is False
+    assert perf.primary_gpu(found).name.endswith("GTX 1650")
+    iris = next(gpu for gpu in found.gpus if gpu.vendor == "intel")
+    assert iris.vram_gb == 0.0
 
 
 def test_nvidia_smi_missing_but_card_present(machine, tmp_path):
@@ -228,8 +367,10 @@ def test_nvidia_smi_missing_and_no_nvidia_card_is_silent(machine, tmp_path):
     s = specs.detect_specs(tmp_path)
     assert all("nvidia" not in n.lower() for n in s.notes)
     assert [g.vendor for g in s.gpus] == ["intel"]
-    assert s.gpus[0].vram_gb == 0.0
-    assert any("integrated" in n.lower() for n in s.notes)
+    assert s.unified_memory is True
+    assert s.gpus[0].vram_gb == pytest.approx(11.2)  # a share of the 16 GB, not a 0 GB chip
+    assert s.gpus[0].vram_gb < s.ram_total_gb
+    assert any("share" in n.lower() for n in s.notes)
 
 
 def test_nvidia_smi_failing(machine, tmp_path):
@@ -351,8 +492,36 @@ def test_amd_gpu_vram_from_sysfs(machine, tmp_path):
     gpu = s.gpus[0]
     assert gpu.vendor == "amd" and gpu.name == "AMD Radeon RX 7900 XTX"
     assert gpu.vram_gb == 24.0
+    assert gpu.vram_used_known is False
     assert gpu.bandwidth_gbs == 960
     assert "an AMD Radeon RX 7900 XTX with 24 GB" in specs.friendly_summary(s)
+
+
+def test_linux_amd_reads_used_memory_and_clamps_it(machine, tmp_path):
+    add_drm_card(tmp_path, 0, "0000:03:00.0", "0x1002", 16 * GIB, used_bytes=int(3.5 * GIB))
+    add_drm_card(tmp_path, 1, "0000:04:00.0", "0x1002", 8 * GIB, used_bytes=20 * GIB)
+    machine(commands={
+        "lspci": (
+            "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 32 [Radeon RX 7800 XT]\n"
+            "04:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]\n"
+        ),
+    })
+    cards = {gpu.name: gpu for gpu in specs.detect_specs(tmp_path).gpus}
+    big = cards["AMD Radeon RX 7800 XT"]
+    small = cards["AMD Radeon RX 6600"]
+    assert big.vram_used_known is True and big.vram_used_gb == pytest.approx(3.5)
+    assert small.vram_used_known is True and small.vram_used_gb == small.vram_gb
+
+
+def test_registry_vram_accepts_any_four_digit_subkey():
+    found = specs._vram_from_adapter_subkeys([
+        ("0000", "AMD Radeon RX 6600", 8 * GIB),
+        ("0016", "AMD Radeon RX 7800 XT", 16 * GIB),
+        ("Properties", "Ignore Me", 32 * GIB),
+        ("000", "Too Short", 4 * GIB),
+        ("12345", "Too Long", 4 * GIB),
+    ])
+    assert found == {"AMD Radeon RX 6600": 8.0, "AMD Radeon RX 7800 XT": 16.0}
 
 
 def test_amd_gpu_vram_from_rocm_smi(machine, tmp_path):
@@ -368,12 +537,29 @@ def test_amd_gpu_vram_from_rocm_smi(machine, tmp_path):
 
 
 def test_amd_apu_carve_out_is_not_vram(machine, tmp_path):
+    """A 4 GB Phoenix carve-out is not a graphics card, and it is not the whole 16 GB either."""
     add_drm_card(tmp_path, 0, "0000:c4:00.0", "0x1002", 4 * GIB)
     machine(commands={"lspci": "c4:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Phoenix1 (rev c4)\n"})
     s = specs.detect_specs(tmp_path)
-    assert s.gpus[0].vram_gb == 0.0
     assert s.gpus[0].name == "AMD Phoenix1"
+    assert s.unified_memory is True
+    assert s.gpus[0].vram_gb == pytest.approx(11.2)  # 70% of 16 GB, not the 4 GB carve-out
+    assert s.gpus[0].vram_gb < s.ram_total_gb
+    assert perf.primary_gpu(s) is s.gpus[0]
+    _assert_one_pool(s)
+
+
+def test_steam_deck_uma_is_shared_memory_not_vram(machine, tmp_path):
+    """The Deck reports a VRAM carve-out. It is the same 16 GB as the CPU, not a graphics card."""
+    add_drm_card(tmp_path, 0, "0000:04:00.0", "0x1002", 8 * GIB)
+    machine(commands={
+        "lspci": "04:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Custom GPU 0405 (rev ae)\n",
+    })
+    s = specs.detect_specs(tmp_path)
+    assert s.gpus[0].name == "AMD Custom GPU 0405"
+    assert s.gpus[0].vram_gb == 0.0
     assert perf.primary_gpu(s) is None
+    assert any("integrated" in note.lower() or "share system RAM" in note for note in s.notes)
 
 
 def test_sysfs_only_when_lspci_missing(machine, tmp_path):
@@ -443,6 +629,18 @@ def test_big_macs_can_lend_more_memory_to_the_gpu(machine, tmp_path):
     assert s.gpus[0].bandwidth_gbs == 400
 
 
+def test_small_and_huge_macs_scale_the_gpu_share(machine, tmp_path):
+    machine(system="Darwin", machine_name="arm64", processor="arm", ram_gb=8, commands=apple_commands("Apple M1"))
+    small = specs.detect_specs(tmp_path)
+    assert small.gpus[0].vram_gb == pytest.approx(5.2)  # 65% of 8 GB, not all of it
+    assert small.gpus[0].bandwidth_gbs == 68
+    machine(system="Darwin", machine_name="arm64", processor="arm", ram_gb=128, commands=apple_commands("Apple M3 Ultra"))
+    huge = specs.detect_specs(tmp_path)
+    assert huge.gpus[0].vram_gb == pytest.approx(102.4)  # 80% of 128 GB
+    assert huge.gpus[0].bandwidth_gbs == 819
+    assert huge.gpus[0].vram_gb < huge.ram_total_gb
+
+
 def test_rosetta_is_seen_through(machine, tmp_path):
     machine(system="Darwin", machine_name="x86_64", processor="i386", commands=apple_commands(translated="1\n"))
     s = specs.detect_specs(tmp_path)
@@ -496,6 +694,32 @@ def test_windows_adapter_ram_is_capped_at_4gb(machine, tmp_path):
     s = specs.detect_specs(tmp_path)
     assert s.gpus[0].vram_gb == 4.0
     assert any("at least 4 GB" in n for n in s.notes)
+    assert any("registry and DXGI" in n for n in s.notes)
+
+
+def test_windows_dxgi_beats_the_4gb_adapter_ram_cap(machine, monkeypatch, tmp_path):
+    machine(system="Windows", machine_name="AMD64", processor="Intel64 Family 6 Model 154 Stepping 3, GenuineIntel",
+            commands={"powershell": WIN_ADAPTERS}, cpuinfo=None)
+    monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {"AMD Radeon RX 6700 XT": 12.0})
+    s = specs.detect_specs(tmp_path)
+    assert [(g.name, g.vram_gb) for g in s.gpus] == [("AMD Radeon RX 6700 XT", 12.0)]
+    assert not any("at least 4 GB" in n for n in s.notes)
+
+
+def test_missing_nvidia_smi_reads_vram_from_nvml(monkeypatch):
+    monkeypatch.setattr(specs, "_run", lambda args, timeout=5: (None, "missing"))
+    monkeypatch.setattr(
+        specs, "_nvml_device_records",
+        lambda: [("NVIDIA GeForce RTX 5090", 32 * 1024**3, "570.86")],
+    )
+    notes: list[str] = []
+    gpus, status = specs._nvidia_gpus(notes)
+    assert status == "ok"
+    assert [(g.name, g.vendor, g.vram_gb, g.driver_version) for g in gpus] == [
+        ("NVIDIA GeForce RTX 5090", "nvidia", 32.0, "570.86"),
+    ]
+    assert any("NVML" in note for note in notes)
 
 
 def test_windows_nvidia_via_nvidia_smi_and_wmic_fallback(machine, monkeypatch, tmp_path):

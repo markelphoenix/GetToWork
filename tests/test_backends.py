@@ -1019,7 +1019,7 @@ class FakeLlamaFactory:
 @pytest.fixture
 def gguf(tmp_path):
     path = tmp_path / "Qwen3-4B-Q4_K_M.gguf"
-    path.write_bytes(b"GGUF")
+    path.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     return path
 
 
@@ -1083,7 +1083,7 @@ def test_llamacpp_missing_package(gguf, monkeypatch):
 
 def test_llamacpp_downloads_when_no_path(tmp_path):
     target = tmp_path / "model.gguf"
-    target.write_bytes(b"GGUF")
+    target.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     calls = []
 
     def downloader(entry, ui, **kwargs):
@@ -1100,7 +1100,7 @@ def test_llamacpp_downloads_when_no_path(tmp_path):
 
 def test_llamacpp_prepare_takes_entry_argument(tmp_path):
     target = tmp_path / "m.gguf"
-    target.write_bytes(b"GGUF")
+    target.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     seen = []
     backend = LlamaCppBackend(llama_factory=FakeLlamaFactory(),
                               downloader=lambda entry, ui, quant: seen.append(quant) or target)
@@ -1172,7 +1172,7 @@ def test_llamacpp_empty_answer_retries_with_no_think_for_qwen3(gguf):
 
 def test_llamacpp_empty_answer_retry_without_no_think_for_other_models(tmp_path):
     path = tmp_path / "phi.gguf"
-    path.write_bytes(b"GGUF")
+    path.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     factory = FakeLlamaFactory(replies=[completion(""), completion("Hello.")])
     backend = LlamaCppBackend(path, entry=PHI, llama_factory=factory)
     backend.prepare(RecordingUI())
@@ -1818,7 +1818,7 @@ def test_ollama_imports_an_already_downloaded_gguf_instead_of_pulling(tmp_path):
 
 def test_ollama_import_skips_the_upload_when_it_has_the_file(tmp_path):
     gguf = tmp_path / "m.gguf"
-    gguf.write_bytes(b"GGUF")
+    gguf.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     fake = FakeOllamaWithBlobs(have_blob=True)
     OllamaBackend("gettowork-m:q4", http=fake, gguf_path=gguf).prepare(RecordingUI())
     assert fake.uploaded == b""
@@ -1827,7 +1827,7 @@ def test_ollama_import_skips_the_upload_when_it_has_the_file(tmp_path):
 
 def test_ollama_import_failure_is_a_friendly_error(tmp_path):
     gguf = tmp_path / "m.gguf"
-    gguf.write_bytes(b"GGUF")
+    gguf.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     fake = FakeOllamaWithBlobs(create_status=400)
     with pytest.raises(OllamaError, match="couldn't take the model file"):
         OllamaBackend("gettowork-m:q4", http=fake, gguf_path=gguf).prepare(RecordingUI())

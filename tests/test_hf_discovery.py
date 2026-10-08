@@ -235,6 +235,10 @@ def live_repos(result: DiscoveryResult) -> set[str]:
         ("model.i1-Q4_K_M.gguf", "Q4_K_M"),
         ("BF16/x-BF16-00001-of-00002.gguf", "BF16"),
         ("sub\\dir\\Model-Q6_K.gguf", "Q6_K"),
+        ("model-IQ2-mix.gguf", "IQ2-MIX"),
+        ("model-IQ3_mix.gguf", "IQ3-MIX"),
+        ("lora/name-LoRA-r320-F16.gguf", None),
+        ("Name-LoRA-F16.gguf", None),
         ("mmproj-F16.gguf", None),
         ("mmproj-Qwen3-4B-Q8_0.gguf", None),
         ("old-arm-repack-Q4_0_4_4.gguf", None),
@@ -413,6 +417,21 @@ def test_entry_from_hub_unusable_repos():
     assert entry_from_hub(hub_model("a/Vision-Proj-GGUF"), [("mmproj-model-f16.gguf", 600_000_000)]) is None
     assert entry_from_hub(hub_model("a/Empty-GGUF"), []) is None
     assert entry_from_hub(hub_model("a/Unsized-GGUF"), [("model-Q4_K_M.gguf", 0)]) is None
+    assert entry_from_hub(hub_model("a/Adapter-GGUF"), [("lora/name-LoRA-r320-F16.gguf", 4_670_000_000)]) is None
+
+
+def test_iq_mix_is_kept_and_a_lora_beside_it_is_not():
+    info = hub_model("unsloth/Qwen3.8-27B-GGUF", total=27_320_697_856, arch="qwen35",
+                     base="Qwen/Qwen3.8-27B", pipeline=None)
+    entry = entry_from_hub(info, [
+        ("Qwen3.8-27B-IQ2-mix.gguf", 7_898_369_152),
+        ("lora/Qwen3.8-27B-LoRA-r320-F16.gguf", 4_670_000_000),
+        ("mmproj-Qwen3.8-27B-BF16.gguf", 900_000_000),
+    ])
+    assert entry is not None
+    options = dict(entry.quant_options)
+    assert "IQ2-MIX" in options and "F16" not in options
+    assert entry.architecture == "qwen35"
 
 
 def test_entry_from_hub_non_default_quants_and_gated():
@@ -522,10 +541,11 @@ def test_live_discovery_filters_dedupes_and_caches(tmp_path):
     assert len([m for m in result.models if m.hf_repo.lower() == "unsloth/qwen3-4b-gguf"]) == 1
 
     # Efficient: one search per trusted publisher + one global, then lookups only for candidates.
-    assert len(api.list_calls) == len(catalog.TRUSTED_PUBLISHERS) + 1
+    assert len(api.list_calls) == 3 * (len(catalog.TRUSTED_PUBLISHERS) + 1)
     assert {c.get("author") for c in api.list_calls} == set(catalog.TRUSTED_PUBLISHERS) | {None}
     for call in api.list_calls:
-        assert call["filter"] == "gguf" and call["pipeline_tag"] == "text-generation" and call["sort"] == "downloads"
+        assert call["filter"] == "gguf" and call["sort"] == "downloads"
+        assert call.get("pipeline_tag") in ("text-generation", "image-text-to-text", None)
         assert {"gguf", "cardData", "tags", "downloads", "likes", "lastModified", "gated"} <= set(call["expand"])
         assert "full" not in call and "cardData" not in call
     assert sorted(api.tree_calls) == sorted(live_repos(result))
@@ -535,6 +555,41 @@ def test_live_discovery_filters_dedupes_and_caches(tmp_path):
     assert data["schema_version"] == CACHE_SCHEMA_VERSION
     assert data["fetched_at"] == clock.now
     assert {m["hf_repo"] for m in data["models"]} == live_repos(result)  # seeds aren't cached
+
+
+def test_image_text_and_untagged_gguf_repos_are_searched(tmp_path):
+    models = [
+        hub_model("unsloth/Qwen3.8-27B-GGUF", downloads=6_500_000, total=27_320_697_856, arch="qwen35",
+                  context=262144, base="Qwen/Qwen3.8-27B", pipeline=None),
+        hub_model("ggml-org/Qwen3.8-27B-GGUF", downloads=800_000, total=27_320_697_856, arch="qwen35",
+                  base="Qwen/Qwen3.8-27B", pipeline="image-text-to-text"),
+        hub_model("someone/Qwen3.8-27B-abliterated-GGUF", downloads=2_000_000, total=27_320_697_856,
+                  arch="qwen35", pipeline="image-text-to-text", tags=("abliterated",)),
+        hub_model("unsloth/Some-VL-7B-Instruct-GGUF", downloads=3_000_000, total=7_000_000_000,
+                  pipeline="image-text-to-text"),
+        hub_model("Qwen/Speech-Only-GGUF", downloads=4_000_000, total=2_000_000_000,
+                  pipeline="automatic-speech-recognition", conversational=False),
+    ]
+    trees = {
+        "unsloth/Qwen3.8-27B-GGUF": [
+            rfile("Qwen3.8-27B-UD-Q4_K_M.gguf", 16_464_440_224),
+            rfile("mmproj-Qwen3.8-27B-BF16.gguf", 900_000_000),
+            rfile("lora/Qwen3.8-27B-LoRA-r320-F16.gguf", 4_670_000_000),
+        ],
+    }
+    api = FakeHubApi(models, trees)
+    result = discover_models(api=api, cache_path=tmp_path / "c.json", clock=FakeClock())
+    live = by_repo(result)
+    found = live["unsloth/Qwen3.8-27B-GGUF"]
+    assert found.architecture == "qwen35"
+    assert "mmproj" not in " ".join(found.gguf_files).lower()
+    assert "lora" not in " ".join(found.gguf_files).lower()
+    assert "ggml-org/Qwen3.8-27B-GGUF" not in live  # same base model; the curated unsloth repo wins
+    assert "someone/Qwen3.8-27B-abliterated-GGUF" not in live
+    assert "unsloth/Some-VL-7B-Instruct-GGUF" not in live
+    assert "Qwen/Speech-Only-GGUF" not in live
+    tags = [call.get("pipeline_tag") for call in api.list_calls]
+    assert "text-generation" in tags and "image-text-to-text" in tags and None in tags
 
 
 def test_allow_all_licenses_includes_other_licenses(tmp_path):
@@ -922,8 +977,13 @@ def test_end_to_end_with_the_real_hfapi_class(tmp_path, monkeypatch):
     assert dict(entry.quant_options)["BF16"] == pytest.approx(8.05, abs=0.01)
     assert "unsloth/Qwen3-8B-abliterated-GGUF" not in by_repo(result)
     searches = [params for path, params in requests if path.endswith("/api/models")]
-    assert len(searches) == len(catalog.TRUSTED_PUBLISHERS) + 1
-    assert all(p["filter"] == ["gguf"] and p["pipeline_tag"] == "text-generation" for p in searches)
+    assert len(searches) == 3 * (len(catalog.TRUSTED_PUBLISHERS) + 1)
+    assert all(p["filter"] == ["gguf"] for p in searches)
+    tags = [p.get("pipeline_tag") for p in searches]
+    publishers = len(catalog.TRUSTED_PUBLISHERS) + 1
+    assert tags.count("text-generation") == publishers
+    assert tags.count("image-text-to-text") == publishers
+    assert sum(tag is None for tag in tags) == publishers
     assert sum("/tree/" in path for path, _ in requests) == 1
 
 

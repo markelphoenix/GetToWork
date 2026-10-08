@@ -477,7 +477,12 @@ class Game:
         except _QuitGame:
             return self._finish_quit(narrate=False)
         if self.jev is not None:
-            self._teach_once("jev", "Jev, your referee today", jevlib.TEACH_JEV)
+            if self._referee_who == "Jev":
+                self._teach_once("jev", "Jev, your referee today", jevlib.TEACH_JEV)
+            else:
+                from .system_one import TEACH_CLEF
+                who = self._referee_who
+                self._teach_once("clef-referee", f"{who}, your referee today", TEACH_CLEF)
         self.ui.pause("Press Enter when you're ready to set off")
         challenge = COMMUTE_CHALLENGE  # round 1: how will you get to work?
 
@@ -742,7 +747,7 @@ class Game:
             storyteller = self.llm.model_label
         except Exception:  # a label is nice to have, never worth crashing over
             storyteller = getattr(self.llm, "name", "your local model")
-        referee = f"Jev ({self.jev.model})" if self.jev is not None else self._local_referee_name
+        referee = self._referee_label
         ui.info(f"Storyteller: {escape(str(storyteller))}  |  Referee: {escape(referee)}")
 
     @property
@@ -753,6 +758,26 @@ class Game:
     @property
     def _local_referee_name(self) -> str:
         return "the pretend model (a simple scripted rule)" if self._pretend else "your local model"
+
+    @property
+    def _referee_label(self) -> str:
+        """Who the status line names. A local Clef sets ``referee_name`` so it isn't called Jev."""
+        if self.jev is None:
+            return self._local_referee_name
+        custom = getattr(self.jev, "referee_name", None)
+        if isinstance(custom, str) and custom.strip():
+            return custom.strip()
+        return f"Jev ({self.jev.model})"
+
+    @property
+    def _referee_who(self) -> str:
+        """The name at the start of the verdict sentence ("Jev" or "Clef")."""
+        if self.jev is None:
+            return "Jev"
+        custom = getattr(self.jev, "referee_name", None)
+        if isinstance(custom, str) and custom.strip():
+            return custom.split("(")[0].strip() or "Jev"
+        return "Jev"
 
     def _opening(self) -> None:
         """The intro story. (No obstacle yet: round 1 asks how the player will get to work.)"""
@@ -819,19 +844,21 @@ class Game:
     def _jev_explanation(self, record: RoundRecord, verdict: JevVerdict) -> str:
         """Jev's verdict in words. The game writes the sentence, but the labels in it come from Jev's
         reply, so it goes through the family-friendly filter too (a built-in line if it doesn't pass)."""
-        text = jevlib.explain_verdict(verdict)
+        who = self._referee_who
+        text = jevlib.explain_verdict(verdict, who=who)
         checked = safety.check_text(text)
         if checked.ok:
             return safety.soften(text)
-        self._safety_note(f"Round {record.number} referee: Jev's answer didn't pass the family-friendly filter "
+        self._safety_note(f"Round {record.number} referee: {who}'s answer didn't pass the family-friendly filter "
                           f"({checked.label}), so a built-in explanation was used.", record)
         return self._built_in_explanation(verdict.made_progress, record.number)
 
     def _ask_jev(self, record: RoundRecord) -> Optional[JevVerdict]:
         """Ask Jev; on any failure explain, keep the exchange, and return None (local fallback)."""
         assert self.jev is not None
+        who = self._referee_who
         try:
-            with self.ui.status(SPINNERS["jev"]):
+            with self.ui.status(f"Asking {who}…"):
                 return jevlib.judge_round(
                     self.jev,
                     intro=self._summary.intro,
@@ -848,11 +875,11 @@ class Game:
             message, suggest_keep = exc.message, not (exc.is_auth_error or exc.kind in ("billing", "config"))
         except Exception as exc:  # Jev is optional: never let a surprise end the player's round
             message, suggest_keep = f"Something unexpected went wrong ({type(exc).__name__}: {exc}).", True
-        self.ui.error(f"Jev couldn't referee this round: {plain(message)}")
+        self.ui.error(f"{who} couldn't referee this round: {plain(message)}")
         self.ui.info(f"No problem - {self._local_referee_name} will referee this round instead, so you don't "
                      "lose your turn.")
         try:
-            keep = self.ui.confirm("Keep asking Jev in the next rounds?", default=suggest_keep)
+            keep = self.ui.confirm(f"Keep asking {who} in the next rounds?", default=suggest_keep)
         except UserChoseQuit:
             # A typed "quit" here ends the game the way it does at the plan prompt:
             # the quit ending and the behind-the-scenes review, as the help promises.
@@ -967,7 +994,7 @@ class Game:
             challenge=record.challenge,
             plan=record.player_plan,
             made_progress=record.made_progress,
-            judge_note=self._judge_note(record),
+            judge_note=self._judge_note(record, self._referee_who),
             progress=self._summary.progress,
             target=self.target,
             history=earlier_rounds,
@@ -1084,7 +1111,7 @@ class Game:
 
     def _show_verdict(self, record: RoundRecord, backup_used: bool) -> None:
         if record.jev is not None:
-            self.ui.console.print(_jev_verdict_panel(record.jev))
+            self.ui.console.print(_jev_verdict_panel(record.jev, who=self._referee_who))
             # One new answer type per round (Noul, then Choice, then Score), so the
             # first verdict isn't followed by three long lessons in a row.
             for key, title, body in _JEV_LESSONS:
@@ -1157,12 +1184,12 @@ class Game:
         return f"Round {record.number}: {facing}, the player tried {prompts.quote_plan(record.player_plan, 90)} - {result}."
 
     @staticmethod
-    def _judge_note(record: RoundRecord) -> str:
+    def _judge_note(record: RoundRecord, who: str = "Jev") -> str:
         """What the narrator is told about the verdict, beyond yes/no.
 
-        Jev's Choice label is only mentioned when it agrees with the Noul (which
+        The Choice label is only mentioned when it agrees with the Noul (which
         decides): a small model shown "made progress: true" next to "stalled"
-        may narrate the wrong outcome.
+        may narrate the wrong outcome. ``who`` is "Jev" or "Clef".
         """
         verdict = record.jev
         if verdict is None:
@@ -1170,9 +1197,9 @@ class Game:
         agrees, direction = _OUTCOME_FLAVOUR.get(verdict.outcome, (None, ""))
         creativity = f"rated its creativity {verdict.creativity:.1f} out of 4"
         if agrees == record.made_progress:
-            note = f'Jev filed the outcome under "{_family_label(verdict.outcome)}" and {creativity}.'
+            note = f'{who} filed the outcome under "{_family_label(verdict.outcome)}" and {creativity}.'
             return note + (" " + direction if direction else "")
-        return f"Jev {creativity}."
+        return f"{who} {creativity}."
 
 
 # ---------------------------------------------------------------------------
@@ -1200,8 +1227,8 @@ def _nearest_level(verdict: JevVerdict) -> str:
     return nearest.split(":")[0].strip() if isinstance(nearest, str) else ""
 
 
-def _jev_verdict_panel(verdict: JevVerdict) -> Panel:
-    """Jev's three typed answers, drawn as bars. All Jev text goes in as plain ``Text``."""
+def _jev_verdict_panel(verdict: JevVerdict, *, who: str = "Jev") -> Panel:
+    """The referee's three typed answers, drawn as bars. All of that text goes in as plain ``Text``."""
     made = verdict.made_progress
     tone = "green" if made else "yellow"
     grid = Table.grid(padding=(0, 2))
@@ -1249,4 +1276,4 @@ def _jev_verdict_panel(verdict: JevVerdict) -> Panel:
                     f"(\"{outcome}\") is a separate question, answered on its own, so now and then the two "
                     "disagree - that's why the game decides with one number and only shows the others.")
         parts += [Text(), Text(note, style="italic")]
-    return Panel(Group(*parts), title="Jev's verdict", border_style=tone, padding=(1, 2))
+    return Panel(Group(*parts), title=f"{who}'s verdict", border_style=tone, padding=(1, 2))

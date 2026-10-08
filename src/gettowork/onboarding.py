@@ -22,11 +22,25 @@ from __future__ import annotations
 import os
 import platform
 import urllib.parse
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from rich.markup import escape
 
 from .config import Settings, command_name
+from . import catalog
+from .system_one import (
+    LocalClefUnavailable,
+    TEACH_CLEF,
+    bundled_engine_update_message,
+    clef_engine_status,
+    consent_lines,
+    engine_block_message,
+    engine_upgrade_question,
+    install_pinned_clef_engine,
+    clef_server_installed,
+    launch_local_clef,
+    resolve_engine_tag,
+)
 from .jev import (
     JEV_API_KEY_ENV,
     JEV_BASE_URL_ENV,
@@ -62,6 +76,11 @@ def run_jev_onboarding(
     local_model_elsewhere: Optional[str] = None,
     ask_again: bool = False,
     remember_no: bool = True,
+    specs: Any = None,
+    story_fit: Any = None,
+    engine_tag: Optional[str] = None,
+    clef_launcher: Any = None,
+    engine_upgrader: Any = None,
 ) -> Optional[JevClient]:
     """Ask whether to enable Jev and, if so, get a working API key.
 
@@ -87,11 +106,27 @@ def run_jev_onboarding(
         remember_no: save a "no" (``jev_enabled = False``). False for a
             pretend-model trial game: declining Jev there must not stop the
             first real game from offering it.
+        specs: When the story model was set up on a real machine, the System
+            One menu (Clef, Jev, or the local story model) is offered. ``None``
+            keeps the original "Enable Jev?" question, including pretend-model
+            games and callers that don't pass hardware.
+        story_fit: The story model already loaded, so Clef is matched against
+            the memory and disk that are still free.
+        engine_tag: llama.cpp tag that would run Clef. ``None`` looks it up.
+            Older than b11371, or unknown, and Clef is shown but not downloaded.
+        clef_launcher: ``callable(entry, fit)`` that starts a local referee.
+            Tests inject one. The real launcher is used when this is omitted.
+        engine_upgrader: ``callable() -> tag`` that installs a llama.cpp new
+            enough for Clef. Tests inject one. The real installer downloads
+            the pinned release.
     """
     env = os.environ if env is None else env
     factory = client_factory or _default_factory(env)
-    flow = _JevOnboarding(ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
-                          remember_no=remember_no)
+    flow = _JevOnboarding(
+        ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
+        remember_no=remember_no, specs=specs, story_fit=story_fit, engine_tag=engine_tag,
+        clef_launcher=clef_launcher, engine_upgrader=engine_upgrader,
+    )
     try:
         return flow.run()
     except WindowClosed:
@@ -178,10 +213,17 @@ class _JevOnboarding:
 
     def __init__(self, ui: UI, settings: Settings, env: Mapping[str, str], factory: ClientFactory,
                  local_model_elsewhere: Optional[str] = None, *, ask_again: bool = False,
-                 remember_no: bool = True) -> None:
+                 remember_no: bool = True, specs: Any = None, story_fit: Any = None,
+                 engine_tag: Optional[str] = None, clef_launcher: Any = None,
+                 engine_upgrader: Any = None) -> None:
         self.ui = ui
         self.ask_again = ask_again
         self.remember_no = remember_no
+        self.specs = specs
+        self.story_fit = story_fit
+        self.engine_tag = engine_tag
+        self.clef_launcher = clef_launcher
+        self.engine_upgrader = engine_upgrader
         self._pasted: Optional[str] = None  # a key pasted straight into a menu, waiting to be checked
         self.settings = settings
         self.env = env
@@ -198,6 +240,8 @@ class _JevOnboarding:
     # -- the overall flow ---------------------------------------------------------
 
     def run(self) -> Optional[JevClient]:
+        if self._offer_system_one():
+            return self._system_one_menu()
         if self.settings.jev_enabled is False and not self.ask_again and not self._key_in_env():
             # A returning player who chose the local referee: straight into the game, with
             # one line on how to change their mind (asked again only with --jev).
@@ -590,10 +634,205 @@ class _JevOnboarding:
                 self._enable(client, key, source, verified=True)
                 return client
 
+    # -- System One: Clef, Jev, or the local story model -----------------------------------------------
+
+    def _offer_system_one(self) -> bool:
+        """The new menu, only when hardware was passed in and the choice isn't already settled."""
+        if self.specs is None:
+            return False
+        if self.settings.jev_enabled is True:
+            return False
+        if self._key_in_env() and not self.ask_again:
+            return False
+        extra = self.settings.extra if isinstance(self.settings.extra, dict) else {}
+        if (self.settings.jev_enabled is False and not self.ask_again and extra.get("system_one") == "local"
+                and not self._key_in_env()):
+            return False
+        return True
+
+    def _engine_tag(self) -> Optional[str]:
+        if self.engine_tag is not None:
+            return self.engine_tag
+        return resolve_engine_tag()
+
+    def _reserved_specs(self) -> Any:
+        return catalog.reserve_for_loaded_model(self.specs, self.story_fit)
+
+    def _system_one_menu(self) -> Any:
+        """Pick a referee. Enter stays on the local story model, so it never downloads Clef."""
+        ui = self.ui
+        tag = self._engine_tag()
+        status = clef_engine_status(tag)
+        reserved = self._reserved_specs()
+        ranked = catalog.rank_system_one(self.specs, self.story_fit)
+        recommended = next((fit for fit in ranked if "recommended" in fit.badges), None)
+        ui.heading("System One: who should referee?")
+        ui.say(
+            "The story is already running on your local model. This choice is only the referee: "
+            "who decides whether a plan made progress."
+        )
+        if recommended is not None:
+            ui.say(
+                f"Best local referee that fits: [bold]{escape(recommended.model.display_name)}[/bold] "
+                f"({escape(recommended.quant or '')})."
+            )
+        else:
+            ui.say("Neither Clef model looks like it fits in the memory you have left.")
+        if status != "ok":
+            ui.warn(escape(engine_block_message(tag, status)))
+        extra = self.settings.extra if isinstance(self.settings.extra, dict) else {}
+        remembered = extra.get("system_one")
+        # Enter must not download Clef when this engine can't load it. When it
+        # can, and they already chose Clef, Enter selects that again (the
+        # download still asks "Shall I go ahead?").
+        default = remembered if status == "ok" and remembered in ("clef", "clef-flash") else "no"
+        while True:
+            choice = ui.choose(
+                "Who should referee?",
+                self._system_one_options(reserved, status, recommended),
+                default=default,
+                aliases={
+                    **_HELP_ALIASES,
+                    **{word: "jev" for word in ("y", "yes", "yeah", "yep", "sure")},
+                },
+            )
+            if choice == "learn":
+                ui.teach("Clef, a local decision model", TEACH_CLEF)
+                continue
+            if choice == "no":
+                return self._go_local()
+            if choice == "jev":
+                ui.say(escape(privacy_notice(self.env)))
+                return self._key_menu()
+            client = self._choose_clef(choice, reserved, status)
+            if client is not None:
+                return client
+            # A declined download, or an engine that was just upgraded: ask again
+            # with the tag that is installed now.
+            status = clef_engine_status(self._engine_tag())
+
+    def _system_one_options(self, reserved: Any, status: str, recommended: Any) -> list[tuple[str, str]]:
+        options: list[tuple[str, str]] = []
+        for model in catalog.SYSTEM_ONE_CATALOG:
+            fit = catalog.evaluate_fit(reserved, model)
+            mark = " (recommended)" if recommended is not None and recommended.model.key == model.key else ""
+            if status != "ok":
+                note = "shown, but this engine can't load it, so it won't be downloaded"
+            elif fit.verdict == "no":
+                note = "doesn't look like it fits — you can still look, the download asks again"
+            else:
+                size = f"{fit.download_gb:.1f}" if fit.download_gb else "?"
+                seconds = catalog.format_decision_seconds(catalog.decision_seconds(
+                    reserved,
+                    placement=fit.placement,
+                    gpu_share=fit.gpu_share or 0.0,
+                    weights_gb=float(fit.download_gb or 0.0),
+                ))
+                note = f"{fit.verdict} fit, about {size} GB, {fit.quant}, {seconds}"
+            options.append((
+                model.key,
+                f"{model.display_name}{mark}: local decision model, Apache-2.0 — {note}",
+            ))
+        options.append(("jev", "Jev, TypeSafe AI's referee (needs an API key; your plan leaves this computer)"))
+        options.append(("no", f"No extra referee — the story model decides ({self._local_note})"))
+        options.append(("learn", "What's Clef? Tell me more first"))
+        return options
+
+    def _choose_clef(self, key: str, reserved: Any, status: str) -> Any:
+        ui = self.ui
+        model = catalog.get_system_one(key)
+        if model is None:
+            ui.warn("That referee isn't in the list.")
+            return None
+        fit = catalog.evaluate_fit(reserved, model)
+        ui.say(escape(fit.reason))
+        for line in consent_lines(model):
+            ui.say(escape(line))
+        if status != "ok":
+            ui.warn(escape(engine_block_message(self._engine_tag(), status)))
+            upgraded = self._offer_engine_upgrade(status)
+            if upgraded is None:
+                ui.info("Back to the referee menu — nothing was downloaded.")
+                return None
+            status = "ok"
+        if fit.verdict == "no":
+            if not ui.confirm("This model doesn't look like it will fit. Download anyway?", default=False):
+                ui.info("Okay — nothing was downloaded.")
+                return None
+        elif not ui.confirm("Shall I go ahead?", default=True):
+            ui.info("Okay — nothing was downloaded.")
+            return None
+        if self.clef_launcher is None and not self._clef_engine_installed():
+            ui.say(
+                "llama.cpp that can load Clef is not installed yet. "
+                "Downloading the tested release from GitHub before the model."
+            )
+            if self._install_clef_engine() is None:
+                ui.warn("The engine that can load Clef is still not installed. The model was not downloaded.")
+                return None
+        try:
+            client = launch_local_clef(
+                ui, model, fit, engine_tag=self._engine_tag(), launcher=self.clef_launcher,
+                specs=reserved,
+            )
+        except LocalClefUnavailable as exc:
+            ui.warn(escape(str(exc)))
+            ui.info("Back to the referee menu — Clef is not running.")
+            return None
+        if self.remember_no:
+            self.settings.jev_enabled = False
+            self._remember_system_one(key)
+            self._save_settings()
+        ui.success(f"{escape(model.display_name)} will referee on this computer. The story model still tells the story.")
+        return client
+
+    def _offer_engine_upgrade(self, status: str) -> Optional[str]:
+        """Install a newer engine, or explain why we can't. None means stay on the menu."""
+        if status == "ok":
+            return self._engine_tag()
+        question = engine_upgrade_question(self._engine_tag())
+        if question is None:
+            self.ui.info(escape(bundled_engine_update_message(self._engine_tag())))
+            return None
+        if not self.ui.confirm(question, default=False):
+            self.ui.info("Okay — the engine stays as it is, and Clef was not downloaded.")
+            return None
+        tag = self._install_clef_engine()
+        if clef_engine_status(tag) != "ok":
+            self.ui.warn("That engine still can't load Clef. Nothing was downloaded.")
+            return None
+        self.engine_tag = tag
+        self.ui.success(
+            f"llama.cpp {escape(str(tag))} can load Clef. The model download is the next question."
+        )
+        return tag
+
+    def _install_clef_engine(self) -> Optional[str]:
+        if self.engine_upgrader is not None:
+            tag = self.engine_upgrader()
+        else:
+            tag = install_pinned_clef_engine(self.ui, self.specs)
+        if isinstance(tag, str) and tag.strip():
+            self.engine_tag = tag.strip()
+            return tag.strip()
+        return None
+
+    def _clef_engine_installed(self) -> bool:
+        if self.engine_upgrader is not None:
+            return clef_engine_status(self._engine_tag()) == "ok"
+        return clef_server_installed()
+
+    def _remember_system_one(self, choice: str) -> None:
+        extra = dict(self.settings.extra) if isinstance(self.settings.extra, dict) else {}
+        extra["system_one"] = choice
+        self.settings.extra = extra
+
     # -- finishing up -----------------------------------------------------------------------------------
 
     def _enable(self, client: JevClient, key: str, source: str, *, verified: bool) -> None:
         self.settings.jev_enabled = True
+        if self.specs is not None:
+            self._remember_system_one("jev")
         if source == "env":
             self.ui.info(f"Using the key from your {JEV_API_KEY_ENV} environment variable (nothing saved to disk).")
         elif source == "pasted" and verified:
@@ -655,6 +894,8 @@ class _JevOnboarding:
     def _go_local(self) -> None:
         if self.remember_no:
             self.settings.jev_enabled = False
+            if self.specs is not None:
+                self._remember_system_one("local")
             self._save_settings()
             self.ui.info("Playing with your local model only - it will referee your plans. Have fun!")
         else:  # a pretend-model trial: nothing remembered, so a real game asks again

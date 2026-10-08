@@ -153,9 +153,14 @@ memory. There are three kinds that matter:
   second) but limited: 4 to 24 GB on typical cards.
 - **RAM** is your computer's main memory. There's usually more of it, but it's
   much *slower* (tens of GB per second).
-- **Unified memory** is how Apple Silicon Macs work: the CPU and GPU share one
-  pool of fast memory. macOS lets the GPU use most, not all, of it; the game
-  assumes about 70% (75% on Macs with 64 GB or more).
+- **Unified memory** is one pool shared by the CPU and the GPU: Apple Silicon,
+  NVIDIA RTX Spark / DGX Spark / GB300, and AMD Ryzen AI Max (Strix Halo) or
+  an Intel Arc iGPU with a BIOS carve-out. The game does not add "VRAM" on
+  top of RAM. On a Mac the GPU share follows a recommendedMaxWorkingSetSize-style
+  limit: about 65% on an 8 GB Mac, 70% up to 48 GB, 75% from 64 GB, and about
+  80% from 128 GB. The same share is the budget on the other unified chips
+  (a DXGI dedicated-plus-shared total is used when Windows reports both, and
+  it is still capped at that share).
 
 If a model doesn't fit in VRAM, llama.cpp can keep some layers on the graphics
 card and the rest in RAM: a **partial offload**. It works, but every token has
@@ -167,7 +172,7 @@ top of [`catalog.py`](../src/gettowork/catalog.py)):
 | Where it runs | Memory budget |
 |---------------|---------------|
 | `gpu` | Your video memory (cards of the same brand with 4 GB+ are added up) minus 0.8 GB, kept free for your desktop and other apps. |
-| `unified` | The share of a Mac's memory the GPU may use (see above). |
+| `unified` | The share of one memory pool the GPU may use (see above), not VRAM plus RAM. |
 | `partial` | Video memory minus 0.8 GB, plus RAM minus 2.5 GB. Chosen if the graphics card holds at least 40% of the model - or at least 15% when running it on the processor alone would fill your RAM, or any share when it only fits across both. |
 | `cpu` | Your RAM minus 2.5 GB, kept free for the operating system and other apps. |
 
@@ -353,11 +358,14 @@ Now you know the ingredients, here's the whole recipe, step by step.
 ### Step 1: find candidates on Hugging Face
 
 [`hf_discovery.py`](../src/gettowork/hf_discovery.py) asks the Hugging Face
-Hub's free public API for the most-downloaded GGUF text-generation models:
-one search for each trusted publisher (unsloth, bartowski, ggml-org,
-lmstudio-community, Qwen, microsoft, mistralai, HuggingFaceTB, ibm-granite,
-NousResearch) plus one search across everybody. Each result arrives with its
-GGUF header data, tags, license, download count and "gated" flag.
+Hub's free public API for the most-downloaded GGUF models. It searches
+text-generation, image-text-to-text, and repos with no pipeline tag, because
+several Qwen3.8 GGUF repos use one of the last two. Vision projector files
+(`mmproj`) are skipped. One search of each kind runs for each trusted
+publisher (unsloth, bartowski, ggml-org, lmstudio-community, Qwen, microsoft,
+mistralai, HuggingFaceTB, ibm-granite, NousResearch) plus the same three
+across everybody. Each result arrives with its GGUF header data, tags,
+license, download count and "gated" flag.
 
 Then `rejection_reason` screens every model, in plain English:
 
@@ -628,7 +636,7 @@ best first. The CPU build always comes last because it always works:
 | Mac with an Intel chip | CPU |
 | Windows PC with NVIDIA | CUDA 13 (driver 580+) and/or CUDA 12 (driver 525+), then Vulkan, then CPU |
 | Windows PC with AMD or Intel graphics | Vulkan, then CPU |
-| Windows on ARM | CUDA 13 (with an NVIDIA GPU and driver 580+), then CPU |
+| Windows on ARM | CUDA 13 arm64 (NVIDIA GPU, driver 580+), then Vulkan arm64, then CPU arm64. No x64 build under emulation. |
 | Linux with NVIDIA | CUDA, then Vulkan (if the Vulkan loader is installed), then CPU |
 | Linux with AMD or Intel graphics | Vulkan (if the Vulkan loader is installed), then CPU |
 | Anything else | CPU |
@@ -658,7 +666,8 @@ the problem, and moves on to the next build.
 
 ```text
 llama-server -m model.gguf --host 127.0.0.1 --port 54321 -c 4096 \
-             --reasoning-format deepseek --no-webui -np 1
+             --reasoning-format deepseek --no-webui -np 1 \
+             --fit on --fit-target 819 --fit-ctx 4096
 ```
 
 - `-m`: the model file (the first shard of a split model).
@@ -670,7 +679,24 @@ llama-server -m model.gguf --host 127.0.0.1 --port 54321 -c 4096 \
 - `--no-webui`: skip llama-server's built-in chat web page, which the game
   doesn't need.
 - `-np 1`: one conversation "slot" at a time, which saves memory.
-- On the CPU build the game adds `-ngl 0` (zero layers on the GPU).
+- `--fit on --fit-target 819 --fit-ctx 4096`: place GPU layers inside free
+  video memory, leaving the same 0.8 GB (819 MiB) per card the menu keeps
+  free. llama.cpp b11485 defaults `--fit` to on with a 1024 MiB margin, which
+  would spill layers the menu said still fit, and it only changes the context
+  when `-c` was left at 0. The game always sets `-c`. `--fit-ctx` repeats that
+  context so the engine's default floor of 4096 cannot force a larger cache
+  when the plan is shorter. A CPU launch passes `--fit off` instead: there is
+  no device budget, and the fitter treats leftover RAM as unlimited.
+- On the CPU build the game adds `-ngl 0` (zero layers on the GPU) and
+  `--device none`.
+- On Windows a live launch passes a larger `--fit-target` when other programs
+  are already using video memory, because CUDA's free figure there ignores
+  them. On Linux that free figure already excludes them, so the target stays
+  the 819 MiB reserve and the in-use number is not added again. A Clef launch
+  on Windows adds another 3 GB, because a measured run used about 2.9 GB more
+  than the engine projected. A story launch does not add that 3 GB. The 819
+  MiB above is the reserve with nothing else in use. The number in "needs ~X
+  of Y GB" is that free memory, not the card's total.
 
 Then it polls `GET /health` (503 while the model loads, 200 with
 `{"status": "ok"}` when ready) and sends each prompt to
@@ -787,6 +813,19 @@ That's a common pattern, but notice its weak spots:
 
 **Jev**, from TypeSafe AI, is built for judging rather than chatting. You
 define the *type* of answer you want, and it answers in exactly that type:
+
+The same `POST /v1/systemone` shape can run **on your computer** with
+**Clef** or **Clef-flash** (Cloudflare, Apache-2.0, GGUF from ggml-org) when
+llama.cpp is new enough to load architecture `clef`. Text support is
+documented at **b11371**, and that note says text-only. Image input was added
+in llama.cpp PR 29969 (5 October 2026) and is in the pinned **b11485** engine;
+the referee stays text-only. They score the questions; they do not narrate.
+If the installed engine is older, the menu offers to download b11485 when
+this copy of the game may download engines, and it does not download the
+weights until the engine can load them. Local video memory at the published
+65,536-token window, the KV
+shape, and Ollama / vLLM / LM Studio support were not verified. Details are
+in the README.
 
 - a **Noul** (yes/no) returns the **probability of yes**;
 - a **Choice** returns one of *your* labels, plus a probability for each;

@@ -58,7 +58,7 @@ Besides the Python packages above, every game build contains:
 | **Python** (the interpreter and its standard library) | PSF-2.0, the Python Software Foundation License | Bundled by PyInstaller. | https://www.python.org |
 | **Tcl/Tk** (the toolkit behind the game's window, used through Python's `tkinter`) | Tcl/Tk license (BSD-style), copyright the Regents of the University of California, Sun Microsystems, Inc. and others | Free to use, copy and distribute for any purpose as long as the copyright notices are kept. | https://www.tcl-lang.org/software/tcltk/license.html |
 | **PyInstaller** bootloader (the small start-up program inside `GetToWork` and `gettowork-cli`) | GPL-2.0-or-later with the PyInstaller bootloader exception | The exception explicitly allows shipping the bootloader inside programs under any license, so distributing the built game - free on Steam or anywhere else - is fine, and Get To Work's own code stays MIT. | https://github.com/pyinstaller/pyinstaller |
-| **llama.cpp** (`llama-server` and its libraries), official prebuilt release builds | MIT, copyright the ggml authors | **Bundled** in the game builds: Vulkan and CPU builds on Windows and Linux, the Metal build on macOS (Apple Silicon). Each build's license texts - llama.cpp's own and those of the code compiled into it: cpp-httplib (MIT), nlohmann/json (MIT), BoringSSL (Apache-2.0) in the Windows and macOS builds, and LLVM OpenMP (Apache-2.0 with LLVM exceptions, `libomp.dll`) on Windows - are taken from the official archive and from the texts llama.cpp embeds in its programs (or, when missing, fetched from the same release's source) into `engine/<build>/licenses/`, and included in `THIRD_PARTY_LICENSES.txt`. | https://github.com/ggml-org/llama.cpp/releases |
+| **llama.cpp** (`llama-server` and its libraries), official prebuilt release builds. The pin in `packaging/llama_cpp_tag.txt` is **b11485** (8 October 2026), which can load Clef text. Image input for Clef (llama.cpp PR 29969) is in that build; the game's referee does not download the vision file. | MIT, copyright the ggml authors | **Bundled** in the game builds: Vulkan and CPU builds on Windows and Linux, the Metal build on macOS (Apple Silicon). Each build's license texts - llama.cpp's own and those of the code compiled into it: cpp-httplib (MIT), nlohmann/json (MIT), BoringSSL (Apache-2.0) in the Windows and macOS builds, and LLVM OpenMP (Apache-2.0 with LLVM exceptions, `libomp.dll`) on Windows - are taken from the official archive and from the texts llama.cpp embeds in its programs (or, when missing, fetched from the same release's source) into `engine/<build>/licenses/`, and included in `THIRD_PARTY_LICENSES.txt`. | https://github.com/ggml-org/llama.cpp/releases/tag/b11485 |
 | **OpenSSL 3** (`libssl.so.3`, `libcrypto.so.3`), Linux engine builds only | Apache-2.0, copyright the OpenSSL Project Authors | Copied from the build machine (Ubuntu 22.04) next to the bundled llama.cpp engine, which links it: Steam's Linux runtime has no OpenSSL 3. Its license text ships in `engine/<build>/licenses/LICENSE-OpenSSL` and `THIRD_PARTY_LICENSES.txt`. | https://www.openssl.org/source/license.html |
 | **Microsoft Visual C++ runtime** (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), Windows builds only | Microsoft Visual C++ Redistributable terms | Copied next to the bundled llama.cpp engine so it starts on a PC without the Visual C++ Redistributable; Microsoft allows applications to redistribute these files. | https://visualstudio.microsoft.com/license-terms/ |
 | truststore, certifi (when present on the build machine) | MIT (truststore), MPL-2.0 (certifi) | Used for HTTPS certificate checks (`tls.py`). | https://github.com/sethmlarson/truststore, https://github.com/certifi/python-certifi |
@@ -96,6 +96,15 @@ Notes:
   download them from Hugging Face, where they are shared by their authors
   under the license shown on each model's page. You are responsible for
   complying with it.
+- **Clef and Clef-flash** (optional local referee, not bundled) are Apache-2.0,
+  copyright Cloudflare, following the Qwen models they were trained on top of
+  (also Apache-2.0: Qwen3.8-27B and Qwen3.5-9B). The license texts are on the
+  model cards: https://huggingface.co/Cloudflare/clef and
+  https://huggingface.co/Cloudflare/clef-flash. The GGUF files the game knows
+  how to run, when the engine is new enough, are
+  https://huggingface.co/ggml-org/Clef-GGUF and
+  https://huggingface.co/ggml-org/Clef-Flash-GGUF (Apache-2.0). The game does
+  not send plans to Cloudflare.
 
 ## Separate software the game can use
 
@@ -129,10 +138,10 @@ Notes:
 ## Not affiliated
 
 Get To Work is an independent project. It is **not affiliated with, endorsed
-by or sponsored by** TypeSafe AI, Hugging Face, ggml-org / the llama.cpp
+by or sponsored by** TypeSafe AI, Hugging Face, Cloudflare, ggml-org / the llama.cpp
 project, Ollama, Valve / Steam, the Python Software Foundation, the Tcl/Tk
-or PyInstaller projects, NVIDIA, AMD, Intel, Apple, Microsoft, GitHub, or any
-model author or publisher. All product names, logos and trademarks belong to
+or PyInstaller projects, NVIDIA, AMD, Intel, Apple, Microsoft, GitHub, Qwen,
+or any model author or publisher. All product names, logos and trademarks belong to
 their respective owners and are used here only to identify their products and
 services.
 

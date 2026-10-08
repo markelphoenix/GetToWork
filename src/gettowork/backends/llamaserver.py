@@ -126,6 +126,11 @@ OWNER_SUFFIX = ".owner.json"  # "which game started this engine?" records, next 
 _SECRET_ENV_VARS = config.SECRET_ENV_VARS
 
 WAKE_UP_MESSAGE = "Waking up the model... big brains take a moment"
+# After this long, a CPU or split load replaces the spinner with a plain
+# statement of where the weights are. A full GPU load keeps the first line.
+SLOW_LOAD_NOTICE_S = 60.0
+CPU_LOAD_MESSAGE = "The model is fully on the CPU, so loading takes longer."
+PARTIAL_LOAD_MESSAGE = "The model is partly on the CPU, so loading takes longer."
 BENCHMARK_PROMPT = "Count from 1 to 40, separated by commas. Reply with the numbers only."
 # The warm-up reads a prompt about as long as a real story turn (~1,000 tokens),
 # so it exercises the same batched GPU work a turn does: some driver or memory
@@ -184,6 +189,8 @@ def build_server_args(
     n_ctx: int,
     cpu_only: bool = False,
     minimal: bool = False,
+    fit_target_mib: Optional[int] = None,
+    devices: Optional[list[str]] = None,
 ) -> list[str]:
     """The ``llama-server`` command line, as a list (never a shell string).
 
@@ -191,10 +198,24 @@ def build_server_args(
     * ``--reasoning-format deepseek`` puts a thinking model's chain-of-thought
       in a separate ``reasoning_content`` field instead of the answer.
     * ``--no-webui`` skips the built-in chat website; ``-np 1`` = one chat slot.
-    * GPU layers are left to llama.cpp's automatic "fit" logic, except in CPU
-      mode: ``--device none`` stops llama.cpp using any graphics card at all
-      (``-ngl 0`` alone still lets it borrow the GPU to read long prompts),
-      and ``-ngl 0`` keeps every layer in RAM for builds without ``--device``.
+    * ``--fit on`` lets the engine place unset GPU layers inside free video
+      memory. The context (``-c``) is set, and b11485 only changes context when
+      it was left at 0, so the planned window stays. ``--fit-target`` is the
+      menu's per-card reserve (0.8 GB, 819 MiB). The engine's own default is
+      1024 MiB, which would spill layers the menu said still fit, and a smaller
+      margin would use video memory the menu kept free. ``--fit-ctx`` is that
+      same planned context, so the engine's default floor of 4096 cannot force
+      a larger cache when the plan is shorter.
+    * CPU mode passes ``--fit off``. There is no device budget, and the fitter
+      treats leftover RAM as unlimited. ``--device none`` stops llama.cpp using
+      any graphics card at all (``-ngl 0`` alone still lets it borrow the GPU
+      to read long prompts), and ``-ngl 0`` keeps every layer in RAM for builds
+      without ``--device``.
+    * ``devices`` is the planned cards, named the way ``--list-devices`` prints
+      them (``CUDA0``, ``Vulkan1``). ``--fit on`` would otherwise spread the
+      model across every device the build can see, including a built-in chip
+      next to the card the menu counted. Omitted when the listing is unknown,
+      so an older build is not given a device it may not have.
     * ``minimal`` drops the optional flags, for builds that don't know them.
 
     The per-launch API key is passed in the environment (``LLAMA_API_KEY``,
@@ -202,12 +223,36 @@ def build_server_args(
     """
     args = [str(exe), "-m", str(model_path), "--host", "127.0.0.1", "--port", str(port), "-c", str(n_ctx)]
     if not minimal:
-        args += ["--reasoning-format", "deepseek", "--no-webui", "-np", "1"]
+        args += ["--reasoning-format", "deepseek", "--no-webui", "-np", "1",
+                 *_fit_args(n_ctx, cpu_only, fit_target_mib=fit_target_mib)]
     if cpu_only:
         if not minimal:
             args += ["--device", "none"]
         args += ["-ngl", "0"]
+    elif devices:
+        args += ["--device", ",".join(devices)]
     return args
+
+
+def _fit_args(n_ctx: int, cpu_only: bool, *, fit_target_mib: Optional[int] = None) -> list[str]:
+    """Explicit ``--fit`` so b11485's default cannot drift from the menu.
+
+    See :func:`build_server_args`. With no live reading the target is
+    ``catalog.GPU_VRAM_RESERVE_GB`` (819 MiB). A launch that knows the machine
+    passes :func:`catalog.fit_target_mib`. On Windows that also keeps in-use
+    video memory and the Clef margin free, because CUDA's free figure there
+    ignored programs nvidia-smi could see. On Linux the free figure already
+    excludes them, so the target stays the 0.8 GiB reserve.
+    """
+    if cpu_only:
+        return ["--fit", "off"]
+    from .. import catalog
+
+    if fit_target_mib is None:
+        reserve_mib = max(1, round(float(catalog.GPU_VRAM_RESERVE_GB) * 1024))
+    else:
+        reserve_mib = max(1, int(fit_target_mib))
+    return ["--fit", "on", "--fit-target", str(reserve_mib), "--fit-ctx", str(int(n_ctx))]
 
 
 def find_free_port() -> int:
@@ -230,7 +275,13 @@ def _absolute_exe(exe: Path | str) -> Path:
         return Path(os.path.abspath(exe))
 
 
-def server_env(exe: Path | str, base: Optional[dict[str, str]] = None, *, api_key: Optional[str] = None) -> dict[str, str]:
+def server_env(
+    exe: Path | str,
+    base: Optional[dict[str, str]] = None,
+    *,
+    api_key: Optional[str] = None,
+    extra: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
     """Environment for the child process.
 
     * Lets it find the libraries shipped next to ``llama-server`` (e.g.
@@ -241,6 +292,8 @@ def server_env(exe: Path | str, base: Optional[dict[str, str]] = None, *, api_ke
       the player's own llama.cpp experiments would quietly break the game.
     * With `api_key`, sets ``LLAMA_API_KEY`` so the server only answers
       requests that carry it.
+    * ``extra`` sets or replaces variables for this launch (device order and
+      which CUDA devices stay visible). It is applied last.
     """
     source = os.environ if base is None else base
     env = {
@@ -249,6 +302,8 @@ def server_env(exe: Path | str, base: Optional[dict[str, str]] = None, *, api_ke
     }
     if api_key:
         env["LLAMA_API_KEY"] = api_key
+    if extra:
+        env.update(extra)
     exe_dir = str(Path(exe).parent)
     system = platform.system()
     if system == "Linux":
@@ -317,15 +372,27 @@ _MEMORY_RE = re.compile(
 )
 _MODEL_RE = re.compile(
     r"failed to load model|error loading model|unable to load model|invalid magic"
-    r"|unknown model architecture|gguf_init_from_file",
+    r"|unknown model architecture|gguf_init_from_",
     re.IGNORECASE,
 )
 # The model uses a design this engine build doesn't know yet: a newer engine fixes it.
 _UNSUPPORTED_ARCH_RE = re.compile(r"unknown (?:model )?architecture:?\s*'?([\w.\-]*)'?", re.IGNORECASE)
+# The file itself is damaged or incomplete. Checked before a GPU-error line so
+# a corrupt GGUF is not recorded as a graphics-driver failure (that note would
+# keep the CPU build selected for days). "failed to load model" is deliberately
+# absent: a CUDA out-of-memory line often says that too, and that one is a GPU
+# problem. gguf_init_from_ covers every reader (file, a buffer, a stream).
+_MODEL_FILE_RE = re.compile(
+    r"gguf_init_from_|wrong number of tensors|failed to open gguf"
+    r"|invalid magic|not within the file bounds"
+    r"|unexpected(?:ly)? (?:reached )?end of file|file is too small",
+    re.IGNORECASE,
+)
 # Signs that the file itself is damaged or incomplete (re-downloading helps).
 _CORRUPT_RE = re.compile(
     r"invalid magic|not within the file bounds|failed to read|unexpected(?:ly)? (?:reached )?end of file"
-    r"|truncated|corrupt|tensor data is not|file is too small|incomplete",
+    r"|truncated|corrupt|tensor data is not|file is too small|incomplete"
+    r"|gguf_init_from_|wrong number of tensors|failed to open gguf",
     re.IGNORECASE,
 )
 # After a healthy start: did llama.cpp put any layers on a graphics card?
@@ -367,6 +434,11 @@ def classify_server_log(text: str, returncode: Optional[int] = None) -> str:
         return "glibc"
     if _GPU_ARCH_RE.search(text):
         return "gpu_arch"
+    # A damaged GGUF can mention CUDA on the same launch. Class that as the
+    # file, before the GPU scan, so the game does not switch builds or write
+    # the seven-day graphics-card note.
+    if _MODEL_FILE_RE.search(text):
+        return "model"
     # A GPU problem = one line that mentions a GPU technology AND a failure.
     # (Healthy logs mention CUDA too, e.g. "found 1 CUDA devices".)
     for line in text.splitlines():
@@ -511,22 +583,344 @@ def gpu_devices_from_listing(text: str) -> Optional[list[str]]:
     CUDA library that wouldn't load...). None means the output isn't a device
     list (an old build that doesn't know the flag, or something went wrong).
     """
+    rows = device_rows_from_listing(text)
+    if rows is None:
+        return None
+    return [row[0] for row in rows]
+
+
+_DEVICE_MIB_RE = re.compile(r"\((\d+)\s*MiB\b", re.IGNORECASE)
+# Words that show up on every card of a vendor and don't identify a model.
+_GENERIC_DEVICE_WORDS = frozenset({
+    "nvidia", "geforce", "amd", "radeon", "intel", "graphics", "gpu",
+    "apple", "advanced", "micro", "devices", "corporation", "inc", "tm", "r",
+})
+# A "3060" listing must not be treated as a "3060 Ti", or the other way around.
+_DEVICE_QUALIFIERS = frozenset({
+    "ti", "super", "xt", "xtx", "xl", "le", "mobile", "laptop", "max", "pro",
+})
+_CUDA_DEVICE_RE = re.compile(r"^CUDA(\d+)$", re.IGNORECASE)
+
+
+def device_rows_from_listing(text: str) -> Optional[list[tuple[str, str, Optional[int]]]]:
+    """``(id, name, total MiB)`` rows from ``llama-server --list-devices``.
+
+    None when the text is not a device list. An empty list means the header
+    was there and no graphics device followed it. CPU, BLAS, RPC and ACCEL
+    rows are left out. MiB is the first "(12345 MiB" figure, or None.
+    """
     text = text or ""
     header = _DEVICES_HEADER_RE.search(text)
     if header is None:
         return None
-    devices: list[str] = []
+    rows: list[tuple[str, str, Optional[int]]] = []
     for line in text[header.end():].splitlines():
         if not line.strip():
             continue
-        m = _DEVICE_LINE_RE.match(line)
-        if m is None:
+        match = _DEVICE_LINE_RE.match(line)
+        if match is None:
             if line.startswith((" ", "\t")):
-                continue  # "  (none)", or a wrapped description
-            break  # the listing is over
-        if not _NOT_A_GPU_DEVICE_RE.match(m.group(1)):
-            devices.append(m.group(1))
-    return devices
+                continue
+            break
+        device_id = match.group(1)
+        if _NOT_A_GPU_DEVICE_RE.match(device_id):
+            continue
+        rest = line.split(":", 1)[1].strip() if ":" in line else ""
+        name = re.sub(r"\s+\(\d+\s*MiB\b.*$", "", rest, flags=re.IGNORECASE).strip() or rest
+        mib_match = _DEVICE_MIB_RE.search(rest)
+        mib = int(mib_match.group(1)) if mib_match else None
+        rows.append((device_id, name, mib))
+    return rows
+
+
+def _device_tokens(name: str) -> set[str]:
+    return {
+        token for token in re.findall(r"[a-z0-9]+", name.lower())
+        if token not in _GENERIC_DEVICE_WORDS
+    }
+
+
+def _device_row_score(gpu_name: str, row_name: str, gpu_mib: float, row_mib: Optional[int]) -> float:
+    """How well a planned card matches one ``--list-devices`` row. 0 is no match."""
+    planned = _device_tokens(gpu_name)
+    listed = _device_tokens(row_name)
+    if not planned or not listed:
+        return 0.0
+    if (planned & _DEVICE_QUALIFIERS) != (listed & _DEVICE_QUALIFIERS):
+        return 0.0
+    planned_numbers = {token for token in planned if any(char.isdigit() for char in token)}
+    listed_numbers = {token for token in listed if any(char.isdigit() for char in token)}
+    if planned_numbers and listed_numbers and planned_numbers != listed_numbers:
+        return 0.0
+    shared = planned & listed
+    if not shared:
+        return 0.0
+    score = float(len(shared))
+    if row_mib and gpu_mib > 0:
+        gap = abs(float(row_mib) - float(gpu_mib) * 1024.0)
+        score += max(0.0, 0.4 - gap / 16384.0)
+    return score
+
+
+def match_planned_devices(
+    gpus: list,
+    rows: list[tuple[str, str, Optional[int]]],
+    positions: Optional[list[Optional[int]]] = None,
+) -> list[tuple[str, str, Optional[int]]]:
+    """Listing rows for the planned cards, in plan order.
+
+    Identical cards take the first unused matching row, then the next, unless
+    ``positions`` says which detected card this is. Two cards with the same
+    name then keep their place in the device list, so the second card is not
+    given the first row. A built-in chip whose name has no model tokens (for
+    example "Radeon Graphics") does not match a discrete card.
+    """
+    chosen: list[tuple[str, str, Optional[int]]] = []
+    used: set[int] = set()
+    for nth, gpu in enumerate(gpus):
+        prefer = positions[nth] if positions is not None and nth < len(positions) else None
+        best_index = None
+        best_score = 0.0
+        vram_gb = float(getattr(gpu, "vram_gb", 0.0) or 0.0)
+        for index, row in enumerate(rows):
+            if index in used:
+                continue
+            score = _device_row_score(getattr(gpu, "name", ""), row[1], vram_gb, row[2])
+            tied_for_this_card = (
+                score == best_score and score > 0 and prefer is not None and index == prefer
+            )
+            if score > best_score or tied_for_this_card:
+                best_score = score
+                best_index = index
+        if best_index is None:
+            continue
+        used.add(best_index)
+        chosen.append(rows[best_index])
+    return chosen
+
+
+def device_launch_pin(specs, rows: Optional[list[tuple[str, str, Optional[int]]]]) -> Optional[tuple[list[str], dict[str, str]]]:
+    """``(--device`` names, environment additions) for the planned cards.
+
+    None when there is no listing or no row matches, so the launch omits
+    ``--device`` and the engine's own choice stands. NVIDIA launches set
+    ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` so those indexes follow the same PCI
+    order as ``nvidia-smi``. When every matched row is a CUDA device, the
+    others are hidden and the names are the ones llama.cpp prints after that
+    hide (a lone ``CUDA1`` becomes ``CUDA0``). Vulkan and other backends keep
+    the printed names and do not set ``CUDA_VISIBLE_DEVICES``.
+    """
+    if not rows or specs is None:
+        return None
+    from .. import perf
+
+    planned = perf.pooled_gpus(specs)
+    if not planned:
+        return None
+    # Same object the pool returned, so two identical names stay on the row
+    # that lines up with that card in the detected list.
+    place = {id(gpu): index for index, gpu in enumerate(getattr(specs, "gpus", ()) or ())}
+    matched = match_planned_devices(planned, rows, [place.get(id(gpu)) for gpu in planned])
+    if not matched:
+        return None
+    ids = [row[0] for row in matched]
+    env: dict[str, str] = {}
+    if planned[0].vendor == "nvidia":
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    indexes: list[int] = []
+    for name in ids:
+        found = _CUDA_DEVICE_RE.fullmatch(name)
+        if found is None:
+            return ids, env
+        indexes.append(int(found.group(1)))
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in indexes)
+    renamed = [f"CUDA{number}" for number in range(len(indexes))]
+    return renamed, env
+
+
+# ``--list-devices`` text keyed by the engine file. The story launch fills it.
+# A Clef launch on that same file reuses it; a different build probes once.
+_DEVICE_LISTINGS: dict[str, str] = {}
+
+
+def remember_device_listing(exe: Path | str, text: str) -> None:
+    """Keep one successful ``--list-devices`` printout for this engine file."""
+    if text:
+        _DEVICE_LISTINGS[str(_absolute_exe(exe))] = text
+
+
+def cached_device_listing(exe: Path | str) -> Optional[str]:
+    """The listing already read for this engine file, or None."""
+    return _DEVICE_LISTINGS.get(str(_absolute_exe(exe)))
+
+
+def device_probe_env(exe: Path | str, specs) -> dict[str, str]:
+    """Environment for ``--list-devices``.
+
+    NVIDIA's CUDA order is pinned to PCI bus order so the indexes match
+    ``nvidia-smi``. ``CUDA_VISIBLE_DEVICES`` is removed: a value inherited
+    from the player would hide cards before they can be listed.
+    """
+    env = server_env(exe)
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    if specs is not None:
+        from .. import perf
+
+        gpu = perf.primary_gpu(specs)
+        if gpu is not None and gpu.vendor == "nvidia":
+            env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    return env
+
+
+def probe_device_listing(exe: Path | str, specs, runner) -> Optional[str]:
+    """Run ``llama-server --list-devices``. None when that probe does not answer.
+
+    Does not read the cache. A non-zero exit (an old build, a crash) is None
+    so the caller leaves the device choice to the engine.
+    """
+    if runner is None:
+        return None
+    exe_path = _absolute_exe(exe)
+    try:
+        with windows_system_dll_search():
+            result = runner(
+                [str(exe_path), "--list-devices"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=device_probe_env(exe_path, specs),
+                cwd=str(exe_path.parent),
+                timeout=ENGINE_CHECK_TIMEOUT_S,
+                **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
+            )
+    except Exception:
+        return None
+    if getattr(result, "returncode", 0):
+        return None
+    raw = getattr(result, "stdout", b"") or b""
+    return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+
+
+def listing_for_engine(exe: Path | str, specs, runner=None) -> Optional[str]:
+    """Device listing for ``exe``: the cached one, or one new probe.
+
+    ``runner`` defaults to ``subprocess.run``. Tests pass their own.
+    """
+    cached = cached_device_listing(exe)
+    if cached is not None:
+        return cached
+    text = probe_device_listing(exe, specs, runner if runner is not None else subprocess.run)
+    if text is not None:
+        remember_device_listing(exe, text)
+    return text
+
+
+def planned_device_pin(exe: Path | str, specs, runner=None) -> tuple[Optional[list[str]], Optional[dict[str, str]]]:
+    """``(--device`` names, environment) for the cards ``specs`` plans on.
+
+    ``specs`` is the machine the launch was planned against. For the referee
+    that is the machine after the story model's video memory is set aside, so
+    the pin can be a different card from the story. ``(None, None)`` when the
+    listing is missing or no row matches.
+    """
+    if specs is None:
+        return None, None
+    rows = device_rows_from_listing(listing_for_engine(exe, specs, runner) or "")
+    pin = device_launch_pin(specs, rows)
+    if pin is None:
+        return None, None
+    return pin
+
+
+def slow_load_message(placement: str) -> Optional[str]:
+    """The line that replaces the spinner once a CPU or split load has run a minute."""
+    if placement == "cpu":
+        return CPU_LOAD_MESSAGE
+    if placement == "partial":
+        return PARTIAL_LOAD_MESSAGE
+    return None
+
+
+# GGUF versions llama.cpp has actually written. A later version, or a file
+# that only borrowed the four magic bytes, is not started.
+_GGUF_VERSION_MIN = 1
+_GGUF_VERSION_MAX = 3
+
+
+def gguf_file_problem(path: Path | str) -> Optional[str]:
+    """None when ``path`` begins with a GGUF header this engine can open.
+
+    Eight bytes: the ``GGUF`` magic and a little-endian version. Versions 1
+    through 3 are the ones llama.cpp has shipped.
+    """
+    try:
+        with Path(path).open("rb") as handle:
+            header = handle.read(8)
+    except OSError as exc:
+        return f"couldn't be read ({exc})"
+    if len(header) < 8 or header[:4] != b"GGUF":
+        return "does not start with a GGUF header"
+    version = int.from_bytes(header[4:8], "little")
+    if version < _GGUF_VERSION_MIN or version > _GGUF_VERSION_MAX:
+        return f"has GGUF version {version}, which this engine does not use"
+    return None
+
+
+def gguf_refusal(path: Path | str, problem: str, *, what: str = "model") -> BackendError:
+    """The player-facing error for a file that must be downloaded again."""
+    label = "projector file" if what == "projector" else "model file"
+    return BackendError(
+        f"{Path(path).name} isn't a usable GGUF {label} ({problem}). "
+        "Delete it and download it again. The engine was not started."
+    )
+
+
+# Instructions the player is told about, in the order the sentence lists them.
+# Only a feature the OS probe actually reads is named, so a Windows reading
+# (which has no FMA / F16C / BMI2 check) is not reported as missing those.
+_NAMED_CPU_FEATURES = ("avx", "avx2", "fma", "f16c", "bmi2", "sse4_2")
+_PROBED_CPU_FEATURES = {
+    "Windows": ("sse4_2", "avx", "avx2"),
+    "Darwin": ("sse4_2", "avx", "avx2", "fma", "f16c"),
+    "Linux": ("sse4_2", "avx", "avx2", "fma", "f16c", "bmi2"),
+}
+_CPU_FEATURE_LABELS = {
+    "avx": "AVX", "avx2": "AVX2", "fma": "FMA", "f16c": "F16C",
+    "bmi2": "BMI2", "sse4_2": "SSE4.2",
+}
+_X86_CPU_FLAGS = frozenset({
+    "sse2", "sse4_2", "avx", "avx2", "avx512f", "avx_vnni", "f16c", "fma", "bmi2",
+})
+
+
+def missing_cpu_instructions(flags: list[str], os_name: str) -> list[str]:
+    """Named x86 features this OS looks for and this CPU does not have.
+
+    An empty flag list, or an ARM chip that only reported NEON, returns
+    nothing: the message stays the generic one instead of listing every x86 gap.
+    """
+    probed = _PROBED_CPU_FEATURES.get(os_name or "")
+    if not probed:
+        return []
+    have = {str(flag).lower() for flag in flags or []}
+    if not (have & _X86_CPU_FLAGS):
+        return []
+    return [name for name in _NAMED_CPU_FEATURES if name in probed and name not in have]
+
+
+def missing_cpu_instruction_text(flags: list[str], os_name: str) -> Optional[str]:
+    """One sentence naming the missing instructions, or None when that isn't known."""
+    missing = missing_cpu_instructions(flags, os_name)
+    if not missing:
+        return None
+    labels = [_CPU_FEATURE_LABELS[name] for name in missing]
+    if len(labels) == 1:
+        listed = labels[0]
+    elif len(labels) == 2:
+        listed = f"{labels[0]} and {labels[1]}"
+    else:
+        listed = ", ".join(labels[:-1]) + ", and " + labels[-1]
+    return f"Your processor is missing {listed}, which the llama.cpp engine needs."
 
 
 def health_timeout_for(model_gb: float, minimum: float = HEALTH_TIMEOUT_S) -> float:
@@ -784,6 +1178,7 @@ class LlamaServerBackend(LLMBackend):
         # to stop (quitting, the window closing), nothing may start a new one -
         # not even a crash fallback on the game's thread racing the shutdown.
         self._closed = False
+        self._device_listing: Optional[str] = None
         self._lifecycle_lock = threading.RLock()
         self._api_key = secrets.token_urlsafe(24)  # only requests carrying it are answered
         self._owner_file: Optional[Path] = None
@@ -842,10 +1237,28 @@ class LlamaServerBackend(LLMBackend):
         except Exception as exc:  # must never raise
             return False, f"Couldn't check for the llama.cpp engine ({exc})."
 
+    def _refuse_unusable_gguf(self, path: Optional[Path], *, what: str = "model") -> None:
+        """Raise before the engine is stopped or started when a GGUF header is unusable."""
+        if path is None:
+            return
+        file = Path(path)
+        if not file.is_file():
+            return
+        problem = gguf_file_problem(file)
+        if problem:
+            raise gguf_refusal(file, problem, what=what)
+
     def prepare(self, ui: UI, entry: Optional[ModelEntry] = None) -> None:
         """Install the engine, download the model, start the server, wait until ready."""
         if entry is not None:
             self.entry = entry
+        # A file that is already here is checked before the running engine is
+        # stopped, so a bad download does not take the working model down and
+        # then walk the fallback builds.
+        self._refuse_unusable_gguf(self.model_path)
+        projector = getattr(self, "mmproj_path", None)
+        if projector:
+            self._refuse_unusable_gguf(Path(projector), what="projector")
         self.close()  # calling prepare() again restarts cleanly
         with self._lifecycle_lock:
             self._closed = False  # ...and may start the engine again
@@ -854,6 +1267,9 @@ class LlamaServerBackend(LLMBackend):
         self._ensure_engine(ui)
         self._check_gpu_devices(ui)
         model = self._ensure_model(ui)
+        self._refuse_unusable_gguf(model)
+        if projector:
+            self._refuse_unusable_gguf(Path(projector), what="projector")
         if not self._health_timeout_fixed:
             with contextlib.suppress(OSError):
                 self._health_timeout_s = health_timeout_for(_model_total_bytes(model) / 1e9)
@@ -1157,22 +1573,23 @@ class LlamaServerBackend(LLMBackend):
         """The graphics devices ``llama-server --list-devices`` reports, or None if unknown."""
         if self._runner is None:
             return None
-        exe = _absolute_exe(exe)
-        try:
-            with windows_system_dll_search():
-                result = self._runner(
-                    [str(exe), "--list-devices"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, env=server_env(exe), cwd=str(Path(exe).parent),
-                    timeout=ENGINE_CHECK_TIMEOUT_S,
-                    **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
-                )
-        except Exception:
-            return None
-        if getattr(result, "returncode", 0):
+        text = probe_device_listing(exe, self.specs, self._runner)
+        if text is None:
             return None  # an old build that doesn't know the flag, or a crash: let the real start decide
-        raw = getattr(result, "stdout", b"") or b""
-        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        self._device_listing = text
+        remember_device_listing(exe, text)
         return gpu_devices_from_listing(text)
+
+    def _device_probe_env(self, exe: Path) -> dict[str, str]:
+        """Environment for ``--list-devices``. See :func:`device_probe_env`."""
+        return device_probe_env(exe, self.specs)
+
+    def _planned_device_pin(self) -> tuple[Optional[list[str]], Optional[dict[str, str]]]:
+        rows = device_rows_from_listing(self._device_listing or "")
+        pin = device_launch_pin(self.specs, rows)
+        if pin is None:
+            return None, None
+        return pin
 
     def _probe_engine(self, exe: Path) -> Optional[tuple[str, str]]:
         """(kind, output) if the engine can't even print its version here, else None.
@@ -1232,6 +1649,7 @@ class LlamaServerBackend(LLMBackend):
         except Exception as exc:  # e.g. download.DownloadError - already friendly
             raise BackendError(f"The model download didn't work: {exc}") from exc
         self.model_path = path
+        self._refuse_unusable_gguf(path)
         return path
 
     # -- starting, with automatic fallbacks ------------------------------------
@@ -1608,7 +2026,7 @@ class LlamaServerBackend(LLMBackend):
     def _launch_and_wait(self, ui: Optional[UI], exe: Path, model: Path, *, cpu_only: bool, minimal: bool) -> tuple[str, Optional[int]]:
         self._stop_process()
         self._launch(exe, model, cpu_only=cpu_only, minimal=minimal)
-        return self._wait_until_healthy(ui)
+        return self._wait_until_healthy(ui, cpu_only=cpu_only)
 
     def _log_folder(self) -> Path:
         return self._log_dir or (config.runtime_dir() / "logs")
@@ -1652,7 +2070,17 @@ class LlamaServerBackend(LLMBackend):
         exe, model = Path(exe).resolve(), Path(model).resolve()
         port = self._fixed_port or find_free_port()
         self.port = port
-        args = build_server_args(exe, model, port=port, n_ctx=self.n_ctx, cpu_only=cpu_only, minimal=minimal)
+        target = None
+        devices = None
+        device_env = None
+        if not cpu_only and not minimal and self.specs is not None:
+            from .. import catalog
+            target = catalog.fit_target_mib(self.specs)
+            devices, device_env = self._planned_device_pin()
+        args = build_server_args(
+            exe, model, port=port, n_ctx=self.n_ctx, cpu_only=cpu_only, minimal=minimal,
+            fit_target_mib=target, devices=devices,
+        )
 
         log_dir = self._log_folder()
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1663,7 +2091,7 @@ class LlamaServerBackend(LLMBackend):
             "stdin": subprocess.DEVNULL,
             "stdout": self._log_fh,
             "stderr": subprocess.STDOUT,
-            "env": server_env(exe, api_key=self._api_key),
+            "env": server_env(exe, api_key=self._api_key, extra=device_env),
             "cwd": str(exe.parent),
         }
         if platform.system() == "Windows":
@@ -1729,11 +2157,27 @@ class LlamaServerBackend(LLMBackend):
             return "loading"  # very old builds answered 200 {"status": "loading model"}
         return "ok"
 
-    def _wait_until_healthy(self, ui: Optional[UI]) -> tuple[str, Optional[int]]:
+    def _loading_placement(self, cpu_only: bool) -> str:
+        """Where this launch puts the model: "cpu", "partial", "gpu", or ""."""
+        if cpu_only:
+            return "cpu"
+        if self.specs is None or self.entry is None:
+            return ""
+        try:
+            from .. import catalog
+
+            return str(catalog.evaluate_fit(self.specs, self.entry).placement or "")
+        except Exception:
+            return ""
+
+    def _wait_until_healthy(self, ui: Optional[UI], *, cpu_only: bool = False) -> tuple[str, Optional[int]]:
         """Poll ``/health`` until the model is loaded, the engine dies, or we give up.
 
         We give up after the size-based timeout - but not while the engine's
         log is still growing (it's busy loading), up to HEALTH_MAX_TIMEOUT_S.
+        After a minute, a CPU or split placement replaces the spinner with a
+        plain line about where the weights are. A full GPU load keeps the
+        first line.
         """
         start = self._clock()
         deadline = start + self._health_timeout_s
@@ -1742,8 +2186,10 @@ class LlamaServerBackend(LLMBackend):
         last_read = self._read_bytes()
         self._last_log_growth = None
         self._saw_disk_progress = False
+        pace = slow_load_message(self._loading_placement(cpu_only))
+        noted = False
         spinner = ui.status(WAKE_UP_MESSAGE) if ui is not None else contextlib.nullcontext()
-        with spinner:
+        with spinner as update:
             while True:
                 returncode = self._proc.poll()
                 if returncode is not None:
@@ -1751,6 +2197,9 @@ class LlamaServerBackend(LLMBackend):
                 if self._probe_health() == "ok":
                     return "ok", None
                 now = self._clock()
+                if update is not None and pace and not noted and now - start >= SLOW_LOAD_NOTICE_S:
+                    update(pace)
+                    noted = True
                 size = self._log_size()
                 if size > last_size:
                     last_size, last_growth = size, now
@@ -1953,6 +2402,16 @@ class LlamaServerBackend(LLMBackend):
             for line in lines:
                 ui.say("  " + escape(line), style="dim")
 
+    def _cpu_unsupported_message(self) -> str:
+        """Name the missing instruction when this OS's probe can see it."""
+        hint = runtime_install.other_engines_hint("may still work")
+        specs = self.specs
+        if specs is not None:
+            named = missing_cpu_instruction_text(list(specs.cpu_flags or []), specs.os_name)
+            if named:
+                return named + " " + hint
+        return "Your processor is missing an instruction the llama.cpp engine needs. " + hint
+
     def _explain_failure(
         self, kind: str, returncode: Optional[int], tail: str = "", update_note: Optional[str] = None
     ) -> str:
@@ -2012,10 +2471,7 @@ class LlamaServerBackend(LLMBackend):
                 "This llama.cpp build doesn't support your graphics card's generation (the newest CUDA "
                 "builds leave out older cards)."
             ),
-            "cpu_unsupported": (
-                "Your processor is missing an instruction the llama.cpp engine needs. "
-                + runtime_install.other_engines_hint("may still work")
-            ),
+            "cpu_unsupported": self._cpu_unsupported_message(),
             "bad_args": "llama-server rejected its start-up settings, even the basic ones.",
             "port": "llama-server couldn't open a network port on this computer.",
             "gpu": "llama-server had trouble with the graphics card and stopped.",

@@ -82,7 +82,15 @@ below and [docs/DISTRIBUTION.md](DISTRIBUTION.md) for the build itself.
 7. **Jev onboarding** (`onboarding.py`): "Do you want to enable Jev?" with a
    plain-language explanation, including a privacy line saying exactly what
    Jev receives (the typed plan, the challenge, a story summary, progress) and
-   where it goes (TypeSafe AI's host). Yes → paste API key (hidden input; if
+   where it goes (TypeSafe AI's host). When setup passes hardware specs, this
+   step is the System One menu instead (`system_one.py`): Clef or Clef-flash
+   on this computer, Jev, or the story model. Clef is not a storyteller. The
+   pinned engine is llama.cpp b11485, which can load architecture `clef`
+   (text support started at b11371; image support from PR 29969 is in this
+   pin, and the referee stays text-only). An older installed engine is told
+   why, and offered a download of the pin when engine downloads are allowed.
+   The weights are not downloaded until the engine can load them.
+   `yes` still means Jev. Yes → paste API key (hidden input; if
    the window can't hide input the player is told first and pointed to
    `TYPESAFE_API_KEY`), or "help me get one" (opens the TypeSafe website/docs
    in a browser, step-by-step), or back out to local-only at *any* step
@@ -153,7 +161,8 @@ src/gettowork/
     llamacpp.py      LlamaCppBackend (llama-cpp-python, optional)
     mock.py          MockBackend (scripted, offline, deterministic)
   jev.py             Jev HTTP client + game questions + verdict parsing
-  onboarding.py      Jev opt-in / API-key flow
+  system_one.py      local Clef referee (llama-server /v1/systemone); not a story model
+  onboarding.py      Jev opt-in / API-key flow, and the System One menu when specs are passed
   prompts.py         all LLM prompt text
   safety.py          family-friendly filter (check_text / soften / check_player_input)
   safety_terms.py    its word lists, ROT13-scrambled
@@ -211,10 +220,13 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
 - CPU name: `platform.processor()`, falling back to `/proc/cpuinfo` "model name"
   (Linux), `sysctl -n machdep.cpu.brand_string` (macOS), `wmic`/PowerShell
   best effort on Windows; never fail — "Unknown CPU". CPU flags: `/proc/cpuinfo`
-  flags (avx, avx2, avx512f, f16c, fma), `sysctl hw.optional` on macOS (neon on
+  flags (avx, avx2, avx512f, f16c, fma, bmi2), `sysctl hw.optional` on macOS (neon on
   arm64), best effort elsewhere.
-- NVIDIA: `nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits`
-  (MiB). AMD (Linux): `rocm-smi --showmeminfo vram --json` best effort; also
+- NVIDIA: `nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version,compute_cap --format=csv,noheader,nounits`
+  (MiB). A total that is not a positive number is dropped, and used memory is
+  clamped to that total. AMD (Linux): `mem_info_vram_used` next to
+  `mem_info_vram_total` under `/sys/class/drm/cardN/device` when amdgpu
+  publishes it; `rocm-smi --showmeminfo vram --json` best effort; also
   detect AMD/Intel GPUs by name via `lspci` / Windows `Win32_VideoController`
   (VRAM unknown → 0, noted). Apple Silicon (`Darwin` + `arm64`): one
   GPUInfo(vendor="apple", vram_gb≈0.70 × RAM (0.75 if RAM ≥ 64 GB)),
@@ -229,6 +241,16 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
   `disk_free_gb = -1.0` means "unknown" (the fit engine then skips the disk
   check); a found Vulkan loader is recorded as `"vulkan"` in `cpu_flags`
   (`specs.has_vulkan(specs)`); integrated GPUs are listed with `vram_gb=0`.
+  The fit engine's primary card is the discrete GPU with the most VRAM.
+  A built-in chip is skipped even when its shared memory is reported as
+  VRAM, which is what a laptop with both chips looks like. Steam Deck's
+  "Custom GPU 0405" is that kind of chip: the 16 GB is shared with the CPU.
+  When in-use video memory was not read, the fit keeps about 2 GiB spare
+  instead of 0.8 GiB. The engine is started with `--device` set to the
+  planned cards from `--list-devices`, so a built-in chip is not given layers.
+  The Clef process uses that listing when it is the same engine file, or
+  reads it once from its own build, and is pinned to the cards left in its
+  plan. That can be a different card from the story model.
 
 ### perf.py
 ```python
@@ -292,8 +314,9 @@ MEMORY_FORMULA_EXPLAINER: str   # Markdown for a UI.teach panel
   Extra public helpers:
   `is_permissive`, `quant_bits`, `quant_quality`, `estimate_quant_size_gb`,
   `kv_cache_gb`, `score_fit`, `explain_fit(specs, fit) -> Markdown`.
-- Placement: gpu if fits VRAM (keep ~0.8 GB free); unified if Apple and fits
-  usable unified memory; partial if VRAM ≥ 40% of need and RAM covers the
+- Placement: gpu if fits VRAM (keep ~0.8 GB free); unified if the GPU shares
+  system RAM (Apple, RTX Spark / GB10 / GB300, Strix Halo, Lunar Lake and
+  other iGPUs given a RAM share) and the model fits that share; partial if VRAM ≥ 40% of need and RAM covers the
   rest (*Round 4:* also at ≥ 15% when the CPU-only plan would be tight, and at
   any share when only VRAM + RAM together fit - llama.cpp's auto-fit uses the
   card anyway); cpu if RAM (total − ~2.5 GB OS headroom) fits; none otherwise.
@@ -344,8 +367,10 @@ def group_quant_files(files: list[tuple[str, int]]) -> dict[str, tuple[tuple[str
 DISCOVERY_EXPLAINER: str   # Markdown: what the Hub is, GGUF, how we filter, licenses, caching
 ```
 - Uses `huggingface_hub.HfApi` (injectable `api` for tests):
-  `list_models(filter="gguf", pipeline_tag="text-generation", author=<publisher>, sort="downloads", limit=…, expand=["gguf","cardData","tags","downloads","likes","lastModified","gated"])`
-  for each trusted publisher (plus one global `filter="gguf"` query), then
+  `list_models(filter="gguf", pipeline_tag="text-generation"|"image-text-to-text"|omitted, author=<publisher>, sort="downloads", limit=…, expand=["gguf","cardData","tags","downloads","likes","lastModified","gated","pipeline_tag"])`
+  for each trusted publisher (plus one global query), three searches each so an
+  image-text-to-text or untagged GGUF repo is not missed. `mmproj` files are
+  still skipped. Then
   `list_repo_tree(repo, recursive=True, expand=False)` or
   `model_info(repo, files_metadata=True)` for real file sizes of the top
   `max_candidates` after pre-filtering. `ModelInfo.gguf` gives
@@ -473,7 +498,9 @@ def runtime_explainer() -> str    # whichever of the two fits this copy (the mod
   → vulkan, then cpu; Linux + NVIDIA → cuda-12.8 (+cudart) then vulkan (if
   loader present) then cpu; Linux AMD/Intel with vulkan loader → vulkan then
   cpu; else cpu. Windows arm64 → win-cuda-13.x-arm64 (+cudart) when an NVIDIA
-  GPU with driver ≥ 580 (or unknown) is present, then win-cpu-arm64. CUDA 13
+  GPU with driver ≥ 580 (or unknown) is present, then win-vulkan-arm64, then
+  win-cpu-arm64. An older NVIDIA driver skips CUDA and starts at Vulkan arm64.
+  An x64 archive is never selected on arm64. CUDA 13
   is skipped when every NVIDIA GPU reports a compute capability below 7.5
   (`GPUInfo.compute_capability`, from `nvidia-smi --query-gpu=…,compute_cap`,
   retried without it on drivers that don't know the field): CUDA 13 builds
@@ -514,9 +541,17 @@ class LlamaServerBackend(LLMBackend):
     @property model_label
 ```
   - Launch: `[exe, "-m", gguf, "--host", "127.0.0.1", "--port", str(port),
-    "-c", str(n_ctx), "--reasoning-format", "deepseek", "--no-webui", "-np", "1"]`
-    (`-ngl` defaults to auto / `--fit` on in current builds; on the CPU variant
-    pass `-ngl 0`). Free port chosen via a bound socket. stdout/stderr to a log
+    "-c", str(n_ctx), "--reasoning-format", "deepseek", "--no-webui", "-np", "1",
+    "--fit", "on", "--fit-target", "819", "--fit-ctx", str(n_ctx)]`
+    (819 MiB is `GPU_VRAM_RESERVE_GB` when nothing else is using the card.
+    On Windows a live launch adds in-use video memory, because CUDA's free
+    figure there ignored other programs. On Linux that figure already excludes
+    them, so the target stays 819 MiB. A Clef launch also adds
+    `WINDOWS_VRAM_MARGIN_GB` on Windows, because that run used about 2.9 GB
+    more than the projection. Story launches do not. b11485's `--fit` default margin is
+    1024 MiB and would spill layers the menu said fit. Context is only adjusted
+    by `--fit` when `-c` is 0, which this launch never leaves. CPU variant:
+    `--fit off`, `--device none`, `-ngl 0`). Free port chosen via a bound socket. stdout/stderr to a log
     file in `runtime_dir()/logs/` (show its tail on failure). Windows:
     `creationflags=CREATE_NO_WINDOW`; Linux: `LD_LIBRARY_PATH` += exe dir.
     If the process exits with an unknown-argument error, retry once with the
@@ -1468,7 +1503,8 @@ engine-lifecycle notes above for `--list-devices`, buffer-based GPU detection,
 disk-read progress, per-install unusable notes and the update check. Also:
 `gpu_arch` ("no kernel image is available") is a permanent failure of that
 install; `GPUInfo.compute_capability` keeps CUDA 13 away from cards below 7.5;
-Windows on ARM with an NVIDIA GPU tries the CUDA 13 arm64 build; the
+Windows on ARM with an NVIDIA GPU tries the CUDA 13 arm64 build, then Vulkan
+arm64, then the CPU arm64 build (never an x64 engine under emulation); the
 "10.16" macOS compatibility answer is seen through (`specs.macos_release`:
 `sysctl kern.osproductversion`, or a fresh Python with
 `SYSTEM_VERSION_COMPAT=0`) and never treated as a real version;

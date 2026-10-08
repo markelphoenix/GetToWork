@@ -22,12 +22,24 @@ class GPUInfo:
 
     name: str
     vendor: GPUVendor
-    vram_gb: float  # dedicated VRAM; for Apple unified memory this is the usable share of RAM
+    vram_gb: float  # dedicated VRAM; for a shared-memory GPU this is the usable share of RAM
     bandwidth_gbs: Optional[float] = None  # estimated memory bandwidth (GB/s), if known
     driver_version: Optional[str] = None  # e.g. "550.54.14" (NVIDIA, from nvidia-smi), if known
     # NVIDIA "compute capability" (the chip generation), e.g. 6.1 for a GTX 1080,
     # 8.6 for an RTX 3060 - newer CUDA builds leave out older generations.
     compute_capability: Optional[float] = None
+    # Video memory already in use by other programs, from nvidia-smi, NVML,
+    # or the AMD driver's sysfs file. 0 when the card is empty or when the
+    # probe could not read it. ``vram_used_known`` says which of those it is.
+    vram_used_gb: float = 0.0
+    vram_used_known: bool = True
+    # Extra system RAM the driver says this GPU may borrow (DXGI SharedSystemMemory),
+    # beside the BIOS carve-out in ``vram_gb``. 0 when the probe did not split the
+    # two numbers. Detection folds the pair into one share and does not add them
+    # to system RAM a second time.
+    shared_gb: float = 0.0
+    # True once ``vram_gb`` has been replaced with a share of system RAM.
+    unified_pool: bool = False
 
 
 @dataclass
@@ -44,7 +56,7 @@ class SystemSpecs:
     ram_available_gb: float
     disk_free_gb: float  # free space where models are stored
     gpus: list[GPUInfo] = field(default_factory=list)
-    unified_memory: bool = False  # True on Apple Silicon: GPU shares system RAM
+    unified_memory: bool = False  # GPU and CPU share one RAM pool (Apple, RTX Spark, Strix Halo, ...)
     notes: list[str] = field(default_factory=list)  # human-readable caveats from detection
     ram_bandwidth_gbs: Optional[float] = None  # measured by a quick read benchmark (perf.py)
     cpu_flags: list[str] = field(default_factory=list)  # e.g. ["avx2", "avx512f", "neon"]
