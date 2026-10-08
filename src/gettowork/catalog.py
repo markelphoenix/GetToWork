@@ -213,17 +213,30 @@ def quant_quality(
 
     An unknown label with no size scores ``UNKNOWN_QUANT_QUALITY``, not a
     middling 0.9.
+
+    A known name is not scored *above* its label when the file is only a
+    little larger (tokenizer and metadata). A last-resort name, an unknown
+    name, and a file that measures worse than its name keep the measured
+    score, so a 2.35-bit mix cannot hide behind a Q4 label.
     """
     measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
-    if measured is not None:
-        return _quality_from_bits(measured)
     key = _normalise_quant(tag)
-    if key in _QUANT_QUALITY:
-        return _QUANT_QUALITY[key]
-    bits = QUANT_BITS.get(key)
-    if bits is None:
-        return UNKNOWN_QUANT_QUALITY
-    return _quality_from_bits(bits)
+    if measured is None:
+        if key in _QUANT_QUALITY:
+            return _QUANT_QUALITY[key]
+        bits = QUANT_BITS.get(key)
+        if bits is None:
+            return UNKNOWN_QUANT_QUALITY
+        return _quality_from_bits(bits)
+    measured_quality = _quality_from_bits(measured)
+    if quant_bits(tag) is None:
+        return measured_quality
+    label_quality = _QUANT_QUALITY.get(key)
+    if label_quality is None:
+        label_quality = _quality_from_bits(quant_bits(tag) or 0.0)
+    if measured_quality > label_quality and _tier_from_label(tag) != "last":
+        return label_quality
+    return measured_quality
 
 
 def estimate_quant_size_gb(params_b: float, quant: Optional[str]) -> Optional[float]:
@@ -235,28 +248,24 @@ def estimate_quant_size_gb(params_b: float, quant: Optional[str]) -> Optional[fl
     return round(params_b * bits / 8 * 1.05, 2)
 
 
-def _quant_tier(
-    tag: str, *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
-    file_bytes: Optional[float] = None, params: Optional[float] = None,
-) -> str:
-    """Sort quants into rungs of the ladder: high / standard / low / last / full.
+_TIER_RANK = {"last": 0, "low": 1, "standard": 2, "high": 3, "full": 4}
 
-    When the file size and the parameter count are known, the rung follows
-    those bits, not the label. A file named IQ3_S that is really about 3.5
-    bits per weight is the low rung, not a last resort. Below 3.5 bits
-    (a 2.35-bit mix, for example) stays last resort.
-    """
-    measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
-    if measured is not None:
-        if measured > 9:
-            return "full"
-        if measured >= 5.5:
-            return "high"
-        if measured >= 4.3:
-            return "standard"
-        if measured >= 3.5:
-            return "low"
-        return "last"
+
+def _tier_from_bits(bits: float) -> str:
+    """Rung for a measured bits-per-weight figure."""
+    if bits > 9:
+        return "full"
+    if bits >= 5.5:
+        return "high"
+    if bits >= 4.3:
+        return "standard"
+    if bits >= 3.5:
+        return "low"
+    return "last"
+
+
+def _tier_from_label(tag: str) -> str:
+    """Rung from the quant name, used when the file size is unknown."""
     bits = quant_bits(tag) or 4.8
     if bits > 9:
         return "full"  # F16/BF16/F32: twice the size of Q8_0 for no visible gain
@@ -268,6 +277,38 @@ def _quant_tier(
     if quality >= 0.87:
         return "low"  # ~3.7-3.9 bits: Q3_K_M, IQ3_M
     return "last"  # below ~3.7 bits: only if nothing else fits
+
+
+def _quant_tier(
+    tag: str, *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+    file_bytes: Optional[float] = None, params: Optional[float] = None,
+) -> str:
+    """Sort quants into rungs of the ladder: high / standard / low / last / full.
+
+    When the file size and the parameter count are known, the rung follows
+    those bits. A file named IQ3_S that is really about 3.5 bits per weight
+    is the low rung, not a last resort. Below 3.5 bits (a 2.35-bit mix, for
+    example) stays last resort. An unknown name uses the file, never an
+    optimistic guess.
+
+    A known name is not promoted by a slightly larger file: a Q4_K_M GGUF
+    measures above its 4.8-bit label because of the tokenizer, and treating
+    that as Q5 made an 8 GB laptop offer full Clef. A last-resort name is
+    still promoted when the bytes are really at least 3.5 bits. A file that
+    measures *worse* than its name keeps the measured rung.
+    """
+    measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
+    if measured is None:
+        return _tier_from_label(tag)
+    measured_tier = _tier_from_bits(measured)
+    if quant_bits(tag) is None:
+        return measured_tier
+    label_tier = _tier_from_label(tag)
+    if _TIER_RANK[measured_tier] > _TIER_RANK[label_tier]:
+        if label_tier == "last" and measured >= 3.5:
+            return measured_tier
+        return label_tier
+    return measured_tier
 
 
 # ---------------------------------------------------------------------------

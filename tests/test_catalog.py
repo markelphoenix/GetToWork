@@ -241,6 +241,13 @@ def test_file_size_beats_the_quant_label():
     measured = catalog.quant_quality("IQ3_S", file_bytes=GSQ_IQ3_S_BYTES, params=GSQ_PARAMS)
     assert measured == catalog._quality_from_bits(gsq_bits)
     assert measured != labeled
+    # Tokenizer overhead makes a real Q4 file measure above 4.8 bits. That
+    # does not promote it to the Q5 rung. A Q4 name on a 2.35-bit file does
+    # drop to last resort.
+    clef = catalog.get_system_one("clef")
+    q4_size = next(size for quant, size in catalog._quant_options(clef) if quant == "Q4_K_M")
+    assert catalog._quant_tier("Q4_K_M", size_gb=q4_size, params_b=clef.params_b) == "standard"
+    assert catalog._quant_tier("Q4_K_M", file_bytes=SALUKI_BYTES, params=SALUKI_PARAMS) == "last"
 
 
 def test_a_mislabeled_3_5_bit_file_is_not_forced_tight():

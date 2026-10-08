@@ -878,7 +878,9 @@ def test_custom_repo_with_a_restrictive_license_is_flagged(tmp_path):
 NEWFAM = dataclasses.replace(QWEN4B, key="unsloth/NewFam9-4B-GGUF", hf_repo="unsloth/NewFam9-4B-GGUF",
                              display_name="NewFam9 4B", family="NewFam9", architecture="newfam9",
                              source="huggingface", downloads=900_000)
-ENGINE_ARCHS = frozenset({"llama", "qwen3", "qwen3moe", "phi3", "gpt-oss", "gemma3"})
+# qwen35 is the Qwen3.8 seed. b11485 loads it, so a built game that can run
+# the curated list must include it. newfam9 stays unknown on purpose.
+ENGINE_ARCHS = frozenset({"llama", "qwen3", "qwen3moe", "qwen35", "phi3", "gpt-oss", "gemma3"})
 
 
 def test_a_built_game_only_offers_models_its_engine_can_load(tmp_path):
