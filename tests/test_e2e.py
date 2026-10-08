@@ -365,7 +365,7 @@ def managed_engine(tmp_path, isolated_home, monkeypatch):
     (folder / "install.json").write_text(json.dumps(
         {"tag": "b1", "variant": "cpu", "label": "CPU", "assets": [], "exe": "llama-server"}), encoding="utf-8")
     gguf = tmp_path / "tiny-model-Q4_K_M.gguf"
-    gguf.write_bytes(b"GGUF" + b"\0" * 1024)
+    gguf.write_bytes(b"GGUF" + (3).to_bytes(4, "little") + b"\0" * 1020)
     pid_file = tmp_path / "server.pid"
     monkeypatch.setenv("FAKE_PID_FILE", str(pid_file))
     return gguf, pid_file
