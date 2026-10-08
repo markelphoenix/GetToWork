@@ -2077,6 +2077,86 @@ def _install_into(ui: UI, http: Any, release: dict, assets: list[dict], variant:
     return final_dir / Path(*PurePosixPath(rel_exe).parts)
 
 
+_PIN_DIGEST_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})\s+\*?(\S+)$")
+
+
+def pin_archive_name_ok(tag: str, name: str) -> bool:
+    """True when ``name`` may appear in the pin for ``tag``.
+
+    Windows CUDA runtime zips are published as ``cudart-llama-bin-win-...``
+    with no build number. Every other archive includes ``llama-<tag>-``.
+    """
+    if name.startswith(f"llama-{tag}-") or name.startswith(f"cudart-llama-{tag}-"):
+        return True
+    return name.startswith("cudart-llama-bin-win-")
+
+
+def load_engine_pin(path: Optional[Path] = None) -> tuple[str, dict[str, str]]:
+    """``(tag, {archive name: sha256})`` from ``packaging/llama_cpp_tag.txt``.
+
+    Raises :class:`RuntimeInstallError` when the file is missing, malformed,
+    or names an archive that is not part of that release.
+    """
+    pin_path = path or Path(__file__).resolve().parents[2] / "packaging" / "llama_cpp_tag.txt"
+    try:
+        lines = pin_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeInstallError(
+            f"Couldn't read the pinned llama.cpp release from {pin_path} ({exc})."
+        ) from exc
+    entries = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+    tags = [line for line in entries if re.fullmatch(r"b\d+", line)]
+    if len(tags) != 1 or not entries or entries[0] != tags[0]:
+        raise RuntimeInstallError(
+            f"{pin_path} should name exactly one llama.cpp release, like b7000, on its first "
+            "line (then one '<sha256>  <archive name>' line per archive)."
+        )
+    tag = tags[0]
+    digests: dict[str, str] = {}
+    for line in entries[1:]:
+        match = _PIN_DIGEST_RE.match(line)
+        if match is None:
+            raise RuntimeInstallError(f"{pin_path}: {line!r} isn't a '<sha256>  <archive name>' line.")
+        digest, name = match.group(1).lower(), match.group(2)
+        if not pin_archive_name_ok(tag, name):
+            raise RuntimeInstallError(
+                f"{pin_path}: {name} isn't an archive of the pinned release {tag} - update the "
+                "SHA-256 lines whenever the pin moves."
+            )
+        if name in digests:
+            raise RuntimeInstallError(f"{pin_path} lists {name} twice.")
+        digests[name] = digest
+    return tag, digests
+
+
+def require_pinned_assets(assets: list[dict], digests: dict[str, str]) -> list[dict]:
+    """Copy ``assets`` with each digest forced to the pin. Fail closed otherwise.
+
+    A missing pin line, or a GitHub digest that disagrees with the pin, raises
+    before any download. The returned digest is the pin, so the byte check
+    after the download uses the reviewed checksum, not only GitHub's.
+    """
+    checked = []
+    for asset in assets:
+        name = str(asset.get("name") or "")
+        expected = digests.get(name)
+        if not expected:
+            raise RuntimeInstallError(
+                f"packaging/llama_cpp_tag.txt pins no SHA-256 for {name}. "
+                "The engine was not downloaded."
+            )
+        published = _parse_digest(asset.get("digest"))
+        if published and published != expected:
+            raise RuntimeInstallError(
+                f"GitHub now reports a different SHA-256 for {name} ({published[:12]}...) than the one pinned "
+                f"in packaging/llama_cpp_tag.txt ({expected[:12]}...). The engine was not downloaded."
+            )
+        updated = dict(asset)
+        updated["digest"] = f"sha256:{expected}"
+        checked.append(updated)
+    return checked
+
+
 def install_tagged_release(
     ui: UI,
     specs: SystemSpecs,
@@ -2096,6 +2176,11 @@ def install_tagged_release(
     wanted = (tag or "").strip()
     if not wanted:
         raise RuntimeInstallError("No llama.cpp release was named.")
+    pin_tag, pin_digests = load_engine_pin()
+    if wanted != pin_tag:
+        raise RuntimeInstallError(
+            f"This installer only downloads the pinned llama.cpp release ({pin_tag}), not {wanted}."
+        )
     http = http or UrllibHttp()
     llama_root = _llama_root(runtime_root)
     with ui.status(f"Checking GitHub for llama.cpp {escape(wanted)}..."):
@@ -2108,6 +2193,7 @@ def install_tagged_release(
         chosen = select_assets(release.get("assets") or [], cand, specs.os_name, specs.arch)
         if not chosen:
             continue
+        chosen = require_pinned_assets(chosen, pin_digests)
         return _install(ui, http, release, chosen, cand, llama_root), cand
     raise RuntimeInstallError(
         f"llama.cpp {wanted} has no prebuilt engine for {specs.os_name} on {specs.arch}."

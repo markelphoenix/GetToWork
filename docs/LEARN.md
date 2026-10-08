@@ -681,6 +681,10 @@ llama-server -m model.gguf --host 127.0.0.1 --port 54321 -c 4096 \
   no device budget, and the fitter treats leftover RAM as unlimited.
 - On the CPU build the game adds `-ngl 0` (zero layers on the GPU) and
   `--device none`.
+- A live launch passes a larger `--fit-target` when other programs are already
+  using video memory, and a larger one again on Windows. The 819 MiB above is
+  the reserve with nothing else in use. The number in "needs ~X of Y GB" is
+  that free memory, not the card's total.
 
 Then it polls `GET /health` (503 while the model loads, 200 with
 `{"status": "ok"}` when ready) and sends each prompt to

@@ -722,7 +722,13 @@ class _JevOnboarding:
                 note = "doesn't look like it fits — you can still look, the download asks again"
             else:
                 size = f"{fit.download_gb:.1f}" if fit.download_gb else "?"
-                note = f"{fit.verdict} fit, about {size} GB, {fit.quant}"
+                seconds = catalog.format_decision_seconds(catalog.decision_seconds(
+                    reserved,
+                    placement=fit.placement,
+                    gpu_share=fit.gpu_share or 0.0,
+                    weights_gb=float(fit.download_gb or 0.0),
+                ))
+                note = f"{fit.verdict} fit, about {size} GB, {fit.quant}, {seconds}"
             options.append((
                 model.key,
                 f"{model.display_name}{mark}: local decision model, Apache-2.0 — {note}",
@@ -767,6 +773,7 @@ class _JevOnboarding:
         try:
             client = launch_local_clef(
                 ui, model, fit, engine_tag=self._engine_tag(), launcher=self.clef_launcher,
+                specs=self.specs,
             )
         except LocalClefUnavailable as exc:
             ui.warn(escape(str(exc)))

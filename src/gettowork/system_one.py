@@ -33,7 +33,7 @@ from .backends.llamaserver import build_server_args, find_free_port, server_env
 from .config import runtime_dir
 from .jev import JevClient
 from .notices import LOCAL_RUN_NOTICES
-from .types import FitResult, ModelEntry
+from .types import FitResult, ModelEntry, SystemSpecs
 from .ui import UI
 
 # Official llama.cpp release whose notes say: "model: add support for clef
@@ -242,6 +242,32 @@ def resolve_engine_tag() -> Optional[str]:
     return max(tags, key=lambda tag: (_tag_number(tag) >= 0, _tag_number(tag)))
 
 
+# One physical batch has to hold the whole referee request. Past this, the
+# compute buffer — not the context cache — is what filled the card
+# (1,317 MiB at 4,096, 5,206 at 16,384, 26,519 at 65,536 on an RTX 5090).
+# Real requests were about 1,200 tokens, so 4,096 still covers them.
+CLEF_MAX_BATCH = 4096
+# A full-GPU decision was under a second. CPU rounds on 8 cores took 47–65 s,
+# so the old 30 s client timeout fell back to the story model every time.
+CLEF_TIMEOUT_GPU_S = 30.0
+CLEF_TIMEOUT_PARTIAL_S = 120.0
+CLEF_TIMEOUT_CPU_S = 180.0
+
+
+def clef_batch_tokens(n_ctx: int) -> int:
+    """Physical batch (``-b`` / ``-ub``). Context (``-c``) stays at ``n_ctx``."""
+    return max(1, min(int(n_ctx), CLEF_MAX_BATCH))
+
+
+def clef_client_timeout(placement: str) -> float:
+    """Seconds to wait for one local decision, by where the model sits."""
+    if placement == "cpu":
+        return CLEF_TIMEOUT_CPU_S
+    if placement == "partial":
+        return CLEF_TIMEOUT_PARTIAL_S
+    return CLEF_TIMEOUT_GPU_S
+
+
 def launch_local_clef(
     ui: UI,
     entry: ModelEntry,
@@ -249,6 +275,7 @@ def launch_local_clef(
     *,
     engine_tag: Optional[str],
     launcher: Optional[Launcher] = None,
+    specs: Optional[SystemSpecs] = None,
 ) -> Any:
     """Start a local Clef referee, or raise :class:`LocalClefUnavailable`.
 
@@ -260,10 +287,12 @@ def launch_local_clef(
         raise LocalClefUnavailable(engine_block_message(engine_tag, status))
     if launcher is not None:
         return launcher(entry, fit)
-    return _start_process(ui, entry, fit)
+    return _start_process(ui, entry, fit, specs=specs)
 
 
-def _start_process(ui: UI, entry: ModelEntry, fit: FitResult) -> LocalClefReferee:
+def _start_process(
+    ui: UI, entry: ModelEntry, fit: FitResult, *, specs: Optional[SystemSpecs] = None,
+) -> LocalClefReferee:
     exe = _newest_clef_server()
     if exe is None:
         raise LocalClefUnavailable(
@@ -283,6 +312,7 @@ def _start_process(ui: UI, entry: ModelEntry, fit: FitResult) -> LocalClefRefere
     api_key = "clef_local_" + secrets.token_hex(16)
     args = clef_server_args(
         exe, model_path, port=port, n_ctx=n_ctx, cpu_only=fit.placement == "cpu",
+        fit_target_mib=catalog.fit_target_mib(specs),
     )
     log_dir = runtime_dir() / "logs"
     try:
@@ -317,7 +347,16 @@ def _start_process(ui: UI, entry: ModelEntry, fit: FitResult) -> LocalClefRefere
             "Clef's engine started but never became ready. The log is runtime/logs/clef-server.log. "
             "The server was stopped."
         )
-    client = JevClient(api_key, base_url=f"http://127.0.0.1:{port}", model=entry.key, max_retries=0)
+    batch = clef_batch_tokens(n_ctx)
+    client = JevClient(
+        api_key,
+        base_url=f"http://127.0.0.1:{port}",
+        model=entry.key,
+        max_retries=0,
+        timeout=clef_client_timeout(fit.placement),
+        local_referee=True,
+        max_prompt_tokens=batch,
+    )
     name = entry.display_name
     return LocalClefReferee(client, stop, f"Clef ({name})")
 
@@ -329,6 +368,7 @@ def clef_server_args(
     port: int,
     n_ctx: int,
     cpu_only: bool,
+    fit_target_mib: Optional[int] = None,
 ) -> list[str]:
     """The llama-server command for a local Clef referee.
 
@@ -341,16 +381,21 @@ def clef_server_args(
     ``--no-repack`` keeps the ordinary buffer, which can. The flag has been
     in llama-server since at least b11371, the first build that loads Clef text.
 
-    ``-b`` and ``-ub`` match the context. Clef is an embedding model, and this
-    engine then forces the logical batch down to the physical batch (default
-    512). A real referee request is about 1,150 tokens, so the default batch
-    rejects it (``input is too large to process``) even when ``-c`` is larger.
-    One physical batch has to hold the whole prompt.
+    ``-c`` stays at the planned context. ``-b`` and ``-ub`` are
+    ``min(context, 4096)``. Clef is an embedding model, and this engine then
+    forces the logical batch down to the physical batch (default 512). A real
+    referee request is about 1,200 tokens, so the default batch rejects it
+    (``input is too large to process``) even when ``-c`` is larger. One
+    physical batch has to hold the whole prompt. Matching the batch to a
+    65,536 context instead made the compute buffer 26,519 MiB and pushed
+    layers off the GPU until CUDA failed. 4,096 is enough for the request,
+    and the request builder refuses to exceed it.
     """
-    ctx = str(int(n_ctx))
+    batch = str(clef_batch_tokens(n_ctx))
     return build_server_args(
         exe, model_path, port=port, n_ctx=n_ctx, cpu_only=cpu_only,
-    ) + ["--no-repack", "-b", ctx, "-ub", ctx]
+        fit_target_mib=fit_target_mib,
+    ) + ["--no-repack", "-b", batch, "-ub", batch]
 
 
 def _entry_for_quant(entry: ModelEntry, quant: str, download_gb: Optional[float]) -> ModelEntry:
@@ -411,6 +456,7 @@ def consent_lines(entry: ModelEntry) -> list[str]:
         "The weights are not part of this game; confirming downloads them from Hugging Face.",
         *LOCAL_RUN_NOTICES,
         "Clef does not write the story. It only scores the referee's questions. "
-        "Any tokens/s number is this game's chat-model estimate, not a measured Clef latency. "
+        "Any seconds-per-decision number is an estimate for one forward pass, "
+        "not a measured run on this computer. "
         "The download is from Hugging Face. Scoring stays on 127.0.0.1. Nothing is sent to Cloudflare.",
     ]

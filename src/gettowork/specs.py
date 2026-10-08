@@ -352,7 +352,11 @@ def _vendor_from_name(name: str) -> str:
 
 
 def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
-    """Parse ``name, memory.total [MiB], driver_version[, compute_cap]`` CSV lines."""
+    """Parse nvidia-smi CSV: name, total MiB, optional used MiB, driver, optional compute cap.
+
+    ``memory.used`` is an integer. A driver version always contains a dot, so a
+    line from an older query (no used-memory column) still parses.
+    """
     gpus = []
     for line in out.splitlines():
         parts = [p.strip() for p in line.split(",")]
@@ -362,17 +366,43 @@ def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
             vram = _gib(float(parts[1]) * 1024 * 1024)
         except ValueError:
             vram = 0.0  # "[N/A]" on some systems
-        driver = parts[2] if len(parts) > 2 and re.match(r"^\d+(\.\d+)*$", parts[2]) else None
-        compute = float(parts[3]) if len(parts) > 3 and re.match(r"^\d+\.\d+$", parts[3]) else None
-        gpus.append(GPUInfo(name=_clean(parts[0]), vendor="nvidia", vram_gb=vram, driver_version=driver,
-                            compute_capability=compute))
+        rest = parts[2:]
+        used = 0.0
+        if rest and re.fullmatch(r"\d+", rest[0]):
+            try:
+                used = _gib(float(rest[0]) * 1024 * 1024)
+            except ValueError:
+                used = 0.0
+            rest = rest[1:]
+        driver = rest[0] if rest and re.match(r"^\d+(\.\d+)*$", rest[0]) else None
+        if driver:
+            rest = rest[1:]
+        compute = float(rest[0]) if rest and re.match(r"^\d+\.\d+$", rest[0]) else None
+        gpus.append(GPUInfo(
+            name=_clean(parts[0]), vendor="nvidia", vram_gb=vram, vram_used_gb=used,
+            driver_version=driver, compute_capability=compute,
+        ))
     return gpus
 
 
-_NVIDIA_QUERY = ["nvidia-smi", "--query-gpu=name,memory.total,driver_version,compute_cap",
+_NVIDIA_QUERY = ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version,compute_cap",
                  "--format=csv,noheader,nounits"]
 # Drivers older than ~510 don't know "compute_cap" and reject the whole query.
-_NVIDIA_QUERY_OLD = ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"]
+_NVIDIA_QUERY_OLD = ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
+                     "--format=csv,noheader,nounits"]
+# Last resort if a driver also rejects memory.used. Used memory stays unknown (0).
+_NVIDIA_QUERY_OLDER = ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                       "--format=csv,noheader,nounits"]
+
+
+def _block_hardware_probe(kind: str) -> None:
+    """Refuse NVML, the Windows registry, and DXGI while pytest is running.
+
+    The test suite stubs the public helpers. If a test reaches the real
+    function anyway, stop before ``nvml.dll``, ``winreg``, or ``dxgi.dll``.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise RuntimeError(f"a test reached real {kind}")
 
 
 def _norm_gpu_name(name: str) -> str:
@@ -405,21 +435,24 @@ class _NvmlMemory(ctypes.Structure):
     )
 
 
-def _nvml_device_records() -> list[tuple[str, int, Optional[str]]]:
-    """[(name, total bytes, driver version)] from NVML, or [] if the library is missing.
+def _nvml_device_records() -> list[tuple]:
+    """[(name, total bytes, used bytes, driver version)] from NVML, or [] if it is missing.
 
     Used when ``nvidia-smi`` is not on PATH. The driver still ships ``nvml.dll``
     (Windows) or ``libnvidia-ml.so.1`` (Linux). Any failure, including asking for
     ``WinDLL`` on a system that does not have it, returns an empty list so
-    hardware detection keeps going.
+    hardware detection keeps going. A 3-tuple ``(name, total, driver)`` is
+    still accepted from a stub that has not been updated.
     """
+    _block_hardware_probe("NVML")
     try:
         return _nvml_device_records_loaded()
     except Exception:
         return []
 
 
-def _nvml_device_records_loaded() -> list[tuple[str, int, Optional[str]]]:
+def _nvml_device_records_loaded() -> list[tuple]:
+    _block_hardware_probe("NVML")
     names = ["nvml.dll"] if platform.system() == "Windows" else ["libnvidia-ml.so.1", "libnvidia-ml.so"]
     loader = getattr(ctypes, "WinDLL" if platform.system() == "Windows" else "CDLL")
     lib = None
@@ -467,7 +500,12 @@ def _nvml_device_records_loaded() -> list[tuple[str, int, Optional[str]]]:
             memory = _NvmlMemory()
             if lib.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(memory)) != success:
                 continue
-            records.append((name_buf.value.decode("utf-8", "replace"), int(memory.total), driver))
+            records.append((
+                name_buf.value.decode("utf-8", "replace"),
+                int(memory.total),
+                int(memory.used),
+                driver,
+            ))
         return records
     except Exception:
         return []
@@ -479,11 +517,18 @@ def _nvml_device_records_loaded() -> list[tuple[str, int, Optional[str]]]:
 def _nvidia_nvml_gpus() -> list[GPUInfo]:
     """NVIDIA cards from NVML. Empty when the library is missing or unreadable."""
     gpus = []
-    for name, total_bytes, driver in _nvml_device_records():
+    for record in _nvml_device_records():
+        if len(record) >= 4:
+            name, total_bytes, used_bytes, driver = record[0], record[1], record[2], record[3]
+        else:
+            name, total_bytes, driver = record[0], record[1], record[2]
+            used_bytes = 0
         if not name or total_bytes <= 0:
             continue
         gpus.append(GPUInfo(
-            name=_clean(name), vendor="nvidia", vram_gb=_gib(total_bytes), driver_version=driver,
+            name=_clean(name), vendor="nvidia", vram_gb=_gib(total_bytes),
+            vram_used_gb=_gib(used_bytes) if used_bytes else 0.0,
+            driver_version=driver,
         ))
     return gpus
 
@@ -492,6 +537,8 @@ def _nvidia_gpus(notes: list[str]) -> tuple[list[GPUInfo], str]:
     out, status = _run(_NVIDIA_QUERY)
     if status == "failed":
         out, status = _run(_NVIDIA_QUERY_OLD)
+    if status == "failed":
+        out, status = _run(_NVIDIA_QUERY_OLDER)
     if status != "ok":
         nvml = _nvidia_nvml_gpus()
         if nvml:
@@ -658,6 +705,7 @@ def _windows_registry_vram() -> dict[str, float]:
     Win32_VideoController.AdapterRAM is a 32-bit number and tops out at 4 GB,
     but drivers also store the real size as a 64-bit value in the registry.
     """
+    _block_hardware_probe("Windows registry")
     result: dict[str, float] = {}
     try:
         import winreg  # type: ignore[import-not-found]
@@ -694,6 +742,7 @@ def _windows_dxgi_vram() -> dict[str, float]:
     ``Win32_VideoController.AdapterRAM`` is a 32-bit count and stops at 4 GB.
     DXGI's ``DedicatedVideoMemory`` is the size the driver reports to DirectX.
     """
+    _block_hardware_probe("DXGI")
     if platform.system() != "Windows":
         return {}
     try:
@@ -702,8 +751,15 @@ def _windows_dxgi_vram() -> dict[str, float]:
         return {}
 
 
+# Kept so a test can call the real probe after the suite has stubbed the public name.
+_UNPATCHED_NVML_RECORDS = _nvml_device_records
+_UNPATCHED_REGISTRY_VRAM = _windows_registry_vram
+_UNPATCHED_DXGI_VRAM = _windows_dxgi_vram
+
+
 def _dxgi_dedicated_video_memory() -> dict[str, float]:
     """Read DXGI adapter descriptions. Raises only if the caller wants the raw failure."""
+    _block_hardware_probe("DXGI")
     dxgi = ctypes.WinDLL("dxgi.dll")
     # IDXGIFactory1
     iid = (ctypes.c_byte * 16).from_buffer_copy(

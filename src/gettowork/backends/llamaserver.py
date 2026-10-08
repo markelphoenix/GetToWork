@@ -184,6 +184,7 @@ def build_server_args(
     n_ctx: int,
     cpu_only: bool = False,
     minimal: bool = False,
+    fit_target_mib: Optional[int] = None,
 ) -> list[str]:
     """The ``llama-server`` command line, as a list (never a shell string).
 
@@ -211,7 +212,8 @@ def build_server_args(
     """
     args = [str(exe), "-m", str(model_path), "--host", "127.0.0.1", "--port", str(port), "-c", str(n_ctx)]
     if not minimal:
-        args += ["--reasoning-format", "deepseek", "--no-webui", "-np", "1", *_fit_args(n_ctx, cpu_only)]
+        args += ["--reasoning-format", "deepseek", "--no-webui", "-np", "1",
+                 *_fit_args(n_ctx, cpu_only, fit_target_mib=fit_target_mib)]
     if cpu_only:
         if not minimal:
             args += ["--device", "none"]
@@ -219,16 +221,23 @@ def build_server_args(
     return args
 
 
-def _fit_args(n_ctx: int, cpu_only: bool) -> list[str]:
+def _fit_args(n_ctx: int, cpu_only: bool, *, fit_target_mib: Optional[int] = None) -> list[str]:
     """Explicit ``--fit`` so b11485's default cannot drift from the menu.
 
-    See :func:`build_server_args`. The reserve is ``catalog.GPU_VRAM_RESERVE_GB``.
+    See :func:`build_server_args`. With no live reading the target is
+    ``catalog.GPU_VRAM_RESERVE_GB`` (819 MiB). A launch that knows the machine
+    passes :func:`catalog.fit_target_mib`, which also keeps in-use video memory
+    and the Windows margin free. CUDA's own free figure on the test machine
+    ignored programs nvidia-smi could see.
     """
     if cpu_only:
         return ["--fit", "off"]
     from .. import catalog
 
-    reserve_mib = max(1, round(float(catalog.GPU_VRAM_RESERVE_GB) * 1024))
+    if fit_target_mib is None:
+        reserve_mib = max(1, round(float(catalog.GPU_VRAM_RESERVE_GB) * 1024))
+    else:
+        reserve_mib = max(1, int(fit_target_mib))
     return ["--fit", "on", "--fit-target", str(reserve_mib), "--fit-ctx", str(int(n_ctx))]
 
 
@@ -1674,7 +1683,14 @@ class LlamaServerBackend(LLMBackend):
         exe, model = Path(exe).resolve(), Path(model).resolve()
         port = self._fixed_port or find_free_port()
         self.port = port
-        args = build_server_args(exe, model, port=port, n_ctx=self.n_ctx, cpu_only=cpu_only, minimal=minimal)
+        target = None
+        if not cpu_only and not minimal and self.specs is not None:
+            from .. import catalog
+            target = catalog.fit_target_mib(self.specs)
+        args = build_server_args(
+            exe, model, port=port, n_ctx=self.n_ctx, cpu_only=cpu_only, minimal=minimal,
+            fit_target_mib=target,
+        )
 
         log_dir = self._log_folder()
         log_dir.mkdir(parents=True, exist_ok=True)

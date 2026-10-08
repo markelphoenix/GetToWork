@@ -139,7 +139,12 @@ def machine(monkeypatch, tmp_path):
         monkeypatch.setattr(specs, "_SYSFS_DRM", drm)
         monkeypatch.setattr(specs, "_vulkan_loader_present", lambda os_name: vulkan)
         monkeypatch.setattr(specs, "_windows_registry_cpu_name", lambda: None)
+        # Empty unless this test replaces them after ``machine(...)`` returns.
+        # nvidia-smi is already faked as missing; without these stubs the NVML
+        # fallback would load the real driver on an NVIDIA PC.
+        monkeypatch.setattr(specs, "_nvml_device_records", lambda: [])
         monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
+        monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {})
         monkeypatch.setattr(specs, "_windows_cpu_flags", lambda arch: ["avx", "avx2"])
         monkeypatch.setattr(specs.perf, "measure_ram_bandwidth", lambda budget_s=0.3: bandwidth)
         # The real benchmark leaves a note behind (e.g. on a low-memory CI runner); the fake leaves none.
@@ -201,6 +206,26 @@ def test_linux_with_nvidia_gpu(machine, tmp_path):
 
     summary = specs.friendly_summary(s)
     assert "16 GB of RAM" in summary and "an NVIDIA GeForce RTX 3060" in summary and "12 GB of video memory" in summary
+
+
+def test_nvidia_smi_used_memory_is_kept_and_old_lines_still_parse():
+    used = specs._parse_nvidia_smi("NVIDIA GeForce RTX 5090, 32607, 6144, 617.14, 12.0\n")
+    assert used[0].vram_gb == pytest.approx(round(32607 * 1024 * 1024 / 2**30, 1))
+    assert used[0].vram_used_gb == pytest.approx(round(6144 * 1024 * 1024 / 2**30, 1))
+    assert used[0].driver_version == "617.14" and used[0].compute_capability == 12.0
+    old = specs._parse_nvidia_smi("NVIDIA GeForce GTX 1080, 8192, 580.95.05, 6.1\n")
+    assert old[0].vram_used_gb == 0.0 and old[0].driver_version == "580.95.05"
+    assert old[0].compute_capability == 6.1
+
+
+def test_real_gpu_probes_refuse_to_run_under_pytest():
+    """The suite stubs the helpers. Calling the real ones must not load a driver."""
+    with pytest.raises(RuntimeError, match="real NVML"):
+        specs._UNPATCHED_NVML_RECORDS()
+    with pytest.raises(RuntimeError, match="real Windows registry"):
+        specs._UNPATCHED_REGISTRY_VRAM()
+    with pytest.raises(RuntimeError, match="real DXGI"):
+        specs._UNPATCHED_DXGI_VRAM()
 
 
 def test_multiple_nvidia_gpus_and_na_memory():

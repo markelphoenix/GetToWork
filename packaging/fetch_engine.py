@@ -194,38 +194,14 @@ class PinnedRelease(NamedTuple):
     digests: dict[str, str]  # archive name -> lower-case hex SHA-256
 
 
-_PIN_DIGEST_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})\s+\*?(\S+)$")  # `sha256sum` output works as is
-
-
 def pinned_release(path: Optional[Path] = None) -> PinnedRelease:
     """The release in ``llama_cpp_tag.txt``: one ``b<N>`` line, then ``<sha256>  <archive name>`` lines.
 
     Lines starting with # are comments. Every archive line must name an
-    archive of that release (``llama-<tag>-...``), once.
+    archive of that release (``llama-<tag>-...`` or a CUDA runtime zip), once.
     """
     path = PINNED_TAG_FILE if path is None else path
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise ri.RuntimeInstallError(f"Couldn't read the pinned llama.cpp release from {path} ({exc}).") from exc
-    entries = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
-    tags = [line for line in entries if re.fullmatch(r"b\d+", line)]
-    if len(tags) != 1 or not entries or entries[0] != tags[0]:
-        raise ri.RuntimeInstallError(f"{path} should name exactly one llama.cpp release, like b7000, on its first "
-                                     "line (then one '<sha256>  <archive name>' line per archive).")
-    tag = tags[0]
-    digests: dict[str, str] = {}
-    for line in entries[1:]:
-        match = _PIN_DIGEST_RE.match(line)
-        if match is None:
-            raise ri.RuntimeInstallError(f"{path}: {line!r} isn't a '<sha256>  <archive name>' line.")
-        digest, name = match.group(1).lower(), match.group(2)
-        if not name.startswith(f"llama-{tag}-"):
-            raise ri.RuntimeInstallError(f"{path}: {name} isn't an archive of the pinned release {tag} - update the "
-                                         "SHA-256 lines whenever the pin moves.")
-        if name in digests:
-            raise ri.RuntimeInstallError(f"{path} lists {name} twice.")
-        digests[name] = digest
+    tag, digests = ri.load_engine_pin(path)
     return PinnedRelease(tag, digests)
 
 

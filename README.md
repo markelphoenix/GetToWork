@@ -482,6 +482,26 @@ game's "fits / doesn't fit" line is its usual estimate: file size, plus a
 rule-of-thumb KV cache whose shape is **unverified** for architecture `clef`,
 plus engine overhead. It also subtracts the story model that is already loaded.
 
+The menu shows an estimated **seconds per decision**, from one forward pass.
+Clef does not write tokens, so that line is not a tokens/s chat speed. It is
+an estimate (about 0.6 seconds fully on a 32 GB card for Clef Q4, about a
+second for a 75% split, about a minute on 8 CPU cores for the same file),
+not a measurement of your machine.
+
+The server context (`-c`) can stay large. The physical batch (`-b` and
+`-ub`) is capped at 4,096 tokens, which is enough for a referee request
+(about 1,200 tokens). A batch as large as the context made the compute
+buffer fill the card. The game trims the request so it cannot exceed that
+batch. On the processor the game waits up to 3 minutes for a score; a
+partial GPU split waits 2 minutes. If that runs out, the message talks about
+hardware speed, not a slow connection to Jev.
+
+"Needs ~X of Y GB" uses video memory that is actually free: the card's total,
+minus what other programs are already using, minus 0.8 GB kept spare, and on
+Windows another 3 GB. The same margin is what `llama-server --fit-target`
+is told to leave free, because on Windows CUDA's own free-memory figure
+ignored programs `nvidia-smi` could see.
+
 The text referee does not need the optional `mmproj` vision file. llama.cpp
 **b11371** (3 October 2026) is the first release whose notes say it can load
 Clef, and those notes say **text-only**. Image input landed later, in

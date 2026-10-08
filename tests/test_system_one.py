@@ -6,6 +6,7 @@ formula, without the chat-speed gate that picks a storyteller.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 
 import pytest
@@ -18,7 +19,11 @@ from gettowork.perf import estimate_gpu_bandwidth
 from gettowork.backends.llamaserver import build_server_args
 from gettowork.system_one import (
     CLEF_TEXT_MIN_BUILD,
+    CLEF_TIMEOUT_CPU_S,
+    CLEF_TIMEOUT_PARTIAL_S,
     LocalClefUnavailable,
+    clef_batch_tokens,
+    clef_client_timeout,
     clef_engine_status,
     clef_gguf_name,
     clef_server_args,
@@ -148,7 +153,19 @@ def test_system_one_recommendation_fits_and_prefers_the_larger_comfortable_model
     ]
     if comfortable:
         assert rec is not None
-        assert rec.model.key == max(comfortable, key=lambda key: fits[key].model.params_b)
+
+        def home(fit):
+            if fit.placement in ("gpu", "unified"):
+                return 0
+            if fit.placement == "partial":
+                return 1
+            if fit.placement == "cpu":
+                return 2
+            return 3
+
+        best = min(home(fits[key]) for key in comfortable)
+        housed = [key for key in comfortable if home(fits[key]) == best]
+        assert rec.model.key == max(housed, key=lambda key: fits[key].model.params_b)
         _fits_somewhere(specs, rec)
         assert "recommended" in rec.badges
     else:
@@ -191,7 +208,8 @@ def test_mac_16_and_cpu_only_get_the_smaller_model():
         fit = catalog.recommend_system_one(specs)
         assert fit is not None and fit.model.key == "clef-flash"
         _fits_somewhere(specs, fit)
-        assert "chat-model speed estimate" in fit.reason
+        assert "seconds per decision" in fit.reason
+        assert "tokens/s" not in fit.reason
 
 
 def test_amd_cards_get_a_fit_that_does_not_overflow():
@@ -215,7 +233,8 @@ def test_loaded_story_model_is_reserved_before_clef_is_picked():
     assert reserved is not None and reserved.model.key == "clef-flash"
     assert reserved.placement in ("gpu", "partial", "unified")
     assert "CPU" in reserved.reason and "sooner" in reserved.reason
-    assert "not a measured Clef latency" in reserved.reason
+    assert "seconds per decision" in reserved.reason
+    assert "tokens/s" not in reserved.reason
     left = catalog.reserve_for_loaded_model(RTX_5090, story)
     _fits_somewhere(left, reserved)
     on_card = catalog.evaluate_fit(left, catalog.get_system_one("clef"))
@@ -318,6 +337,9 @@ def test_clef_launch_turns_repack_off_and_fits_the_prompt_in_one_batch():
     gpu = clef_server_args("llama-server", "m.gguf", port=9, n_ctx=4096, cpu_only=False)
     assert gpu[-5:] == ["--no-repack", "-b", "4096", "-ub", "4096"]
     assert "--fit" in gpu and gpu[gpu.index("--fit") + 1] == "on"
+    wide = clef_server_args("llama-server", "m.gguf", port=9, n_ctx=65536, cpu_only=False)
+    assert wide[wide.index("-c") + 1] == "65536"
+    assert wide[-5:] == ["--no-repack", "-b", "4096", "-ub", "4096"]
 
 
 def test_old_engine_does_not_call_the_downloader(tmp_path, monkeypatch):
@@ -541,3 +563,95 @@ def test_layer_split_does_not_add_graphics_card_bandwidth():
     assert both is not None
     low, high = sorted((slow.bandwidth_gbs, fast.bandwidth_gbs))
     assert low < both[0] < high
+
+
+def test_more_memory_pressure_never_picks_a_bigger_referee():
+    previous = None
+    previous_mem = -1.0
+    for key in ("qwen3-4b", "qwen3-8b", "qwen3-14b", "qwen3-32b"):
+        story = catalog.evaluate_fit(RTX_5090, catalog.get_model(key))
+        rec = catalog.recommend_system_one(RTX_5090, story)
+        assert rec is not None
+        assert "seconds per decision" in rec.reason
+        assert "tokens/s" not in rec.reason
+        if previous is not None and story.est_memory_gb > previous_mem + 0.1:
+            assert rec.model.params_b <= previous
+        previous = rec.model.params_b
+        previous_mem = story.est_memory_gb
+    eight = catalog.recommend_system_one(
+        RTX_5090, catalog.evaluate_fit(RTX_5090, catalog.get_model("qwen3-8b")),
+    )
+    fourteen = catalog.recommend_system_one(
+        RTX_5090, catalog.evaluate_fit(RTX_5090, catalog.get_model("qwen3-14b")),
+    )
+    assert eight is not None and fourteen is not None
+    assert eight.model.key == "clef-flash"
+    assert fourteen.model.key == "clef-flash"
+
+
+def test_in_use_memory_and_the_windows_margin_change_the_budget():
+    card = gpu("NVIDIA GeForce RTX 5090", "nvidia", 32.0)
+    card.vram_used_gb = 6.0
+    linux = machine(64, 50, (card,))
+    windows = dataclasses.replace(linux, os_name="Windows")
+    linux_free = catalog._usable_vram_gb(linux)
+    windows_free = catalog._usable_vram_gb(windows)
+    assert linux_free == pytest.approx(32.0 - 6.0 - catalog.GPU_VRAM_RESERVE_GB)
+    assert windows_free == pytest.approx(linux_free - catalog.WINDOWS_VRAM_MARGIN_GB)
+    fit = catalog.evaluate_fit(windows, catalog.get_system_one("clef-flash"))
+    assert "needs ~" in fit.reason and "of 32 GB" not in fit.reason
+    assert catalog.fit_target_mib(None) == round(catalog.GPU_VRAM_RESERVE_GB * 1024)
+    assert catalog.fit_target_mib(windows) == round(
+        (catalog.GPU_VRAM_RESERVE_GB + catalog.WINDOWS_VRAM_MARGIN_GB + 6.0) * 1024
+    )
+    assert catalog.fit_target_mib(linux) == round((catalog.GPU_VRAM_RESERVE_GB + 6.0) * 1024)
+
+
+def test_local_clef_timeout_and_request_cannot_exceed_the_batch():
+    from gettowork.jev import (
+        JevError,
+        bound_system_one_request,
+        build_round_questions,
+        build_round_state,
+        estimate_prompt_tokens,
+    )
+
+    assert clef_batch_tokens(1024) == 1024
+    assert clef_batch_tokens(65536) == 4096
+    assert clef_client_timeout("gpu") == 30
+    assert clef_client_timeout("partial") == CLEF_TIMEOUT_PARTIAL_S
+    assert clef_client_timeout("cpu") == CLEF_TIMEOUT_CPU_S == 180
+    state = build_round_state(
+        intro="x" * 800, challenge="c" * 600, plan="p" * 1000,
+        progress=1, target=5, history=["h" * 300] * 4,
+    )
+    questions = build_round_questions()
+    # A maxed game request fits the 4096 batch. It does not fit a 1024 batch,
+    # which is what -ub is when the context itself is 1024, so the builder cuts it.
+    assert estimate_prompt_tokens(state, questions, "clef") <= 4096
+    assert estimate_prompt_tokens(state, questions, "clef") > 1024
+    small_state, small_questions = bound_system_one_request(state, questions, "clef", 1024)
+    assert estimate_prompt_tokens(small_state, small_questions, "clef") <= 1024
+    huge = {"story_so_far": "x" * 50000, "player_plan": "y" * 50000}
+    assert estimate_prompt_tokens(huge, questions, "clef") > 4096
+    bound_state, bound_questions = bound_system_one_request(huge, questions, "clef", 4096)
+    assert estimate_prompt_tokens(bound_state, bound_questions, "clef") <= 4096
+
+    def transport(method, url, headers, body, timeout):
+        raise TimeoutError("slow hardware")
+
+    from gettowork.jev import JevClient
+
+    client = JevClient(
+        "clef_local_abc", base_url="http://127.0.0.1:9", model="clef",
+        timeout=180, max_retries=0, local_referee=True, max_prompt_tokens=4096,
+        transport=transport,
+    )
+    with pytest.raises(JevError) as info:
+        client.system_one(state, questions)
+    message = info.value.message
+    assert info.value.kind == "timeout"
+    assert "Clef didn't finish" in message
+    assert "hardware" in message
+    assert "Jev didn't answer" not in message
+    assert "connection may be slow" not in message

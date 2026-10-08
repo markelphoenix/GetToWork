@@ -9,7 +9,12 @@
 # The lines after the tag pin each archive's SHA-256 (the format `sha256sum`
 # prints): fetch_engine.py refuses a download whose bytes - or whose
 # fingerprint on GitHub - differ, so a file replaced on the release after it
-# was reviewed never reaches players.
+# was reviewed never reaches players. The in-game Clef installer
+# (install_tagged_release) checks the same lines and fails closed when the pin
+# has no digest for an archive it would download, or when GitHub's digest
+# disagrees. That includes the CUDA 13/12 builds, their CUDA runtime zips,
+# Vulkan, and CPU, for each OS this installer can select. Windows CUDA runtime
+# zips omit the build tag in the filename GitHub publishes.
 #
 # To move: change the tag below (it must have Windows vulkan + cpu, Linux
 # vulkan + cpu and macOS arm64 builds), replace the SHA-256 lines with the new
@@ -22,3 +27,20 @@ ac51218237b4e9fdd0525e7a6ef56ba10c450cab200398d848fee6e7dd81c917  llama-b11485-b
 f12bcbb1dc2108b29172d40e8842635e4e22e507c9e8833797bdf08347a9e09c  llama-b11485-bin-ubuntu-vulkan-x64.tar.gz
 7c85db4246ec05169bde9dcf9fd146c0165cfb2ca9bad3209e8a1141c37ab754  llama-b11485-bin-ubuntu-x64.tar.gz
 61b0345992a4c8cc0f7228034a600c57e8baa9f3f727919ac9d9da52bc75a478  llama-b11485-bin-macos-arm64.tar.gz
+90634ec56573d28abc4350905e089a4951da23305c24da21d022a91d57807a19  llama-b11485-bin-win-vulkan-arm64.zip
+875995f25f50f6914a6de3bdfecbbc8279e58d86c4c456616ca15996ad732e5c  llama-b11485-bin-ubuntu-vulkan-arm64.tar.gz
+edf665b9b32b53073a3128e232788c732023a793e6d7dca41677b2635631593f  llama-b11485-bin-win-cpu-arm64.zip
+07179331c3b08c679c000b965b8cf96b33eb17523a2caeb811f43124fb754a8f  llama-b11485-bin-ubuntu-arm64.tar.gz
+4eb8920acb6fa20ed0b278dcfee893ced445bf9c6254d7b30deecd748a8695ac  llama-b11485-bin-macos-x64.tar.gz
+4977a2701d36fd9dbe9abdd2e17b9c287beae472d9a6e01026ef955b0a65ad15  llama-b11485-bin-win-cuda-13.4-x64.zip
+63934af7861c76a2a9099a29e79f7e06d9103e77918951637033ed42ad2153f0  llama-b11485-bin-win-cuda-13.4-arm64.zip
+b7e13901bf0504ebdc50b6fb83788320e216e651e568519a14cf4a3bdb157b8a  llama-b11485-bin-ubuntu-cuda-13.4-x64.tar.gz
+e596763166ec816bb9c8171f0b56fed042f537ae3cbadc58899a0a365567a222  llama-b11485-bin-ubuntu-cuda-13.4-arm64.tar.gz
+738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668  cudart-llama-bin-win-cuda-13.4-x64.zip
+642dcde8805b3e3165ca710a5443b3b4044b27d96bd3ee3132473988c9bcb774  cudart-llama-bin-win-cuda-13.4-arm64.zip
+7e499326c9d3d2665df2bf13592e17ddc284445cd0df17525abcf37cda109d7e  cudart-llama-b11485-bin-ubuntu-cuda-13.4-x64.tar.gz
+1ab975ac7788506bd26a841ba87abacdeac283333654b125f494d075c9913e92  cudart-llama-b11485-bin-ubuntu-cuda-13.4-arm64.tar.gz
+50e1abf6c4b8100096e583738eb8d28add2badbe70ca1a1dfa486816fb170ab0  llama-b11485-bin-win-cuda-12.4-x64.zip
+ffadb0778d7ca982927e288d0cd736f4ca727f0f6a558d80dfec0e84c84bec8e  llama-b11485-bin-ubuntu-cuda-12.8-x64.tar.gz
+8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6  cudart-llama-bin-win-cuda-12.4-x64.zip
+cc05ef515e00ebfd7c7d8ef5a7ded0b699cf91df495c5c4803edb0e805bfc48d  cudart-llama-b11485-bin-ubuntu-cuda-12.8-x64.tar.gz

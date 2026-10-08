@@ -47,6 +47,20 @@ def pytest_configure() -> None:
     rich_console.Console.size = property(size, original_property.fset)
     rich_console.Console.is_dumb_terminal = property(not_dumb)
 
+@pytest.fixture(autouse=True)
+def _no_real_gpu_probes(monkeypatch):
+    """No test may load NVML, the Windows display registry, or DXGI.
+
+    The defaults return empty. A test that needs a fake reading replaces the
+    helper itself. The real functions still refuse if something calls them.
+    """
+    import gettowork.specs as specs
+
+    monkeypatch.setattr(specs, "_nvml_device_records", lambda: [])
+    monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {})
+
+
 # The biggest file any test leaves behind today is well under 1 MB.
 MAX_TMP_PATH_BYTES = 64 * 1024**2
 
