@@ -239,9 +239,10 @@ def _fit_args(n_ctx: int, cpu_only: bool, *, fit_target_mib: Optional[int] = Non
 
     See :func:`build_server_args`. With no live reading the target is
     ``catalog.GPU_VRAM_RESERVE_GB`` (819 MiB). A launch that knows the machine
-    passes :func:`catalog.fit_target_mib`, which also keeps in-use video memory
-    and the Windows margin free. CUDA's own free figure on the test machine
-    ignored programs nvidia-smi could see.
+    passes :func:`catalog.fit_target_mib`. On Windows that also keeps in-use
+    video memory and the Clef margin free, because CUDA's free figure there
+    ignored programs nvidia-smi could see. On Linux the free figure already
+    excludes them, so the target stays the 0.8 GiB reserve.
     """
     if cpu_only:
         return ["--fit", "off"]

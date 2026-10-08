@@ -676,21 +676,35 @@ def _usable_vram_gb(specs: SystemSpecs, *, extra_per_card_gb: float = 0.0) -> fl
     )
 
 
+def _fit_target_counts_in_use(specs: Optional[SystemSpecs]) -> bool:
+    """Whether ``--fit-target`` should add memory other programs already hold.
+
+    Windows CUDA reported its free figure as if those programs were not there
+    (about 30,991 MiB free while nvidia-smi showed 1–6 GB in use), so the
+    target has to add them. On Linux the free figure already excludes them,
+    and adding the nvidia-smi number again would keep that memory spare twice.
+    This card has no separate CUDA-free reading, so the split is the OS.
+    """
+    return specs is not None and (specs.os_name or "").lower().startswith("win")
+
+
 def fit_target_mib(specs: Optional[SystemSpecs] = None, *, decision: bool = False) -> int:
     """MiB to pass as llama.cpp ``--fit-target``.
 
     With no specs this is the 819 MiB menu reserve, which is what the docs
-    show. CUDA on the Windows test machine reported ~30,991 MiB free while
-    nvidia-smi showed other programs using 1–6 GB, so a live launch adds that
-    in-use memory. When the probe never read in-use memory, the target is
-    about 2 GiB instead of 0.8 GiB. A Clef launch (``decision=True``) also
-    adds ``WINDOWS_VRAM_MARGIN_GB`` on Windows, because that run used about
-    2.9 GB more than llama.cpp projected. Story launches do not, so the
-    engine margin stays the one the story menu already counted.
+    show. On Windows a live launch adds in-use memory, because CUDA's free
+    figure there ignores other programs. When that probe never read in-use
+    memory, the Windows target is about 2 GiB instead of 0.8 GiB. On Linux
+    the target stays the 0.8 GiB reserve: CUDA's free figure already excludes
+    other programs. A Clef launch (``decision=True``) also adds
+    ``WINDOWS_VRAM_MARGIN_GB`` on Windows, because that run used about 2.9 GB
+    more than llama.cpp projected. Story launches do not, so the engine
+    margin stays the one the story menu already counted. The menu budget
+    (``_usable_vram_gb``) still subtracts in-use memory on every OS.
     """
     extra = windows_vram_margin_gb(specs) if specs is not None and decision else 0.0
     gpu = perf.primary_gpu(specs) if specs is not None else None
-    if gpu is None:
+    if gpu is None or not _fit_target_counts_in_use(specs):
         return max(1, round((GPU_VRAM_RESERVE_GB + extra) * 1024))
     return max(1, round(_card_holdback_gb(gpu, extra) * 1024))
 
@@ -2038,6 +2052,12 @@ def _decision_home(fit: FitResult) -> int:
 # decision) than the CPU fit wins even when the CPU fit is the larger
 # comfortable model.
 REFEREE_CARD_SPEED_RATIO = 4.0
+# When both referees are on the CPU, the larger file is not worth a long wait.
+# Clef Q4 is about three times the weights of Clef-flash, so its CPU estimate
+# is about three times as long. Prefer the faster one when the larger is more
+# than this many times slower, or when the larger is over the second figure.
+REFEREE_CPU_SLOW_RATIO = 2.0
+REFEREE_CPU_SLOW_SECONDS = 30.0
 
 
 def _fit_decision_seconds(specs: Optional[SystemSpecs], fit: FitResult) -> float:
@@ -2075,6 +2095,34 @@ def _prefer_fast_card(
     return fast or pool
 
 
+def _prefer_faster_cpu(pool: list[FitResult], specs: Optional[SystemSpecs]) -> list[FitResult]:
+    """Drop a much slower larger model when every candidate is on the CPU.
+
+    A partial-GPU fit is handled by :func:`_prefer_fast_card` and is not in
+    this comparison. On an 8-core RTX 5090 with the story model loaded and
+    about 2.1 GiB already in use, both Clef files land on the CPU: about 55 s
+    for Clef Q4 and about 19 s for Clef-flash Q4. The larger file used to win
+    because it is larger. It loses when it is more than
+    ``REFEREE_CPU_SLOW_RATIO`` times slower, or when it is over
+    ``REFEREE_CPU_SLOW_SECONDS``.
+    """
+    if len(pool) < 2 or any(_decision_home(fit) != 2 for fit in pool):
+        return pool
+
+    def seconds(fit: FitResult) -> float:
+        return _fit_decision_seconds(specs, fit)
+
+    largest = max(pool, key=lambda fit: (fit.model.params_b, seconds(fit)))
+    big = seconds(largest)
+    others = [fit for fit in pool if fit is not largest and seconds(fit) > 0]
+    if not others:
+        return pool
+    fastest = min(seconds(fit) for fit in others)
+    if big > REFEREE_CPU_SLOW_RATIO * fastest or big > REFEREE_CPU_SLOW_SECONDS:
+        return [fit for fit in pool if fit is not largest]
+    return pool
+
+
 def _latency_clause(chosen: FitResult, fits: list[FitResult], specs: Optional[SystemSpecs]) -> str:
     """Why a faster card was preferred, or why a CPU fit was kept. Empty if neither applies."""
     others = [fit for fit in fits if fit.model.key != chosen.model.key and fit.verdict != "no"]
@@ -2100,6 +2148,22 @@ def _latency_clause(chosen: FitResult, fits: list[FitResult], specs: Optional[Sy
             "so the referee call should come back sooner. "
             "That figure is an estimate for one forward pass, not a measured run on this computer."
         )
+    slower_cpu = [
+        fit for fit in others
+        if fit.model.params_b > chosen.model.params_b and fit.placement == "cpu" and chosen.placement == "cpu"
+    ]
+    if slower_cpu:
+        big = max(slower_cpu, key=lambda fit: fit.model.params_b)
+        big_s = _fit_decision_seconds(specs, big)
+        small_s = _fit_decision_seconds(specs, chosen)
+        if small_s > 0 and (big_s > REFEREE_CPU_SLOW_RATIO * small_s or big_s > REFEREE_CPU_SLOW_SECONDS):
+            return (
+                f"{big.model.display_name} is larger, but on the CPU it would take "
+                f"{format_decision_seconds(big_s)}. "
+                f"{chosen.model.display_name} is the faster CPU fit "
+                f"({format_decision_seconds(small_s)}), so the referee call should come back sooner. "
+                "That figure is an estimate for one forward pass, not a measured run on this computer."
+            )
     cards = [fit for fit in others if _decision_home(fit) == 0 and chosen.placement == "cpu"]
     if cards:
         fast = min(cards, key=lambda fit: _fit_decision_seconds(specs, fit))
@@ -2133,16 +2197,17 @@ def _pick_system_one(fits: list[FitResult], specs: Optional[SystemSpecs] = None)
     Comfortable (great/ok, and not a thin split) beats a snug fit. On the same
     kind of home, the larger model wins, so Clef beats Clef-flash when both
     fit wholly on the graphics card. A split does not count as that home, so
-    more memory pressure cannot promote the larger model. A larger model that
-    only fits in system RAM does not beat a smaller one that still fits on
-    the card, unless the card-resident model is much quicker per decision
-    (see ``_prefer_fast_card``).
+    more memory pressure cannot promote the larger model. A partial-GPU fit
+    that is several times quicker replaces a CPU fit (see
+    ``_prefer_fast_card``). When both fits are on the CPU, a much slower
+    larger model loses to the faster one (see ``_prefer_faster_cpu``).
     """
     comfortable = [fit for fit in fits if _decision_comfortable(fit)]
     pool = comfortable or [fit for fit in fits if fit.verdict == "tight"]
     if not pool:
         return None
     pool = _prefer_fast_card(pool, fits, specs)
+    pool = _prefer_faster_cpu(pool, specs)
     best_home = min(_decision_home(fit) for fit in pool)
     housed = [fit for fit in pool if _decision_home(fit) == best_home]
 
@@ -2157,8 +2222,10 @@ def recommend_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = No
 
     Prefers Clef over Clef-flash when both fit comfortably on the same kind of
     home, because Clef is the larger model. A fast graphics-card fit is not
-    passed over for a much slower CPU fit. Does not use the story recommender's
-    chat-speed gate as a hard reject.
+    passed over for a much slower CPU fit. When both fits are on the CPU, a
+    larger model that is more than twice as slow, or over about 30 seconds,
+    loses to the faster one. Does not use the story recommender's chat-speed
+    gate as a hard reject.
     """
     reserved = reserve_for_loaded_model(specs, story_fit)
     fits = [evaluate_fit(reserved, model) for model in SYSTEM_ONE_CATALOG]

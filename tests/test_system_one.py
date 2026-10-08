@@ -220,6 +220,78 @@ def test_amd_cards_get_a_fit_that_does_not_overflow():
         assert fit.model.architecture == "clef"
 
 
+def test_alucard_with_memory_in_use_picks_the_faster_cpu_referee():
+    """Lux's Windows 5090, Qwen3 32B Q5 on the GPU, about 2.1 GiB already in use.
+
+    nvidia-smi's ~2150 MiB rounds to 2.1 GiB. With the 0.8 GiB reserve and the
+    3 GB Windows Clef margin, ``--fit-target`` is 6042 MiB. The story takes
+    about 23.5 GB, so Clef-flash no longer keeps a partial on the card. Both
+    referees are on the CPU (about 19 s and about 55 s on 8 cores). The faster
+    one wins. The same card with nothing in use still keeps Clef-flash partly
+    on the GPU, which is the survey row.
+    """
+    card = gpu("NVIDIA GeForce RTX 5090", "nvidia", 32.0)
+    card.vram_used_gb = 2.1
+    specs = dataclasses.replace(
+        machine(64, 50, (card,), cores=8),
+        os_name="Windows", os_version="11", arch="AMD64",
+        cpu_name="AMD Ryzen 7 9850X3D",
+    )
+    assert catalog.fit_target_mib(specs, decision=True) == 6042
+    story = catalog.recommend(specs)
+    assert story is not None and story.model.key == "qwen3-32b" and story.quant == "Q5_K_M"
+    assert story.placement == "gpu" and story.est_memory_gb == pytest.approx(23.5, abs=0.05)
+    reserved = catalog.reserve_for_loaded_model(specs, story)
+    fits = {model.key: catalog.evaluate_fit(reserved, model) for model in catalog.SYSTEM_ONE_CATALOG}
+    assert fits["clef"].placement == "cpu" and fits["clef-flash"].placement == "cpu"
+
+    def seconds(fit):
+        return catalog.decision_seconds(
+            reserved, placement=fit.placement, gpu_share=fit.gpu_share or 0.0,
+            weights_gb=float(fit.download_gb or 0.0),
+        )
+
+    assert seconds(fits["clef"]) == pytest.approx(55.0, abs=0.1)
+    assert seconds(fits["clef-flash"]) == pytest.approx(18.6, abs=0.2)
+    ref = catalog.recommend_system_one(specs, story)
+    assert ref is not None and ref.model.key == "clef-flash" and ref.quant == "Q4_K_M"
+    assert ref.placement == "cpu"
+    assert "faster CPU fit" in ref.reason and "about 55 seconds" in ref.reason
+    assert "about 19 seconds" in ref.reason
+    idle = dataclasses.replace(
+        specs, gpus=[gpu("NVIDIA GeForce RTX 5090", "nvidia", 32.0)],
+        cpu_cores_physical=16, cpu_cores_logical=32,
+    )
+    idle_story = catalog.recommend(idle)
+    idle_ref = catalog.recommend_system_one(idle, idle_story)
+    assert idle_story is not None and idle_story.model.key == "qwen3-32b" and idle_story.quant == "Q5_K_M"
+    assert idle_ref is not None and idle_ref.model.key == "clef-flash" and idle_ref.placement == "partial"
+    assert idle_ref.gpu_share == pytest.approx(0.59, abs=0.02)
+
+
+def test_clef_launch_refuses_a_bad_gguf_before_the_process_starts(tmp_path, monkeypatch):
+    from gettowork import system_one
+
+    exe = tmp_path / "llama-server"
+    exe.write_bytes(b"fake")
+    bad = tmp_path / "Clef-Q4_K_M.gguf"
+    bad.write_bytes(b"not a gguf file")
+    started = []
+    monkeypatch.setattr(system_one, "_newest_clef_server", lambda: exe)
+    monkeypatch.setattr(system_one.download, "download_gguf", lambda *_a, **_k: bad)
+    monkeypatch.setattr(system_one.subprocess, "Popen", lambda *args, **kwargs: started.append(args))
+    fit = catalog.recommend_system_one(RTX_5090)
+    assert fit is not None
+    ui = UI(console=Console(file=io.StringIO(), width=120, color_system=None))
+    with pytest.raises(LocalClefUnavailable) as info:
+        launch_local_clef(ui, fit.model, fit, engine_tag="b11485")
+    message = str(info.value)
+    assert started == []
+    assert "isn't a usable GGUF" in message
+    assert "GGUF header" in message
+    assert "engine was not started" in message
+
+
 def test_loaded_story_model_is_reserved_before_clef_is_picked():
     story = catalog.evaluate_fit(RTX_5090, catalog.get_model("qwen3-32b"))
     assert story.placement == "gpu" and story.est_memory_gb > 10
@@ -612,9 +684,10 @@ def test_in_use_memory_and_the_windows_margin_change_the_budget():
     assert catalog.fit_target_mib(windows, decision=True) == round(
         (catalog.GPU_VRAM_RESERVE_GB + catalog.WINDOWS_VRAM_MARGIN_GB + 6.0) * 1024
     )
-    assert catalog.fit_target_mib(linux, decision=True) == round(
-        (catalog.GPU_VRAM_RESERVE_GB + 6.0) * 1024
-    )
+    # Linux CUDA free already excludes other programs, so --fit-target does
+    # not add the 6 GB again. The menu budget above still does.
+    assert catalog.fit_target_mib(linux) == round(catalog.GPU_VRAM_RESERVE_GB * 1024)
+    assert catalog.fit_target_mib(linux, decision=True) == round(catalog.GPU_VRAM_RESERVE_GB * 1024)
 
 
 def test_unknown_vram_in_use_keeps_two_gib_instead_of_the_measured_reserve():
@@ -623,7 +696,9 @@ def test_unknown_vram_in_use_keeps_two_gib_instead_of_the_measured_reserve():
     linux = machine(32, 40, (card,))
     windows = dataclasses.replace(linux, os_name="Windows")
     assert catalog._usable_vram_gb(linux) == pytest.approx(16.0 - catalog.UNKNOWN_VRAM_IN_USE_GB)
-    assert catalog.fit_target_mib(linux) == round(catalog.UNKNOWN_VRAM_IN_USE_GB * 1024)
+    # The unknown 2 GiB still applies to the menu budget. The Linux engine
+    # target stays the measured reserve, so an unread figure is not counted twice.
+    assert catalog.fit_target_mib(linux) == round(catalog.GPU_VRAM_RESERVE_GB * 1024)
     assert catalog.fit_target_mib(windows, decision=True) - catalog.fit_target_mib(windows) == round(
         catalog.WINDOWS_VRAM_MARGIN_GB * 1024
     )

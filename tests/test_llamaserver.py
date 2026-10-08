@@ -2011,7 +2011,12 @@ def test_clef_is_pinned_to_its_own_card(tmp_path, monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(system_one, "_newest_clef_server", lambda: backend.server_exe)
-    monkeypatch.setattr(system_one.download, "download_gguf", lambda *a, **k: tmp_path / "clef.gguf")
+    def _clef_file(*_a, **_k):
+        path = tmp_path / "clef.gguf"
+        path.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
+        return path
+
+    monkeypatch.setattr(system_one.download, "download_gguf", _clef_file)
     monkeypatch.setattr(system_one, "_wait_healthy", lambda *a, **k: True)
     monkeypatch.setattr(system_one.atexit, "register", lambda fn: None)
     monkeypatch.setattr(system_one.subprocess, "Popen", clef_popen)

@@ -29,7 +29,14 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import catalog, distribution, download, runtime_install
-from .backends.llamaserver import build_server_args, find_free_port, planned_device_pin, server_env
+from .backends.llamaserver import (
+    build_server_args,
+    find_free_port,
+    gguf_file_problem,
+    gguf_refusal,
+    planned_device_pin,
+    server_env,
+)
 from .config import runtime_dir
 from .jev import JevClient
 from .notices import LOCAL_RUN_NOTICES
@@ -317,6 +324,11 @@ def _start_process(
         raise LocalClefUnavailable(
             f"Clef wasn't downloaded ({exc}). Nothing is running."
         ) from exc
+    # The story engine refuses a bad GGUF before it starts. This process used
+    # to skip that check and hand llama-server whatever the download returned.
+    problem = gguf_file_problem(model_path)
+    if problem:
+        raise LocalClefUnavailable(str(gguf_refusal(model_path, problem)))
     port = find_free_port()
     n_ctx = int(fit.context_tokens or entry.context_tokens or 4096)
     api_key = "clef_local_" + secrets.token_hex(16)

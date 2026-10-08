@@ -78,7 +78,8 @@ def _row(name, specs, expect):
 
 
 # Expected picks, reviewed against the fit engine. A missing referee means the
-# menu says Clef does not fit and the story model decides.
+# menu says Clef does not fit and the story model decides. When both Clef
+# files only fit on the CPU, the faster file is the pick.
 SURVEY = [
     _row("gtx1650_w10", _machine("Windows", 16, 6, 40, (_gpu("NVIDIA GeForce GTX 1650", "nvidia", 4),)),
          ("qwen3-4b", "Q4_K_M", "ok", "partial", "fast", "clef-flash", "Q4_K_M", "ok", "cpu", "GTX 1650")),
@@ -93,30 +94,30 @@ SURVEY = [
     _row("rtx4060_laptop_w11", _machine("Windows", 16, 8, 50, (_gpu("NVIDIA GeForce RTX 4060 Laptop GPU", "nvidia", 8),), os_version="11"),
          ("qwen3-8b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "4060 Laptop")),
     _row("rtx3060_12_w11", _machine("Windows", 32, 8, 45, (_gpu("NVIDIA GeForce RTX 3060", "nvidia", 12),), os_version="11"),
-         ("qwen3-14b", "IQ4_XS", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RTX 3060")),
+         ("qwen3-14b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 3060")),
     _row("rtx3060_12_linux", _machine("Linux", 32, 8, 45, (_gpu("NVIDIA GeForce RTX 3060", "nvidia", 12),)),
-         ("qwen3-14b", "IQ4_XS", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RTX 3060")),
+         ("qwen3-14b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 3060")),
     _row("rtx4070_w11", _machine("Windows", 32, 8, 50, (_gpu("NVIDIA GeForce RTX 4070", "nvidia", 12),), os_version="11"),
-         ("qwen3-14b", "IQ4_XS", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RTX 4070")),
+         ("qwen3-14b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 4070")),
     _row("rtx4060ti_16_w11", _machine("Windows", 32, 8, 50, (_gpu("NVIDIA GeForce RTX 4060 Ti", "nvidia", 16),), os_version="11"),
-         ("qwen3-14b", "Q4_K_M", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RTX 4060 Ti")),
+         ("qwen3-14b", "Q4_K_M", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 4060 Ti")),
     _row("rtx4080_w11", _machine("Windows", 32, 8, 50, (_gpu("NVIDIA GeForce RTX 4080", "nvidia", 16),), os_version="11"),
-         ("qwen3-14b", "Q6_K", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RTX 4080")),
+         ("qwen3-14b", "Q6_K", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 4080")),
     _row("rtx3090_w10", _machine("Windows", 64, 12, 50, (_gpu("NVIDIA GeForce RTX 3090", "nvidia", 24),)),
-         ("qwen3-32b", "IQ4_XS", "ok", "gpu", "fast", "clef", "Q4_K_M", "great", "cpu", "RTX 3090")),
+         ("qwen3-32b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 3090")),
     _row("rtx4090_w11", _machine("Windows", 64, 16, 50, (_gpu("NVIDIA GeForce RTX 4090", "nvidia", 24),), os_version="11"),
-         ("qwen3-32b", "IQ4_XS", "ok", "gpu", "fast", "clef", "Q4_K_M", "great", "cpu", "RTX 4090")),
+         ("qwen3-32b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 4090")),
     _row("rtx5090_w11", _machine("Windows", 64, 16, 50, (_gpu("NVIDIA GeForce RTX 5090", "nvidia", 32),), os_version="11"),
          ("qwen3-32b", "Q5_K_M", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "ok", "partial", "RTX 5090")),
     _row("dual_rtx3060_w11", _machine("Windows", 32, 8, 45, (
         _gpu("NVIDIA GeForce RTX 3060", "nvidia", 12), _gpu("NVIDIA GeForce RTX 3060", "nvidia", 12),
-    ), os_version="11"), ("qwen3-32b", "IQ4_XS", "ok", "gpu", "usable", "clef", "Q4_K_M", "ok", "cpu", "RTX 3060")),
+    ), os_version="11"), ("qwen3-32b", "IQ4_XS", "ok", "gpu", "usable", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 3060")),
     _row("rx6600_w11", _machine("Windows", 16, 6, 40, (_gpu("AMD Radeon RX 6600", "amd", 8),), os_version="11"),
          ("qwen3-8b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RX 6600")),
     _row("rx7800xt_linux", _machine("Linux", 32, 8, 50, (_gpu("AMD Radeon RX 7800 XT", "amd", 16),)),
-         ("qwen3-14b", "Q6_K", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RX 7800 XT")),
+         ("qwen3-14b", "Q6_K", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RX 7800 XT")),
     _row("arc_a770_w11", _machine("Windows", 32, 8, 45, (_gpu("Intel Arc A770", "intel", 16),), os_version="11"),
-         ("qwen3-14b", "Q6_K", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "Arc A770")),
+         ("qwen3-14b", "Q6_K", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "Arc A770")),
     _row("iris_xe_w11", _machine("Windows", 16, 4, 40, (_gpu("Intel Iris Xe Graphics", "intel", 0),), os_version="11"),
          ("qwen3-1.7b", "Q4_K_M", "great", "cpu", "fast", "clef-flash", "Q4_K_M", "ok", "cpu", None)),
     _row("amd_780m_w11", _machine("Windows", 16, 8, 70, (_gpu("AMD Radeon 780M", "amd", 0),), os_version="11"),
@@ -126,7 +127,7 @@ SURVEY = [
     _row("cpu_16_w11", _machine("Windows", 16, 6, 40, os_version="11"),
          ("qwen3-1.7b", "Q4_K_M", "great", "cpu", "fast", "clef-flash", "Q4_K_M", "ok", "cpu", None)),
     _row("cpu_32_linux", _machine("Linux", 32, 8, 45),
-         ("qwen3-1.7b", "Q5_K_M", "great", "cpu", "fast", "clef", "Q4_K_M", "ok", "cpu", None)),
+         ("qwen3-1.7b", "Q5_K_M", "great", "cpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", None)),
     _row("optimus_4060", _machine("Windows", 16, 8, 50, (
         _gpu("Intel Iris Xe Graphics", "intel", 0), _gpu("NVIDIA GeForce RTX 4060 Laptop GPU", "nvidia", 8),
     ), os_version="11"), ("qwen3-8b", "IQ4_XS", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "4060 Laptop")),
@@ -140,7 +141,7 @@ SURVEY = [
     _row("mac_m2_pro_16", _machine("Darwin", 16, 10, 200, (_gpu("Apple M2 Pro GPU", "apple", 11.2),), unified=True),
          ("qwen3-14b", "IQ4_XS", "ok", "unified", "usable", None, None, None, None, "M2 Pro")),
     _row("rtx3060_12_2p5gb_in_use", _machine("Windows", 32, 8, 45, (_gpu("NVIDIA GeForce RTX 3060", "nvidia", 12, 2.5),), os_version="11"),
-         ("qwen3-8b", "Q5_K_M", "ok", "gpu", "fast", "clef", "Q4_K_M", "ok", "cpu", "RTX 3060")),
+         ("qwen3-8b", "Q5_K_M", "ok", "gpu", "fast", "clef-flash", "Q4_K_M", "great", "cpu", "RTX 3060")),
     _row("rtx4060_2gb_in_use", _machine("Windows", 16, 6, 45, (_gpu("NVIDIA GeForce RTX 4060", "nvidia", 8, 2.0),), os_version="11"),
          ("qwen3-8b", "Q4_K_M", "ok", "partial", "fast", None, None, None, None, "RTX 4060")),
     _row("gtx1650_1p5gb_in_use", _machine("Windows", 16, 6, 40, (_gpu("NVIDIA GeForce GTX 1650", "nvidia", 4, 1.5),), os_version="11"),

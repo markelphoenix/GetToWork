@@ -515,10 +515,12 @@ the computer cannot say how much is already in use, the plan keeps about
 2 GB spare instead of 0.8 GB. On
 Windows the Clef line also keeps another 3 GB spare, because a measured run
 used about 2.9 GB more than the engine projected. Story models do not take
-that extra cut. `llama-server --fit-target` is told to leave the same spare
-memory free. A Clef launch on Windows includes the extra 3 GB. A story
-launch adds only the memory already in use, because on that machine CUDA's
-own free-memory figure ignored programs `nvidia-smi` could see.
+that extra cut. On Windows, `llama-server --fit-target` is told to leave the
+same spare memory free, because CUDA's free figure there ignored programs
+`nvidia-smi` could see. A Clef launch on Windows includes the extra 3 GB. A
+story launch on Windows adds only the memory already in use. On Linux the
+engine's free figure already excludes those programs, so `--fit-target` stays
+the 0.8 GB reserve and does not add the in-use number again.
 
 The text referee does not need the optional `mmproj` vision file. llama.cpp
 **b11371** (3 October 2026) is the first release whose notes say it can load
