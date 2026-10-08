@@ -15,11 +15,13 @@ from gettowork import catalog, hf_discovery, notices
 from gettowork.config import Settings
 from gettowork.onboarding import run_jev_onboarding
 from gettowork.perf import estimate_gpu_bandwidth
+from gettowork.backends.llamaserver import build_server_args
 from gettowork.system_one import (
     CLEF_TEXT_MIN_BUILD,
     LocalClefUnavailable,
     clef_engine_status,
     clef_gguf_name,
+    clef_server_args,
     engine_block_message,
     launch_local_clef,
     pinned_engine_tag,
@@ -300,6 +302,22 @@ def test_pinned_engine_can_load_clef_text():
     assert pin == "b11485"
     assert clef_engine_status(pin) == "ok"
     assert CLEF_TEXT_MIN_BUILD == 11371
+
+
+def test_clef_launch_turns_repack_off_and_fits_the_prompt_in_one_batch():
+    # b11485's default repack buffer cannot GET_ROWS the Q6_K output tensor
+    # Clef's head reads, and graph reserve aborts before the server listens.
+    # Embedding mode also shrinks the batch to the default physical size (512),
+    # which is smaller than a real referee prompt (~1150 tokens).
+    cpu = clef_server_args("llama-server", "Clef-Flash-Q4_K_M.gguf", port=9, n_ctx=1024, cpu_only=True)
+    base = build_server_args(
+        "llama-server", "Clef-Flash-Q4_K_M.gguf", port=9, n_ctx=1024, cpu_only=True,
+    )
+    assert cpu[:len(base)] == base
+    assert cpu[len(base):] == ["--no-repack", "-b", "1024", "-ub", "1024"]
+    gpu = clef_server_args("llama-server", "m.gguf", port=9, n_ctx=4096, cpu_only=False)
+    assert gpu[-5:] == ["--no-repack", "-b", "4096", "-ub", "4096"]
+    assert "--fit" in gpu and gpu[gpu.index("--fit") + 1] == "on"
 
 
 def test_old_engine_does_not_call_the_downloader(tmp_path, monkeypatch):

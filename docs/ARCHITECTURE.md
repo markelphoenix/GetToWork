@@ -523,9 +523,12 @@ class LlamaServerBackend(LLMBackend):
     @property model_label
 ```
   - Launch: `[exe, "-m", gguf, "--host", "127.0.0.1", "--port", str(port),
-    "-c", str(n_ctx), "--reasoning-format", "deepseek", "--no-webui", "-np", "1"]`
-    (`-ngl` defaults to auto / `--fit` on in current builds; on the CPU variant
-    pass `-ngl 0`). Free port chosen via a bound socket. stdout/stderr to a log
+    "-c", str(n_ctx), "--reasoning-format", "deepseek", "--no-webui", "-np", "1",
+    "--fit", "on", "--fit-target", "819", "--fit-ctx", str(n_ctx)]`
+    (819 MiB is `GPU_VRAM_RESERVE_GB`; b11485's `--fit` default margin is
+    1024 MiB and would spill layers the menu said fit. Context is only adjusted
+    by `--fit` when `-c` is 0, which this launch never leaves. CPU variant:
+    `--fit off`, `--device none`, `-ngl 0`). Free port chosen via a bound socket. stdout/stderr to a log
     file in `runtime_dir()/logs/` (show its tail on failure). Windows:
     `creationflags=CREATE_NO_WINDOW`; Linux: `LD_LIBRARY_PATH` += exe dir.
     If the process exits with an unknown-argument error, retry once with the

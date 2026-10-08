@@ -191,10 +191,19 @@ def build_server_args(
     * ``--reasoning-format deepseek`` puts a thinking model's chain-of-thought
       in a separate ``reasoning_content`` field instead of the answer.
     * ``--no-webui`` skips the built-in chat website; ``-np 1`` = one chat slot.
-    * GPU layers are left to llama.cpp's automatic "fit" logic, except in CPU
-      mode: ``--device none`` stops llama.cpp using any graphics card at all
-      (``-ngl 0`` alone still lets it borrow the GPU to read long prompts),
-      and ``-ngl 0`` keeps every layer in RAM for builds without ``--device``.
+    * ``--fit on`` lets the engine place unset GPU layers inside free video
+      memory. The context (``-c``) is set, and b11485 only changes context when
+      it was left at 0, so the planned window stays. ``--fit-target`` is the
+      menu's per-card reserve (0.8 GB, 819 MiB). The engine's own default is
+      1024 MiB, which would spill layers the menu said still fit, and a smaller
+      margin would use video memory the menu kept free. ``--fit-ctx`` is that
+      same planned context, so the engine's default floor of 4096 cannot force
+      a larger cache when the plan is shorter.
+    * CPU mode passes ``--fit off``. There is no device budget, and the fitter
+      treats leftover RAM as unlimited. ``--device none`` stops llama.cpp using
+      any graphics card at all (``-ngl 0`` alone still lets it borrow the GPU
+      to read long prompts), and ``-ngl 0`` keeps every layer in RAM for builds
+      without ``--device``.
     * ``minimal`` drops the optional flags, for builds that don't know them.
 
     The per-launch API key is passed in the environment (``LLAMA_API_KEY``,
@@ -202,12 +211,25 @@ def build_server_args(
     """
     args = [str(exe), "-m", str(model_path), "--host", "127.0.0.1", "--port", str(port), "-c", str(n_ctx)]
     if not minimal:
-        args += ["--reasoning-format", "deepseek", "--no-webui", "-np", "1"]
+        args += ["--reasoning-format", "deepseek", "--no-webui", "-np", "1", *_fit_args(n_ctx, cpu_only)]
     if cpu_only:
         if not minimal:
             args += ["--device", "none"]
         args += ["-ngl", "0"]
     return args
+
+
+def _fit_args(n_ctx: int, cpu_only: bool) -> list[str]:
+    """Explicit ``--fit`` so b11485's default cannot drift from the menu.
+
+    See :func:`build_server_args`. The reserve is ``catalog.GPU_VRAM_RESERVE_GB``.
+    """
+    if cpu_only:
+        return ["--fit", "off"]
+    from .. import catalog
+
+    reserve_mib = max(1, round(float(catalog.GPU_VRAM_RESERVE_GB) * 1024))
+    return ["--fit", "on", "--fit-target", str(reserve_mib), "--fit-ctx", str(int(n_ctx))]
 
 
 def find_free_port() -> int:

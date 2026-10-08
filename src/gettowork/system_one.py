@@ -281,7 +281,7 @@ def _start_process(ui: UI, entry: ModelEntry, fit: FitResult) -> LocalClefRefere
     port = find_free_port()
     n_ctx = int(fit.context_tokens or entry.context_tokens or 4096)
     api_key = "clef_local_" + secrets.token_hex(16)
-    args = build_server_args(
+    args = clef_server_args(
         exe, model_path, port=port, n_ctx=n_ctx, cpu_only=fit.placement == "cpu",
     )
     log_dir = runtime_dir() / "logs"
@@ -320,6 +320,37 @@ def _start_process(ui: UI, entry: ModelEntry, fit: FitResult) -> LocalClefRefere
     client = JevClient(api_key, base_url=f"http://127.0.0.1:{port}", model=entry.key, max_retries=0)
     name = entry.display_name
     return LocalClefReferee(client, stop, f"Clef ({name})")
+
+
+def clef_server_args(
+    exe: Path | str,
+    model_path: Path | str,
+    *,
+    port: int,
+    n_ctx: int,
+    cpu_only: bool,
+) -> list[str]:
+    """The llama-server command for a local Clef referee.
+
+    Same memory flags as a story model, plus ``--no-repack``. On llama.cpp
+    b11485, repack (the default) stores quantized weights in a buffer that
+    cannot run ``GET_ROWS``. Clef's head reads rows of ``output.weight``
+    (Q6_K on the published Clef-flash Q4_K_M). With repack left on, reserving
+    that graph aborts in ``ggml_backend_sched_split_graph``
+    (``GGML_ASSERT(*cur_backend_id != -1)``) and the process never listens.
+    ``--no-repack`` keeps the ordinary buffer, which can. The flag has been
+    in llama-server since at least b11371, the first build that loads Clef text.
+
+    ``-b`` and ``-ub`` match the context. Clef is an embedding model, and this
+    engine then forces the logical batch down to the physical batch (default
+    512). A real referee request is about 1,150 tokens, so the default batch
+    rejects it (``input is too large to process``) even when ``-c`` is larger.
+    One physical batch has to hold the whole prompt.
+    """
+    ctx = str(int(n_ctx))
+    return build_server_args(
+        exe, model_path, port=port, n_ctx=n_ctx, cpu_only=cpu_only,
+    ) + ["--no-repack", "-b", ctx, "-ub", ctx]
 
 
 def _entry_for_quant(entry: ModelEntry, quant: str, download_gb: Optional[float]) -> ModelEntry:

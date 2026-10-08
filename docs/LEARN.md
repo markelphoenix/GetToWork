@@ -658,7 +658,8 @@ the problem, and moves on to the next build.
 
 ```text
 llama-server -m model.gguf --host 127.0.0.1 --port 54321 -c 4096 \
-             --reasoning-format deepseek --no-webui -np 1
+             --reasoning-format deepseek --no-webui -np 1 \
+             --fit on --fit-target 819 --fit-ctx 4096
 ```
 
 - `-m`: the model file (the first shard of a split model).
@@ -670,7 +671,16 @@ llama-server -m model.gguf --host 127.0.0.1 --port 54321 -c 4096 \
 - `--no-webui`: skip llama-server's built-in chat web page, which the game
   doesn't need.
 - `-np 1`: one conversation "slot" at a time, which saves memory.
-- On the CPU build the game adds `-ngl 0` (zero layers on the GPU).
+- `--fit on --fit-target 819 --fit-ctx 4096`: place GPU layers inside free
+  video memory, leaving the same 0.8 GB (819 MiB) per card the menu keeps
+  free. llama.cpp b11485 defaults `--fit` to on with a 1024 MiB margin, which
+  would spill layers the menu said still fit, and it only changes the context
+  when `-c` was left at 0. The game always sets `-c`. `--fit-ctx` repeats that
+  context so the engine's default floor of 4096 cannot force a larger cache
+  when the plan is shorter. A CPU launch passes `--fit off` instead: there is
+  no device budget, and the fitter treats leftover RAM as unlimited.
+- On the CPU build the game adds `-ngl 0` (zero layers on the GPU) and
+  `--device none`.
 
 Then it polls `GET /health` (503 while the model loads, 200 with
 `{"status": "ok"}` when ready) and sends each prompt to

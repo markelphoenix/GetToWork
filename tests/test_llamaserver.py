@@ -387,7 +387,11 @@ def started(tmp_path, chat=(), **kwargs):
 def test_build_server_args():
     full = build_server_args("/e/llama-server", "/m/model.gguf", port=8081, n_ctx=4096)
     assert full == ["/e/llama-server", "-m", "/m/model.gguf", "--host", "127.0.0.1", "--port", "8081",
-                    "-c", "4096", "--reasoning-format", "deepseek", "--no-webui", "-np", "1"]
+                    "-c", "4096", "--reasoning-format", "deepseek", "--no-webui", "-np", "1",
+                    "--fit", "on", "--fit-target", "819", "--fit-ctx", "4096"]
+    assert "--fit" not in build_server_args("s", "m", port=1, n_ctx=2048, minimal=True)
+    cpu = build_server_args("s", "m", port=1, n_ctx=2048, cpu_only=True)
+    assert "--fit" in cpu and cpu[cpu.index("--fit") + 1] == "off"
     assert build_server_args("s", "m", port=1, n_ctx=2048, minimal=True) == [
         "s", "-m", "m", "--host", "127.0.0.1", "--port", "1", "-c", "2048"]
     # CPU mode: "--device none" keeps the GPU out entirely (-ngl 0 alone still borrows it for prompts).
