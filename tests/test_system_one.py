@@ -206,12 +206,14 @@ def test_loaded_story_model_is_reserved_before_clef_is_picked():
     bare = catalog.recommend_system_one(RTX_5090)
     reserved = catalog.recommend_system_one(RTX_5090, story_fit=story)
     assert bare is not None and bare.model.key == "clef"
-    # The 27B model no longer fits on the card (about 8 GB left). Clef-flash is
-    # only a snug fit there. Clef still fits comfortably in system RAM, and the
-    # referee picker does not reject that for being under the story menu's
-    # chat-speed floor. It must not claim the leftover video memory.
-    assert reserved is not None and reserved.model.key == "clef"
-    assert reserved.placement == "cpu" and reserved.verdict in ("great", "ok")
+    # The 27B model no longer fits on the card. It can sit in system RAM, but
+    # Clef-flash still fits on the leftover GPU and the chat-model estimate
+    # says that call returns much sooner, so the pick is the card, with the
+    # reason saying why the larger CPU fit was passed over.
+    assert reserved is not None and reserved.model.key == "clef-flash"
+    assert reserved.placement in ("gpu", "partial", "unified")
+    assert "CPU" in reserved.reason and "sooner" in reserved.reason
+    assert "not a measured Clef latency" in reserved.reason
     left = catalog.reserve_for_loaded_model(RTX_5090, story)
     _fits_somewhere(left, reserved)
     on_card = catalog.evaluate_fit(left, catalog.get_system_one("clef"))
@@ -293,10 +295,10 @@ def test_clef_engine_status(tag, status):
         assert "b11371" in engine_block_message(tag, status)
 
 
-def test_pinned_engine_is_older_than_clef_support():
+def test_pinned_engine_can_load_clef_text():
     pin = pinned_engine_tag()
-    assert pin == "b11100"
-    assert clef_engine_status(pin) == "too_old"
+    assert pin == "b11485"
+    assert clef_engine_status(pin) == "ok"
     assert CLEF_TEXT_MIN_BUILD == 11371
 
 
@@ -370,7 +372,7 @@ def test_menu_shows_clef_and_enter_does_not_download_on_the_old_engine(home):
 
 
 def test_choosing_clef_on_an_old_engine_never_downloads(home):
-    ui, script, console = _ui(["clef", "no"])
+    ui, script, console = _ui(["clef", "no", "no"])
     called = []
     client = run_jev_onboarding(
         ui, Settings(), specs=LAPTOP_8, engine_tag="b11100",
@@ -460,7 +462,64 @@ def test_notices_cover_hardware_warranty_and_output():
     assert "AS IS" in joined and "without warranty" in joined
     assert "hot" in joined
     assert "responsible" in joined
+    assert "wrong" in notices.AI_OUTPUT_RESPONSIBILITY
+    assert "not advice" in notices.AI_OUTPUT_RESPONSIBILITY
+    for text in (joined, notices.STEAM_AI_DISCLOSURE, notices.AI_OUTPUT_RESPONSIBILITY):
+        lowered = text.lower()
+        assert "offensive" not in lowered
+        assert "odd" not in lowered
     assert "Clef" in notices.STEAM_AI_DISCLOSURE
     assert "b11371" in notices.STEAM_AI_DISCLOSURE
+    assert "b11485" in notices.STEAM_AI_DISCLOSURE
     assert "does not send plans to Cloudflare" in notices.STEAM_AI_DISCLOSURE
     assert "no AI images" in notices.STEAM_AI_DISCLOSURE
+
+
+def test_old_engine_upgrade_yes_then_confirms_the_model(home):
+    ui, script, console = _ui(["clef", "yes", "y"])
+    launched = []
+
+    def launcher(entry, fit):
+        launched.append((entry.key, fit.quant))
+        return type("Sentinel", (), {"close": lambda self: None, "referee_name": "Clef"})()
+
+    client = run_jev_onboarding(
+        ui, Settings(), specs=RTX_5090, engine_tag="b11100",
+        clef_launcher=launcher, engine_upgrader=lambda: "b11485",
+    )
+    text = console.file.getvalue()
+    assert launched == [("clef", "Q4_K_M")]
+    assert getattr(client, "referee_name", "") == "Clef"
+    assert "b11485" in text
+    assert "AI output can be wrong" in text
+    assert any("Shall I go ahead?" in prompt for prompt in script.prompts)
+
+
+def test_each_card_keeps_its_own_vram_reserve():
+    usable = catalog._usable_vram_gb(TWO_3060)
+    assert usable == pytest.approx(2 * (12.0 - catalog.GPU_VRAM_RESERVE_GB))
+    fit = catalog.evaluate_fit(TWO_3060, catalog.get_model("qwen3-14b"))
+    assert fit.placement == "gpu"
+    assert "on each of 2 cards" in catalog.explain_fit(TWO_3060, fit)
+
+
+def test_layer_split_does_not_add_graphics_card_bandwidth():
+    from gettowork import perf
+
+    one_card = perf.layer_split_bandwidth(TWO_3060, 5.0)
+    assert one_card is not None
+    assert one_card[1] == "published spec, a rough guess"
+    assert one_card[0] == pytest.approx(TWO_3060.gpus[0].bandwidth_gbs)
+    spanning = perf.layer_split_bandwidth(TWO_3060, 20.0)
+    assert spanning is not None
+    assert "not added together" in spanning[1]
+    assert spanning[0] == pytest.approx(one_card[0])
+    assert spanning[0] < one_card[0] * 2
+
+    slow = gpu("NVIDIA GeForce RTX 3060", "nvidia", 12.0)
+    fast = gpu("NVIDIA GeForce RTX 4090", "nvidia", 24.0)
+    mixed = machine(64, 50, (slow, fast))
+    both = perf.layer_split_bandwidth(mixed, 30.0)
+    assert both is not None
+    low, high = sorted((slow.bandwidth_gbs, fast.bandwidth_gbs))
+    assert low < both[0] < high

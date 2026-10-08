@@ -7,9 +7,11 @@ So this module gathers:
 * the operating system and CPU (with the SIMD features llama.cpp can use),
 * total / available RAM and a quick RAM-speed test (see `perf.py`),
 * graphics cards and their video memory (VRAM):
-  - NVIDIA via ``nvidia-smi`` (ships with the NVIDIA driver),
+  - NVIDIA via ``nvidia-smi``, then the NVML library (``nvml.dll`` /
+    ``libnvidia-ml.so``) if ``nvidia-smi`` does not answer,
   - AMD via Linux sysfs / ``rocm-smi``, other cards by name via ``lspci`` or
-    Windows' ``Win32_VideoController``,
+    Windows' ``Win32_VideoController`` plus the display-driver registry
+    (``qwMemorySize``) and DXGI dedicated video memory,
   - Apple Silicon, where the GPU shares ("unified") system memory,
 * free disk space where models will be downloaded,
 * whether a Vulkan loader is installed (lets AMD/Intel GPUs accelerate).
@@ -24,6 +26,7 @@ the box your GPU came in call "GB"), rounded to 0.1.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes.util
 import json
 import os
@@ -372,18 +375,152 @@ _NVIDIA_QUERY = ["nvidia-smi", "--query-gpu=name,memory.total,driver_version,com
 _NVIDIA_QUERY_OLD = ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"]
 
 
+def _norm_gpu_name(name: str) -> str:
+    """A loose key so "Radeon RX 6700 XT" matches "AMD Radeon RX 6700 XT"."""
+    text = name.lower()
+    text = re.sub(r"\(r\)|\(tm\)|[®™]", "", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _lookup_gb(table: dict[str, float], name: str) -> float:
+    """VRAM from a {display name: GiB} table, exact first, then a contained name."""
+    if not table or not name:
+        return 0.0
+    key = _norm_gpu_name(name)
+    normalised = {_norm_gpu_name(label): value for label, value in table.items()}
+    if key in normalised and normalised[key] > 0:
+        return float(normalised[key])
+    for other, value in normalised.items():
+        if value > 0 and other and (key in other or other in key):
+            return float(value)
+    return 0.0
+
+
+class _NvmlMemory(ctypes.Structure):
+    _fields_ = (
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    )
+
+
+def _nvml_device_records() -> list[tuple[str, int, Optional[str]]]:
+    """[(name, total bytes, driver version)] from NVML, or [] if the library is missing.
+
+    Used when ``nvidia-smi`` is not on PATH. The driver still ships ``nvml.dll``
+    (Windows) or ``libnvidia-ml.so.1`` (Linux). Any failure, including asking for
+    ``WinDLL`` on a system that does not have it, returns an empty list so
+    hardware detection keeps going.
+    """
+    try:
+        return _nvml_device_records_loaded()
+    except Exception:
+        return []
+
+
+def _nvml_device_records_loaded() -> list[tuple[str, int, Optional[str]]]:
+    names = ["nvml.dll"] if platform.system() == "Windows" else ["libnvidia-ml.so.1", "libnvidia-ml.so"]
+    loader = getattr(ctypes, "WinDLL" if platform.system() == "Windows" else "CDLL")
+    lib = None
+    for name in names:
+        try:
+            lib = loader(name)
+            break
+        except OSError:
+            continue
+    if lib is None:
+        return []
+    success = 0
+    try:
+        lib.nvmlInit_v2.restype = ctypes.c_int
+        if lib.nvmlInit_v2() != success:
+            return []
+    except Exception:
+        return []
+    try:
+        count = ctypes.c_uint()
+        lib.nvmlDeviceGetCount_v2.argtypes = [ctypes.POINTER(ctypes.c_uint)]
+        lib.nvmlDeviceGetCount_v2.restype = ctypes.c_int
+        if lib.nvmlDeviceGetCount_v2(ctypes.byref(count)) != success:
+            return []
+        driver = None
+        driver_buf = ctypes.create_string_buffer(80)
+        lib.nvmlSystemGetDriverVersion.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+        lib.nvmlSystemGetDriverVersion.restype = ctypes.c_int
+        if lib.nvmlSystemGetDriverVersion(driver_buf, 80) == success:
+            driver = driver_buf.value.decode("utf-8", "replace") or None
+        lib.nvmlDeviceGetHandleByIndex_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+        lib.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
+        lib.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+        lib.nvmlDeviceGetName.restype = ctypes.c_int
+        lib.nvmlDeviceGetMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NvmlMemory)]
+        lib.nvmlDeviceGetMemoryInfo.restype = ctypes.c_int
+        records = []
+        for index in range(int(count.value)):
+            handle = ctypes.c_void_p()
+            if lib.nvmlDeviceGetHandleByIndex_v2(index, ctypes.byref(handle)) != success:
+                continue
+            name_buf = ctypes.create_string_buffer(96)
+            if lib.nvmlDeviceGetName(handle, name_buf, 96) != success:
+                continue
+            memory = _NvmlMemory()
+            if lib.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(memory)) != success:
+                continue
+            records.append((name_buf.value.decode("utf-8", "replace"), int(memory.total), driver))
+        return records
+    except Exception:
+        return []
+    finally:
+        with contextlib.suppress(Exception):
+            lib.nvmlShutdown()
+
+
+def _nvidia_nvml_gpus() -> list[GPUInfo]:
+    """NVIDIA cards from NVML. Empty when the library is missing or unreadable."""
+    gpus = []
+    for name, total_bytes, driver in _nvml_device_records():
+        if not name or total_bytes <= 0:
+            continue
+        gpus.append(GPUInfo(
+            name=_clean(name), vendor="nvidia", vram_gb=_gib(total_bytes), driver_version=driver,
+        ))
+    return gpus
+
+
 def _nvidia_gpus(notes: list[str]) -> tuple[list[GPUInfo], str]:
     out, status = _run(_NVIDIA_QUERY)
     if status == "failed":
         out, status = _run(_NVIDIA_QUERY_OLD)
     if status != "ok":
+        nvml = _nvidia_nvml_gpus()
+        if nvml:
+            notes.append(
+                "nvidia-smi didn't answer; video memory was read from the NVIDIA management library (NVML)."
+            )
+            return nvml, "ok"
         if status == "failed":
             notes.append("nvidia-smi is installed but didn't answer, so NVIDIA video memory is unknown.")
         return [], status
     gpus = _parse_nvidia_smi(out or "")
     if not gpus:
+        nvml = _nvidia_nvml_gpus()
+        if nvml:
+            notes.append("nvidia-smi's answer couldn't be read; video memory came from NVML instead.")
+            return nvml, "ok"
         notes.append("nvidia-smi gave an answer we couldn't read, so NVIDIA video memory is unknown.")
         return [], "failed"
+    if any(g.vram_gb <= 0 for g in gpus):
+        nvml = { _norm_gpu_name(g.name): g for g in _nvidia_nvml_gpus() }
+        if nvml:
+            filled = []
+            for gpu in gpus:
+                if gpu.vram_gb > 0:
+                    filled.append(gpu)
+                    continue
+                match = nvml.get(_norm_gpu_name(gpu.name))
+                filled.append(match if match is not None and match.vram_gb > 0 else gpu)
+            gpus = filled
     if any(g.vram_gb <= 0 for g in gpus):
         notes.append("An NVIDIA GPU didn't report its video memory; we'll plan as if it had none.")
     return gpus, "ok"
@@ -551,6 +688,84 @@ def _windows_registry_vram() -> dict[str, float]:
     return result
 
 
+def _windows_dxgi_vram() -> dict[str, float]:
+    """{adapter description: dedicated VRAM GiB} from DXGI, or {} off Windows.
+
+    ``Win32_VideoController.AdapterRAM`` is a 32-bit count and stops at 4 GB.
+    DXGI's ``DedicatedVideoMemory`` is the size the driver reports to DirectX.
+    """
+    if platform.system() != "Windows":
+        return {}
+    try:
+        return _dxgi_dedicated_video_memory()
+    except Exception:
+        return {}
+
+
+def _dxgi_dedicated_video_memory() -> dict[str, float]:
+    """Read DXGI adapter descriptions. Raises only if the caller wants the raw failure."""
+    dxgi = ctypes.WinDLL("dxgi.dll")
+    # IDXGIFactory1
+    iid = (ctypes.c_byte * 16).from_buffer_copy(
+        __import__("uuid").UUID("{7b7166ec-21c7-44ae-b21a-c9ae321ae369}").bytes_le
+    )
+    factory = ctypes.c_void_p()
+    hr = dxgi.CreateDXGIFactory1(ctypes.byref(iid), ctypes.byref(factory))
+    if hr != 0 or not factory.value:
+        return {}
+
+    class _Luid(ctypes.Structure):
+        _fields_ = (("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32))
+
+    class _Desc(ctypes.Structure):
+        _fields_ = (
+            ("Description", ctypes.c_wchar * 128),
+            ("VendorId", ctypes.c_uint),
+            ("DeviceId", ctypes.c_uint),
+            ("SubSysId", ctypes.c_uint),
+            ("Revision", ctypes.c_uint),
+            ("DedicatedVideoMemory", ctypes.c_size_t),
+            ("DedicatedSystemMemory", ctypes.c_size_t),
+            ("SharedSystemMemory", ctypes.c_size_t),
+            ("AdapterLuid", _Luid),
+        )
+
+    def _vtable(ptr: ctypes.c_void_p):
+        return ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+
+    def _release(ptr: ctypes.c_void_p) -> None:
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(_vtable(ptr)[2])
+        release(ptr)
+
+    enum_adapters = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p),
+    )(_vtable(factory)[7])
+    found: dict[str, float] = {}
+    try:
+        for index in range(16):
+            adapter = ctypes.c_void_p()
+            if enum_adapters(factory, index, ctypes.byref(adapter)) != 0 or not adapter.value:
+                break
+            try:
+                get_desc = ctypes.WINFUNCTYPE(
+                    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_Desc),
+                )(_vtable(adapter)[8])
+                desc = _Desc()
+                if get_desc(adapter, ctypes.byref(desc)) != 0:
+                    continue
+                # The Microsoft Basic Render Driver is a software adapter.
+                if desc.VendorId == 0x1414 and desc.DeviceId == 0x8C:
+                    continue
+                if desc.DedicatedVideoMemory <= 0:
+                    continue
+                found[_clean(desc.Description)] = _gib(int(desc.DedicatedVideoMemory))
+            finally:
+                _release(adapter)
+    finally:
+        _release(factory)
+    return found
+
+
 def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
     """Non-NVIDIA GPUs (and NVIDIA ones nvidia-smi missed) on Windows."""
     adapters: list[tuple[str, float]] = []
@@ -583,6 +798,7 @@ def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
             )
 
     registry = _windows_registry_vram()
+    dxgi = _windows_dxgi_vram()
     found = []
     for name, adapter_ram in adapters:
         if _IGNORED_GPU_RE.search(name):
@@ -590,11 +806,14 @@ def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
         vendor = _vendor_from_name(name)
         if vendor == "nvidia" and nvidia:
             continue
-        vram = registry.get(name, 0.0)
+        vram = _lookup_gb(registry, name) or _lookup_gb(dxgi, name)
         if not vram and adapter_ram > 0:
             vram = _gib(adapter_ram)
             if vram >= 3.9:
-                notes.append(f"Windows only reports 'at least 4 GB' for {name}; we'll assume 4 GB.")
+                notes.append(
+                    f"Windows only reports 'at least 4 GB' for {name} "
+                    "(the registry and DXGI didn't have a size); we'll assume 4 GB."
+                )
                 vram = 4.0
         if vram < 1.0:
             vram = 0.0  # integrated graphics: a tiny slice of shared memory, not real VRAM

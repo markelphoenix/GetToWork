@@ -5,11 +5,13 @@ on this computer through llama-server. The story model is a different program;
 Clef only scores the referee's questions.
 
 llama.cpp text support for architecture ``clef`` starts at release **b11371**
-(3 October 2026; the release notes say "text-only"). This repo pins an older
-engine (``packaging/llama_cpp_tag.txt``). The menu still shows Clef, and it
-refuses the download while the engine that would actually run is older than
-b11371 or its build number can't be read. A manual "download anyway" cannot
-override a missing architecture.
+(3 October 2026; the release notes say "text-only"). Image input was added in
+PR 29969 (5 October 2026) and is included in the pinned **b11485** engine.
+The referee here stays text-only and does not download ``mmproj``. The menu
+still shows Clef when the installed engine is older, and it offers to
+download the pinned release when this copy of the game may download engines.
+It does not download the weights until the engine can load them. A manual
+"download anyway" cannot override a missing architecture.
 
 Nothing here calls Cloudflare. The GGUF file, if the engine can load it, comes
 from Hugging Face, and the server listens on 127.0.0.1.
@@ -56,10 +58,12 @@ game's usual estimate (weights + a rule-of-thumb KV cache + overhead). The KV sh
 **unverified**. The published context is 65,536 tokens; this game asks for 4,096 for a short
 referee call. The optional vision file (mmproj) is not downloaded.
 
-llama.cpp **b11371** (3 October 2026) added **text-only** Clef support. If this game's engine
-is older, Clef stays on the menu and the file is not downloaded. Whether Ollama, vLLM or
-LM Studio can load architecture `clef` was not verified. Image support after b11371 was not
-verified from a release note.
+llama.cpp **b11371** (3 October 2026) added **text-only** Clef support. Image input
+was added in PR 29969 (5 October 2026). This game pins **b11485**, which includes both;
+the referee stays text-only. If the installed engine is older, the menu can download
+the pin when engine downloads are allowed, and it does not download the weights until
+the engine can load them. Whether Ollama, vLLM or LM Studio can load architecture
+`clef` was not verified.
 
 Scoring stays on this computer (`127.0.0.1`). Nothing is sent to Cloudflare.
 """
@@ -134,15 +138,63 @@ def engine_block_message(tag: Optional[str], status: Optional[str] = None) -> st
             f"This engine is llama.cpp {shown}, which cannot load Clef (architecture clef). "
             f"Text support starts at llama.cpp {need} "
             "(official release notes, 2026-10-03: text-only). "
-            "The game will not download the model file, because this engine cannot open it. "
-            "Choosing Clef here cannot override that. A newer engine has to come from a game "
-            "update, or from a newer llama.cpp already installed for this game."
+            "The game will not download the model file until this engine can open it. "
+            "Choosing Clef here cannot override that."
         )
     return (
-        "I can't tell which llama.cpp build would run Clef, so I won't download it. "
-        f"Text support needs llama.cpp {need} or newer. "
-        "This repo's pinned engine is older than that."
+        "I can't tell which llama.cpp build would run Clef, so I won't download the model yet. "
+        f"Text support needs llama.cpp {need} or newer."
     )
+
+
+def engine_upgrade_question(tag: Optional[str]) -> Optional[str]:
+    """The yes/no question that offers the pinned engine, or None when we cannot download one."""
+    if not runtime_install.downloads_allowed():
+        return None
+    pin = pinned_engine_tag()
+    if clef_engine_status(pin) != "ok":
+        return None
+    shown = tag or "the one installed now"
+    return (
+        f"Download llama.cpp {pin} from GitHub (the release this game is tested with) "
+        f"so Clef can run? The engine here ({shown}) is too old. "
+        "The Clef file is a separate download, and it still asks before it starts."
+    )
+
+
+def bundled_engine_update_message(tag: Optional[str]) -> str:
+    """What to say when this copy of the game cannot download a newer engine."""
+    pin = pinned_engine_tag() or f"b{CLEF_TEXT_MIN_BUILD}"
+    shown = tag or "this copy"
+    return (
+        f"This copy of the game does not download a replacement llama.cpp. "
+        f"The engine it would use ({shown}) cannot load Clef. "
+        f"Update the game to one that ships llama.cpp {pin} or newer. "
+        "Nothing was downloaded."
+    )
+
+
+def install_pinned_clef_engine(ui: UI, specs: Any) -> Optional[str]:
+    """Download the pinned llama.cpp release. Returns its tag, or None if that failed."""
+    pin = pinned_engine_tag()
+    if specs is None or clef_engine_status(pin) != "ok" or pin is None:
+        return None
+    try:
+        exe, _variant = runtime_install.install_tagged_release(ui, specs, pin)
+    except Exception as exc:
+        ui.warn(escape_message(exc))
+        return None
+    info = runtime_install.install_info(exe) or {}
+    tag = info.get("tag")
+    if isinstance(tag, str) and tag.strip():
+        return tag.strip()
+    return pin
+
+
+def escape_message(exc: BaseException) -> str:
+    from .ui import escape
+
+    return escape(f"The newer engine wasn't installed ({exc}).")
 
 
 def pinned_engine_tag() -> Optional[str]:
@@ -279,6 +331,11 @@ def _entry_for_quant(entry: ModelEntry, quant: str, download_gb: Optional[float]
         file_size_gb=download_gb or entry.file_size_gb,
         gguf_files=(clef_gguf_name(entry, quant),),
     )
+
+
+def clef_server_installed() -> bool:
+    """True when a llama-server new enough for Clef text is already on disk."""
+    return _newest_clef_server() is not None
 
 
 def _newest_clef_server() -> Optional[Path]:

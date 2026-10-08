@@ -31,9 +31,13 @@ from . import catalog
 from .system_one import (
     LocalClefUnavailable,
     TEACH_CLEF,
+    bundled_engine_update_message,
     clef_engine_status,
     consent_lines,
     engine_block_message,
+    engine_upgrade_question,
+    install_pinned_clef_engine,
+    clef_server_installed,
     launch_local_clef,
     resolve_engine_tag,
 )
@@ -76,6 +80,7 @@ def run_jev_onboarding(
     story_fit: Any = None,
     engine_tag: Optional[str] = None,
     clef_launcher: Any = None,
+    engine_upgrader: Any = None,
 ) -> Optional[JevClient]:
     """Ask whether to enable Jev and, if so, get a working API key.
 
@@ -111,13 +116,16 @@ def run_jev_onboarding(
             Older than b11371, or unknown, and Clef is shown but not downloaded.
         clef_launcher: ``callable(entry, fit)`` that starts a local referee.
             Tests inject one. The real launcher is used when this is omitted.
+        engine_upgrader: ``callable() -> tag`` that installs a llama.cpp new
+            enough for Clef. Tests inject one. The real installer downloads
+            the pinned release.
     """
     env = os.environ if env is None else env
     factory = client_factory or _default_factory(env)
     flow = _JevOnboarding(
         ui, settings, env, factory, local_model_elsewhere, ask_again=ask_again,
         remember_no=remember_no, specs=specs, story_fit=story_fit, engine_tag=engine_tag,
-        clef_launcher=clef_launcher,
+        clef_launcher=clef_launcher, engine_upgrader=engine_upgrader,
     )
     try:
         return flow.run()
@@ -206,7 +214,8 @@ class _JevOnboarding:
     def __init__(self, ui: UI, settings: Settings, env: Mapping[str, str], factory: ClientFactory,
                  local_model_elsewhere: Optional[str] = None, *, ask_again: bool = False,
                  remember_no: bool = True, specs: Any = None, story_fit: Any = None,
-                 engine_tag: Optional[str] = None, clef_launcher: Any = None) -> None:
+                 engine_tag: Optional[str] = None, clef_launcher: Any = None,
+                 engine_upgrader: Any = None) -> None:
         self.ui = ui
         self.ask_again = ask_again
         self.remember_no = remember_no
@@ -214,6 +223,7 @@ class _JevOnboarding:
         self.story_fit = story_fit
         self.engine_tag = engine_tag
         self.clef_launcher = clef_launcher
+        self.engine_upgrader = engine_upgrader
         self._pasted: Optional[str] = None  # a key pasted straight into a menu, waiting to be checked
         self.settings = settings
         self.env = env
@@ -697,7 +707,9 @@ class _JevOnboarding:
             client = self._choose_clef(choice, reserved, status)
             if client is not None:
                 return client
-            # Engine too old, declined, or the player backed out: the menu again.
+            # A declined download, or an engine that was just upgraded: ask again
+            # with the tag that is installed now.
+            status = clef_engine_status(self._engine_tag())
 
     def _system_one_options(self, reserved: Any, status: str, recommended: Any) -> list[tuple[str, str]]:
         options: list[tuple[str, str]] = []
@@ -732,8 +744,11 @@ class _JevOnboarding:
             ui.say(escape(line))
         if status != "ok":
             ui.warn(escape(engine_block_message(self._engine_tag(), status)))
-            ui.info("Back to the referee menu — nothing was downloaded.")
-            return None
+            upgraded = self._offer_engine_upgrade(status)
+            if upgraded is None:
+                ui.info("Back to the referee menu — nothing was downloaded.")
+                return None
+            status = "ok"
         if fit.verdict == "no":
             if not ui.confirm("This model doesn't look like it will fit. Download anyway?", default=False):
                 ui.info("Okay — nothing was downloaded.")
@@ -741,6 +756,14 @@ class _JevOnboarding:
         elif not ui.confirm("Shall I go ahead?", default=True):
             ui.info("Okay — nothing was downloaded.")
             return None
+        if self.clef_launcher is None and not self._clef_engine_installed():
+            ui.say(
+                "llama.cpp that can load Clef is not installed yet. "
+                "Downloading the tested release from GitHub before the model."
+            )
+            if self._install_clef_engine() is None:
+                ui.warn("The engine that can load Clef is still not installed. The model was not downloaded.")
+                return None
         try:
             client = launch_local_clef(
                 ui, model, fit, engine_tag=self._engine_tag(), launcher=self.clef_launcher,
@@ -755,6 +778,42 @@ class _JevOnboarding:
             self._save_settings()
         ui.success(f"{escape(model.display_name)} will referee on this computer. The story model still tells the story.")
         return client
+
+    def _offer_engine_upgrade(self, status: str) -> Optional[str]:
+        """Install a newer engine, or explain why we can't. None means stay on the menu."""
+        if status == "ok":
+            return self._engine_tag()
+        question = engine_upgrade_question(self._engine_tag())
+        if question is None:
+            self.ui.info(escape(bundled_engine_update_message(self._engine_tag())))
+            return None
+        if not self.ui.confirm(question, default=False):
+            self.ui.info("Okay — the engine stays as it is, and Clef was not downloaded.")
+            return None
+        tag = self._install_clef_engine()
+        if clef_engine_status(tag) != "ok":
+            self.ui.warn("That engine still can't load Clef. Nothing was downloaded.")
+            return None
+        self.engine_tag = tag
+        self.ui.success(
+            f"llama.cpp {escape(str(tag))} can load Clef. The model download is the next question."
+        )
+        return tag
+
+    def _install_clef_engine(self) -> Optional[str]:
+        if self.engine_upgrader is not None:
+            tag = self.engine_upgrader()
+        else:
+            tag = install_pinned_clef_engine(self.ui, self.specs)
+        if isinstance(tag, str) and tag.strip():
+            self.engine_tag = tag.strip()
+            return tag.strip()
+        return None
+
+    def _clef_engine_installed(self) -> bool:
+        if self.engine_upgrader is not None:
+            return clef_engine_status(self._engine_tag()) == "ok"
+        return clef_server_installed()
 
     def _remember_system_one(self, choice: str) -> None:
         extra = dict(self.settings.extra) if isinstance(self.settings.extra, dict) else {}

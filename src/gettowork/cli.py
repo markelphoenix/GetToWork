@@ -327,7 +327,13 @@ def _show_system_one(ui: UI, specs: SystemSpecs) -> None:
     Clef is listed even when it does not fit or this engine cannot load it,
     with the reason in the table. It is never offered as the storyteller.
     """
-    from .system_one import clef_engine_status, engine_block_message, resolve_engine_tag
+    from .system_one import (
+        bundled_engine_update_message,
+        clef_engine_status,
+        engine_block_message,
+        engine_upgrade_question,
+        resolve_engine_tag,
+    )
 
     fits = catalog.rank_system_one(specs)
     ui.heading("System One referee (optional — not the story)")
@@ -340,6 +346,11 @@ def _show_system_one(ui: UI, specs: SystemSpecs) -> None:
     status = clef_engine_status(tag)
     if status != "ok":
         ui.warn(escape(engine_block_message(tag, status)))
+        question = engine_upgrade_question(tag)
+        if question:
+            ui.info(escape(question.replace("?", ".") + " Choose Clef during setup to start that download."))
+        else:
+            ui.info(escape(bundled_engine_update_message(tag)))
     else:
         recommended = next((fit for fit in fits if "recommended" in fit.badges), None)
         if recommended is None:

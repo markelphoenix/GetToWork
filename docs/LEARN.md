@@ -791,10 +791,13 @@ define the *type* of answer you want, and it answers in exactly that type:
 The same `POST /v1/systemone` shape can run **on your computer** with
 **Clef** or **Clef-flash** (Cloudflare, Apache-2.0, GGUF from ggml-org) when
 llama.cpp is new enough to load architecture `clef`. Text support is
-documented at **b11371**, and that note says text-only. They score the
-questions; they do not narrate. This game's pinned engine is older, so the
-referee menu explains that and does not download them until the engine can
-load them. Local video memory at the published 65,536-token window, the KV
+documented at **b11371**, and that note says text-only. Image input was added
+in llama.cpp PR 29969 (5 October 2026) and is in the pinned **b11485** engine;
+the referee stays text-only. They score the questions; they do not narrate.
+If the installed engine is older, the menu offers to download b11485 when
+this copy of the game may download engines, and it does not download the
+weights until the engine can load them. Local video memory at the published
+65,536-token window, the KV
 shape, and Ollama / vLLM / LM Studio support were not verified. Details are
 in the README.
 

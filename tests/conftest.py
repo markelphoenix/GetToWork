@@ -7,6 +7,29 @@ import os
 
 import pytest
 
+# Rich treats TERM=dumb as a hard 80x25 and ignores COLUMNS, which wraps
+# assertions mid-sentence. An explicit Console(width=...) still wins. When
+# width was left unset, honor COLUMNS or use 200 columns.
+os.environ.setdefault("COLUMNS", "200")
+
+
+def pytest_configure() -> None:
+    import rich.console as rich_console
+
+    original_property = rich_console.Console.size
+    original = original_property.fget
+
+    def size(self):
+        if self.is_dumb_terminal and self._width is None:
+            columns = os.environ.get("COLUMNS", "")
+            lines = os.environ.get("LINES", "")
+            width = int(columns) if columns.isdigit() else 200
+            height = int(lines) if lines.isdigit() else 50
+            return rich_console.ConsoleDimensions(width, height)
+        return original(self)
+
+    rich_console.Console.size = property(size, original_property.fset)
+
 # The biggest file any test leaves behind today is well under 1 MB.
 MAX_TMP_PATH_BYTES = 64 * 1024**2
 

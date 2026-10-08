@@ -496,6 +496,32 @@ def test_windows_adapter_ram_is_capped_at_4gb(machine, tmp_path):
     s = specs.detect_specs(tmp_path)
     assert s.gpus[0].vram_gb == 4.0
     assert any("at least 4 GB" in n for n in s.notes)
+    assert any("registry and DXGI" in n for n in s.notes)
+
+
+def test_windows_dxgi_beats_the_4gb_adapter_ram_cap(machine, monkeypatch, tmp_path):
+    machine(system="Windows", machine_name="AMD64", processor="Intel64 Family 6 Model 154 Stepping 3, GenuineIntel",
+            commands={"powershell": WIN_ADAPTERS}, cpuinfo=None)
+    monkeypatch.setattr(specs, "_windows_registry_vram", lambda: {})
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {"AMD Radeon RX 6700 XT": 12.0})
+    s = specs.detect_specs(tmp_path)
+    assert [(g.name, g.vram_gb) for g in s.gpus] == [("AMD Radeon RX 6700 XT", 12.0)]
+    assert not any("at least 4 GB" in n for n in s.notes)
+
+
+def test_missing_nvidia_smi_reads_vram_from_nvml(monkeypatch):
+    monkeypatch.setattr(specs, "_run", lambda args, timeout=5: (None, "missing"))
+    monkeypatch.setattr(
+        specs, "_nvml_device_records",
+        lambda: [("NVIDIA GeForce RTX 5090", 32 * 1024**3, "570.86")],
+    )
+    notes: list[str] = []
+    gpus, status = specs._nvidia_gpus(notes)
+    assert status == "ok"
+    assert [(g.name, g.vendor, g.vram_gb, g.driver_version) for g in gpus] == [
+        ("NVIDIA GeForce RTX 5090", "nvidia", 32.0, "570.86"),
+    ]
+    assert any("NVML" in note for note in notes)
 
 
 def test_windows_nvidia_via_nvidia_smi_and_wmic_fallback(machine, monkeypatch, tmp_path):

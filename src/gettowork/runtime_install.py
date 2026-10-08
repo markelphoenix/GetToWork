@@ -2077,6 +2077,43 @@ def _install_into(ui: UI, http: Any, release: dict, assets: list[dict], variant:
     return final_dir / Path(*PurePosixPath(rel_exe).parts)
 
 
+def install_tagged_release(
+    ui: UI,
+    specs: SystemSpecs,
+    tag: str,
+    *,
+    http: Any = None,
+    runtime_root: Optional[Path] = None,
+) -> tuple[Path, RuntimeVariant]:
+    """Download one published llama.cpp tag and install the best build for this computer.
+
+    This is the game's pin, not whatever GitHub lists as newest. ``update=True``
+    on :func:`ensure_llama_server` still means "newest"; Clef asks for the pin
+    because that is the release the game was tested with.
+    """
+    if not downloads_allowed():
+        raise RuntimeInstallError("This copy of the game does not download a replacement engine.")
+    wanted = (tag or "").strip()
+    if not wanted:
+        raise RuntimeInstallError("No llama.cpp release was named.")
+    http = http or UrllibHttp()
+    llama_root = _llama_root(runtime_root)
+    with ui.status(f"Checking GitHub for llama.cpp {escape(wanted)}..."):
+        release = fetch_release(wanted, http=http, ui=ui)
+    broken = unusable_reasons(llama_root.parent)
+    candidates = [variant for variant in plan_variants(specs) if variant.name not in broken]
+    if not candidates:
+        raise RuntimeInstallError(unusable_message(broken))
+    for cand in candidates:
+        chosen = select_assets(release.get("assets") or [], cand, specs.os_name, specs.arch)
+        if not chosen:
+            continue
+        return _install(ui, http, release, chosen, cand, llama_root), cand
+    raise RuntimeInstallError(
+        f"llama.cpp {wanted} has no prebuilt engine for {specs.os_name} on {specs.arch}."
+    )
+
+
 def ensure_llama_server(
     ui: UI,
     specs: SystemSpecs,

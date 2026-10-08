@@ -434,17 +434,22 @@ def _vram_contributors(specs: SystemSpecs) -> list:
     The primary card, plus every other card from the same vendor with at least
     4 GB. Apple unified memory is not summed this way (it isn't dedicated VRAM).
     """
-    main = perf.primary_gpu(specs)
-    if main is None or main.vendor == "apple":
-        return []
-    others = [g for g in specs.gpus if g is not main and g.vendor == main.vendor and g.vram_gb >= 4]
-    return [main, *others]
+    return perf.pooled_gpus(specs)
 
 
 def _dedicated_vram_gb(specs: SystemSpecs) -> float:
-    """Usable dedicated VRAM. llama.cpp splits a model across several GPUs of the
-    same kind, so we add up same-vendor cards with >= 4 GB each."""
+    """Dedicated VRAM before the per-card reserve. Same-vendor cards with >= 4 GB
+    are added together, because llama.cpp can split a model across them."""
     return sum(g.vram_gb for g in _vram_contributors(specs))
+
+
+def _usable_vram_gb(specs: SystemSpecs) -> float:
+    """Video memory a model may use: ``GPU_VRAM_RESERVE_GB`` kept free on each card.
+
+    The reserve used to be subtracted once from the sum, so a second card paid
+    no margin for the desktop. Each card now keeps its own.
+    """
+    return sum(max(0.0, g.vram_gb - GPU_VRAM_RESERVE_GB) for g in _vram_contributors(specs))
 
 
 def _os_headroom_gb(specs: SystemSpecs) -> float:
@@ -476,7 +481,7 @@ def _place(specs: SystemSpecs, base_need_gb: float) -> tuple[str, float, float, 
             return "partial", gpu_need, ram_budget, gpu.vram_gb / gpu_need
         return "none", base_need_gb, max(ram_budget, gpu.vram_gb), 0.0
     elif gpu is not None:
-        vram_budget = _dedicated_vram_gb(specs) - GPU_VRAM_RESERVE_GB
+        vram_budget = _usable_vram_gb(specs)
         if vram_budget > 0 and gpu_need <= vram_budget:
             return "gpu", gpu_need, vram_budget, 1.0
         share = vram_budget / gpu_need if vram_budget > 0 else 0.0
@@ -498,7 +503,7 @@ def _place(specs: SystemSpecs, base_need_gb: float) -> tuple[str, float, float, 
     if gpu is not None and gpu.vendor == "apple":
         budgets.append(gpu.vram_gb)
     elif gpu is not None:
-        budgets.append(max(0.0, _dedicated_vram_gb(specs) - GPU_VRAM_RESERVE_GB) + ram_budget)
+        budgets.append(_usable_vram_gb(specs) + ram_budget)
     return "none", base_need_gb, max(budgets), 0.0
 
 
@@ -1322,7 +1327,15 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
         )
     else:
         where = {
-            "gpu": f"{budget} of video memory ({_dedicated_vram_gb(specs):.0f} GB minus {GPU_VRAM_RESERVE_GB} GB kept free)",
+            "gpu": (
+                f"{budget} of video memory ({_dedicated_vram_gb(specs):.0f} GB minus "
+                f"{GPU_VRAM_RESERVE_GB:g} GB kept free"
+                + (
+                    f" on each of {len(_vram_contributors(specs))} cards"
+                    if len(_vram_contributors(specs)) > 1 else ""
+                )
+                + ")"
+            ),
             "unified": f"{budget} of unified memory that the Mac lets its GPU use",
             "cpu": f"{budget} of RAM ({specs.ram_total_gb:.0f} GB minus {_os_headroom_gb(specs)} GB for your system)",
             "none": f"{budget} at most",
@@ -1331,7 +1344,7 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
     if plan.tokens_per_s:
         moe = " (only the active experts are read)" if _active_share(model) < 1 else ""
         if plan.placement == "partial":
-            gpu_bw, _ = perf.bandwidth_for(specs, "gpu")
+            gpu_bw, _ = perf.bandwidth_for(specs, "gpu", demand_gb=plan.active_gb * plan.offload_fraction)
             cpu_bw, _ = perf.bandwidth_for(specs, "cpu")
             lines.append(
                 f"- Speed: {plan.offload_fraction:.0%} on the GPU (~{gpu_bw:.0f} GB/s) and the rest on the CPU "
@@ -1339,7 +1352,9 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
                 f"**{plan.tokens_per_s:.0f} tokens/s** ({fit.est_speed})"
             )
         else:
-            bw, source = perf.bandwidth_for(specs, plan.placement)
+            bw, source = perf.bandwidth_for(
+                specs, plan.placement, demand_gb=plan.active_gb if plan.placement == "gpu" else None,
+            )
             eff = perf.efficiency_for(specs, plan.placement)
             lines.append(
                 f"- Speed: {eff:.2f} × {bw:.0f} GB/s ({source}) ÷ {plan.active_gb:.1f} GB read per token{moe}, "
@@ -1685,19 +1700,88 @@ def _decision_home(fit: FitResult) -> int:
     return 3
 
 
+# A card-resident referee this many times faster than a CPU fit, and at least
+# this many tokens/s on the chat heuristic, wins even when the CPU fit is the
+# larger comfortable model. Clef's real latency is not published; the chat
+# figure only stops a slow CPU plan hiding a fast graphics-card plan.
+REFEREE_CARD_MIN_TOKENS_PER_S = 8.0
+REFEREE_CARD_SPEED_RATIO = 4.0
+
+
+def _prefer_fast_card(pool: list[FitResult], fits: list[FitResult]) -> list[FitResult]:
+    """Swap a CPU pool for a much faster card-resident fit, when there is one."""
+    best_home = min(_decision_home(fit) for fit in pool)
+    if best_home < 2:
+        return pool
+    cpu_speed = max(
+        (fit.est_tokens_per_s or 0.0) for fit in pool if _decision_home(fit) == best_home
+    )
+    fast = []
+    for fit in fits:
+        speed = fit.est_tokens_per_s or 0.0
+        if fit.verdict not in ("great", "ok", "tight") or _decision_home(fit) != 0:
+            continue
+        if speed >= REFEREE_CARD_MIN_TOKENS_PER_S and speed >= REFEREE_CARD_SPEED_RATIO * max(cpu_speed, 0.01):
+            fast.append(fit)
+    return fast or pool
+
+
+def _latency_clause(chosen: FitResult, fits: list[FitResult]) -> str:
+    """Why a faster card was preferred, or why a CPU fit was kept. Empty if neither applies."""
+    others = [fit for fit in fits if fit.model.key != chosen.model.key and fit.verdict != "no"]
+    bigger_on_cpu = [
+        fit for fit in others
+        if fit.model.params_b > chosen.model.params_b and fit.placement == "cpu"
+    ]
+    if bigger_on_cpu and _decision_home(chosen) == 0:
+        big = max(bigger_on_cpu, key=lambda fit: fit.model.params_b)
+        return (
+            f"{big.model.display_name} is larger, but it would run on the CPU "
+            f"(about {big.est_tokens_per_s or 0:.0f} tokens/s on the chat-model estimate). "
+            f"{chosen.model.display_name} stays on the graphics card "
+            f"(about {chosen.est_tokens_per_s or 0:.0f} tokens/s on that same estimate), "
+            "so the referee call should come back sooner. That figure is not a measured Clef latency."
+        )
+    cards = [fit for fit in others if _decision_home(fit) == 0 and chosen.placement == "cpu"]
+    if cards:
+        fast = max(cards, key=lambda fit: fit.est_tokens_per_s or 0.0)
+        card_speed = fast.est_tokens_per_s or 0.0
+        cpu_speed = chosen.est_tokens_per_s or 0.0
+        if card_speed <= cpu_speed:
+            return ""
+        return (
+            f"{fast.model.display_name} would stay on the graphics card "
+            f"(about {card_speed:.0f} tokens/s on the chat-model estimate). "
+            f"This pick stays on the CPU (about {cpu_speed:.0f} tokens/s on the same estimate) "
+            f"because the card is not at least {REFEREE_CARD_SPEED_RATIO:.0f} times faster. "
+            "That figure is not a measured Clef latency."
+        )
+    return ""
+
+
+def _with_latency_reason(chosen: FitResult, fits: list[FitResult]) -> FitResult:
+    extra = _latency_clause(chosen, fits)
+    if not extra or extra in chosen.reason:
+        return chosen
+    reason = chosen.reason if chosen.reason.endswith(".") else chosen.reason + "."
+    return replace(chosen, reason=f"{reason} {extra}")
+
+
 def _pick_system_one(fits: list[FitResult]) -> Optional[FitResult]:
     """Best referee that fits. Never a verdict of "no".
 
     Comfortable (great/ok, and not a thin split) beats a snug fit. On the same
     kind of home, the larger model wins, so Clef beats Clef-flash when both
     fit on the graphics card. A larger model that only fits in system RAM does
-    not beat a smaller one that still fits on the card. The story menu's
-    8 tokens/s chat-speed gate is not applied.
+    not beat a smaller one that still fits on the card, unless the card-resident
+    model is much faster on the chat-model estimate (see ``_prefer_fast_card``).
+    The story menu's 8 tokens/s chat-speed gate is not applied as a hard reject.
     """
     comfortable = [fit for fit in fits if _decision_comfortable(fit)]
     pool = comfortable or [fit for fit in fits if fit.verdict == "tight"]
     if not pool:
         return None
+    pool = _prefer_fast_card(pool, fits)
     best_home = min(_decision_home(fit) for fit in pool)
     housed = [fit for fit in pool if _decision_home(fit) == best_home]
 
@@ -1710,14 +1794,17 @@ def _pick_system_one(fits: list[FitResult]) -> Optional[FitResult]:
 def recommend_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = None) -> Optional[FitResult]:
     """The local System One option that fits best, or None if none fit.
 
-    Prefers Clef over Clef-flash when both fit comfortably, because Clef is
-    the larger model. Does not use the story recommender's chat-speed gate.
+    Prefers Clef over Clef-flash when both fit comfortably on the same kind of
+    home, because Clef is the larger model. A fast graphics-card fit is not
+    passed over for a much slower CPU fit. Does not use the story recommender's
+    chat-speed gate as a hard reject.
     """
     reserved = reserve_for_loaded_model(specs, story_fit)
     fits = [evaluate_fit(reserved, model) for model in SYSTEM_ONE_CATALOG]
     chosen = _pick_system_one(fits)
     if chosen is None:
         return None
+    chosen = _with_latency_reason(chosen, fits)
     return replace(chosen, badges=tuple(dict.fromkeys(("recommended",) + tuple(chosen.badges))))
 
 
@@ -1732,5 +1819,6 @@ def rank_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = None) -
     ordered = sorted(fits, key=lambda fit: (fit.verdict == "no", -fit.model.params_b))
     if chosen is None:
         return ordered
+    chosen = _with_latency_reason(chosen, fits)
     marked = replace(chosen, badges=tuple(dict.fromkeys(("recommended",) + tuple(chosen.badges))))
     return [marked] + [fit for fit in ordered if fit.model.key != marked.model.key]

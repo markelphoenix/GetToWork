@@ -530,6 +530,72 @@ def _bandwidth_from_vram_tier(vendor: str, vram: float, laptop: bool) -> Optiona
 # ---------------------------------------------------------------------------
 
 
+def pooled_gpus(specs: SystemSpecs) -> list[GPUInfo]:
+    """Same-vendor cards whose video memory the fit engine adds together.
+
+    The primary card, then every other card from that vendor with at least
+    4 GB. Apple unified memory is not pooled (it is not dedicated VRAM).
+    """
+    main = primary_gpu(specs)
+    if main is None or main.vendor == "apple":
+        return []
+    others = [gpu for gpu in specs.gpus if gpu is not main and gpu.vendor == main.vendor and gpu.vram_gb >= 4]
+    return [main, *others]
+
+
+def _gpu_reserve_gb() -> float:
+    """The per-card margin catalog.GPU_VRAM_RESERVE_GB keeps free. Imported lazily."""
+    from . import catalog
+
+    return float(catalog.GPU_VRAM_RESERVE_GB)
+
+
+def layer_split_bandwidth(specs: SystemSpecs, demand_gb: float) -> Optional[tuple[float, str]]:
+    """Effective GB/s when the model is spread across pooled graphics cards.
+
+    llama.cpp's default ``--split-mode layer`` (b11485 help text) puts layers
+    on different cards and pipelines them. One token still walks those layers
+    in order, so the cards do not add their bandwidth. The effective figure is
+    the weighted harmonic mean of the cards that hold the bytes: each card
+    keeps ``GPU_VRAM_RESERVE_GB`` free, and bytes fill the largest card first.
+    A model that fits on one card uses only that card. A long prefill can
+    overlap stages; this estimate does not assume that overlap.
+    """
+    cards = pooled_gpus(specs)
+    if not cards or demand_gb <= 0:
+        return None
+    reserve = _gpu_reserve_gb()
+    slots: list[tuple[float, float]] = []
+    for gpu in sorted(cards, key=lambda item: item.vram_gb, reverse=True):
+        usable = max(0.0, float(gpu.vram_gb) - reserve)
+        bandwidth = gpu.bandwidth_gbs or estimate_gpu_bandwidth(gpu)
+        if usable > 0 and bandwidth:
+            slots.append((usable, float(bandwidth)))
+    if not slots:
+        return None
+    remaining = float(demand_gb)
+    seconds = 0.0
+    used = 0.0
+    used_cards = 0
+    for usable, bandwidth in slots:
+        if remaining <= 1e-9:
+            break
+        take = min(usable, remaining)
+        seconds += take / bandwidth
+        used += take
+        used_cards += 1
+        remaining -= take
+    if used <= 0 or seconds <= 0:
+        return None
+    effective = used / seconds
+    if used_cards <= 1:
+        return effective, "published spec, a rough guess"
+    return effective, (
+        "a layer-split estimate across these graphics cards "
+        "(llama.cpp's default split runs each layer on one card, so the cards' speeds are not added together)"
+    )
+
+
 def primary_gpu(specs: SystemSpecs) -> Optional[GPUInfo]:
     """The GPU the game would use: the Apple GPU on unified-memory Macs, else
     the dedicated GPU with the most video memory (None if there isn't one, or
@@ -544,13 +610,22 @@ def primary_gpu(specs: SystemSpecs) -> Optional[GPUInfo]:
     return max(dedicated, key=lambda g: g.vram_gb, default=None)
 
 
-def bandwidth_for(specs: SystemSpecs, placement: str) -> tuple[float, str]:
+def bandwidth_for(
+    specs: SystemSpecs, placement: str, *, demand_gb: Optional[float] = None,
+) -> tuple[float, str]:
     """(GB/s, where the number came from) for a placement: "gpu", "unified" or "cpu".
 
-    The source is one of "measured", "published spec, a rough guess" or
-    "default guess", so the UI can be honest about how solid the number is.
-    With no usable GPU, "gpu"/"unified" quietly fall back to the CPU numbers.
+    The source is one of "measured", "published spec, a rough guess",
+    "a layer-split estimate..." or "default guess", so the UI can be honest
+    about how solid the number is. With no usable GPU, "gpu"/"unified" quietly
+    fall back to the CPU numbers. ``demand_gb`` is how many GB a GPU plan reads
+    per token; when the model needs more than one pooled card, the bandwidth is
+    the layer-split figure instead of the primary card alone.
     """
+    if placement == "gpu" and demand_gb:
+        split = layer_split_bandwidth(specs, float(demand_gb))
+        if split is not None:
+            return split
     if placement in ("gpu", "unified"):
         gpu = primary_gpu(specs)
         if gpu is not None:
@@ -602,7 +677,10 @@ def _speed_on(specs: SystemSpecs, placement: str, active_gb: float) -> float:
             placement = "cpu"
         else:  # an Apple GPU always behaves like "unified", any other like "gpu"
             placement = "unified" if gpu.vendor == "apple" else "gpu"
-    bandwidth, _ = bandwidth_for(specs, placement)
+    if placement == "gpu":
+        bandwidth, _ = bandwidth_for(specs, placement, demand_gb=active_gb)
+    else:
+        bandwidth, _ = bandwidth_for(specs, placement)
     eff = efficiency_for(specs, placement)
     seconds_per_token = active_gb / (eff * bandwidth) + OVERHEAD_S_PER_TOKEN[placement]
     return 1.0 / seconds_per_token

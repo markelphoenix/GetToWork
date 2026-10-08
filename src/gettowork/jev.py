@@ -973,7 +973,7 @@ A **Noul** is a yes/no question - or a statement to check as true or false.
 }
 ```
 
-Jev answers with a single number:
+The referee answers with a single number:
 
 ```json
 "made_progress": {"type": "noul", "noul": 0.91}
@@ -982,7 +982,7 @@ Jev answers with a single number:
 - `noul` is the **probability of yes** (or true), from 0 to 1. Near 1 means yes,
   near 0 means no, around 0.5 means genuinely unsure.
 - There is **no separate confidence field** - the probability already says how sure
-  Jev is. 0.97 is a confident yes; 0.55 is a shrug that leans yes.
+  the referee is. 0.97 is a confident yes; 0.55 is a shrug that leans yes.
 - `criteria` is optional: short descriptions of what counts as true and as false.
 - **You** pick the cut-off. This game counts progress when `noul >= 0.5`; a stricter
   game could demand 0.8, and a moderation tool might send 0.4-0.6 to a human.
@@ -1014,7 +1014,7 @@ The answer:
 - `choice` - the label with the **highest probability**, always one of *your* labels.
 - `probabilities` - how likely every label is, from 0 to 1, adding up to about 1.
   Great for spotting a close call between two labels.
-- `confidence` - from 0 to 1, how sure Jev is about the selected label. Low values are
+- `confidence` - from 0 to 1, how sure the referee is about the selected label. Low values are
   a signal to double-check (or ask a human).
 """
 
@@ -1046,7 +1046,7 @@ The answer:
   can land between levels (here 1x0.05 + 2x0.3 + 3x0.6 + 4x0.05 = 2.65).
 - `probabilities` - how likely each level is (same keys as `legend`), adding up to about 1.
 - `legend` - your rubric echoed back, so you know what each number means.
-- `confidence` - from 0 to 1, how sure Jev is about the score.
+- `confidence` - from 0 to 1, how sure the referee is about the score.
 
 Because the levels are ordered, 2.9 really means "nearly a 3" - something a plain
 label can't express.

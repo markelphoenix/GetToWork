@@ -791,8 +791,12 @@ def test_readme_disclaimer_covers_the_essentials() -> None:
     disclaimer = text[text.index("DISCLAIMER"):]
     for phrase in ('"AS IS"', "without warranty", "Estimates can be wrong", "not affiliated with, endorsed by",
                    "TypeSafe AI", "Hugging Face", "llama.cpp", "Ollama", "model author", "trademarks",
-                   "responsible for complying", "Jev may cost money", "unpredictable"):
+                   "responsible for complying", "Jev may cost money", "unpredictable",
+                   "be wrong", "says is advice"):
         assert phrase in disclaimer, phrase
+    lowered = disclaimer.lower()
+    assert "offensive" not in lowered
+    assert "odd" not in lowered
 
 
 def test_readme_privacy_section_names_every_outside_service() -> None:
@@ -959,6 +963,10 @@ def test_notice_covers_what_ships_inside_the_game_builds() -> None:
         assert any(name in line and license_words in line for line in lines), name
     assert "bootloader exception" in text and "BSD" in collect.TCL_TK_NOTICE
     assert "**Bundled** in the game builds" in text
+    assert "b11485" in text
+    lowered = text.lower()
+    assert "offensive" not in lowered
+    assert "odd" not in lowered
     # The engine builds NOTICE names are the ones the build workflow bundles.
     workflow = read(BUILD_WORKFLOW)
     assert workflow.count("engines: vulkan,cpu") == 2 and "engines: metal" in workflow

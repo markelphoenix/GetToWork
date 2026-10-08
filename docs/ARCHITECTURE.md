@@ -85,8 +85,11 @@ below and [docs/DISTRIBUTION.md](DISTRIBUTION.md) for the build itself.
    where it goes (TypeSafe AI's host). When setup passes hardware specs, this
    step is the System One menu instead (`system_one.py`): Clef or Clef-flash
    on this computer, Jev, or the story model. Clef is not a storyteller. The
-   pinned llama.cpp build cannot load architecture `clef` (text support is
-   llama.cpp b11371); the menu says so and does not download the weights.
+   pinned engine is llama.cpp b11485, which can load architecture `clef`
+   (text support started at b11371; image support from PR 29969 is in this
+   pin, and the referee stays text-only). An older installed engine is told
+   why, and offered a download of the pin when engine downloads are allowed.
+   The weights are not downloaded until the engine can load them.
    `yes` still means Jev. Yes → paste API key (hidden input; if
    the window can't hide input the player is told first and pointed to
    `TYPESAFE_API_KEY`), or "help me get one" (opens the TypeSafe website/docs

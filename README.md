@@ -484,12 +484,18 @@ plus engine overhead. It also subtracts the story model that is already loaded.
 
 The text referee does not need the optional `mmproj` vision file. llama.cpp
 **b11371** (3 October 2026) is the first release whose notes say it can load
-Clef, and those notes say **text-only**. This game's pinned engine
-(`packaging/llama_cpp_tag.txt`) is older, so the menu shows Clef and explains
-why it will not download the file. A newer engine installed for the game is
-used when its tag is b11371 or newer. Whether Ollama, vLLM or LM Studio can
-load `clef` was not verified, and neither was image support in llama.cpp
-after b11371.
+Clef, and those notes say **text-only**. Image input landed later, in
+[PR 29969](https://github.com/ggml-org/llama.cpp/pull/29969) (merged 5 October
+2026). This game pins **b11485** (8 October 2026). That tag is the newest
+release that publishes the Windows Vulkan, Windows CPU, Linux Vulkan, Linux
+CPU, and macOS arm64 archives this game requires. GitHub's compare view shows
+the image-support commit is an ancestor of it. The two commits after b11483
+are chat-template fixes, not server-flag changes. The referee in the game
+stays text-only. If the engine actually installed is older than b11371, the
+referee menu says so and offers to download b11485 when this copy of the game
+is allowed to download engines. It
+does not download Clef until the engine can load it. Whether Ollama, vLLM or
+LM Studio can load `clef` was not verified.
 
 Running Clef stays on `127.0.0.1`. The download is from Hugging Face. The
 game does not send plans to Cloudflare. Before the download you get the
@@ -960,5 +966,5 @@ build in `THIRD_PARTY_LICENSES.txt` - are listed in [NOTICE.md](NOTICE.md).
 >   You are responsible for how you use your own machine.
 > - **AI output is unpredictable.** The prompts ask for farcical, family-friendly
 >   stories and a filter checks what the model writes, but AI models can still
->   produce odd, wrong or inappropriate text. You are responsible for what you
->   do with that output. Nothing the game or a model says is advice.
+>   be wrong. You are responsible for what you do with that output. Nothing the
+>   game or a model says is advice.

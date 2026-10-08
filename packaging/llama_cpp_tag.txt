@@ -16,9 +16,9 @@
 # archives' (download them from the release page and run `sha256sum` on them,
 # or copy the "sha256:" digests the release page shows), let CI build it, and
 # play a test build.
-b11100
-2b1af3fb7a5da5b499871782f590b20caa92c3acf917baaab2da99eae9df4e88  llama-b11100-bin-win-vulkan-x64.zip
-c62aa9c73d866486f72bfb0085ffc4116136c356c6a67db4ea122eb1b281b219  llama-b11100-bin-win-cpu-x64.zip
-18de8fbcd0993359ba74310c8f3fb15c6f7891e99e7dd98676bba2d900c4c04b  llama-b11100-bin-ubuntu-vulkan-x64.tar.gz
-a836c913236ab4533ef9aaf49f0e1ad2955c8159869d7eec1a9072a92e13d61b  llama-b11100-bin-ubuntu-x64.tar.gz
-33de9bee88ef4bcb7858fc65b1d3770ca6c6a6282ea53587f79a99c2ac9eb807  llama-b11100-bin-macos-arm64.tar.gz
+b11485
+2adedc3469288620cd3877d79a1001dd052e91a7546fac2a0227e08f7371ccdd  llama-b11485-bin-win-vulkan-x64.zip
+ac51218237b4e9fdd0525e7a6ef56ba10c450cab200398d848fee6e7dd81c917  llama-b11485-bin-win-cpu-x64.zip
+f12bcbb1dc2108b29172d40e8842635e4e22e507c9e8833797bdf08347a9e09c  llama-b11485-bin-ubuntu-vulkan-x64.tar.gz
+7c85db4246ec05169bde9dcf9fd146c0165cfb2ca9bad3209e8a1141c37ab754  llama-b11485-bin-ubuntu-x64.tar.gz
+61b0345992a4c8cc0f7228034a600c57e8baa9f3f727919ac9d9da52bc75a478  llama-b11485-bin-macos-arm64.tar.gz

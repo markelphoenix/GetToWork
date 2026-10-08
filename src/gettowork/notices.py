@@ -65,8 +65,11 @@ receives the player's plan and a short summary of the story, and returns only nu
 decide each round - it writes no text that appears in the story. Optionally, the game can also download \
 Cloudflare's Clef or Clef-flash (Apache-2.0) to referee locally: they score the same kinds of questions \
 and return probabilities, not story text. Clef text needs llama.cpp b11371 or newer (that release's notes \
-say the support is text-only). If the engine shipped with the game is older, the game explains that and \
-does not download Clef. Scoring stays on the player's computer; the game does not send plans to Cloudflare. \
+say the support is text-only). This game ships llama.cpp b11485, which includes that text support. \
+Image input for Clef was added later and is in this engine; the referee in the game stays text-only. \
+If the engine on the player's computer is older, the game says so and can download a newer engine when \
+that copy of the game is allowed to. It does not download Clef until the engine can load it. \
+Scoring stays on the player's computer; the game does not send plans to Cloudflare. \
 The game creates no AI images, audio or voices.
 
 Guardrails for the live-generated text:
@@ -99,7 +102,6 @@ NO_WARRANTY_NOTICE = (
     "A recommended model may still run slowly or fail to load. You use this at your own risk."
 )
 AI_OUTPUT_RESPONSIBILITY = (
-    "AI output can be wrong, odd or offensive. You are responsible for how you use it. "
-    "Nothing a model says is advice."
+    "AI output can be wrong. You are responsible for how you use it; it is not advice."
 )
 LOCAL_RUN_NOTICES = (HARDWARE_STRAIN_NOTICE, NO_WARRANTY_NOTICE, AI_OUTPUT_RESPONSIBILITY)
