@@ -911,13 +911,16 @@ def judge_round(client: JevClient, **state_kwargs: Any) -> JevVerdict:
     return parse_verdict(response, exchange)
 
 
-def explain_verdict(v: JevVerdict) -> str:
-    """One friendly paragraph describing Jev's three answers to the player."""
+def explain_verdict(v: JevVerdict, *, who: str = "Jev") -> str:
+    """One friendly paragraph describing the referee's three answers to the player.
+
+    ``who`` is "Jev" for the hosted service and "Clef" for a local decision model.
+    """
     pct = round(v.progress_probability * 100)
     if v.made_progress:
-        first = f"Jev puts the chance that your plan made progress at {pct}% - that counts, you're a step closer to work!"
+        first = f"{who} puts the chance that your plan made progress at {pct}% - that counts, you're a step closer to work!"
     else:
-        first = f"Jev puts the chance that your plan made progress at only {pct}% - not quite enough to count this time."
+        first = f"{who} puts the chance that your plan made progress at only {pct}% - not quite enough to count this time."
     second = f'It filed the outcome under "{v.outcome}" ({round(v.outcome_confidence * 100)}% confident)'
     levels = [int(k) for k in v.creativity_legend if str(k).isdecimal() and len(str(k)) <= 6]
     top = max(levels) if levels else len(CREATIVITY_LEVELS) - 1

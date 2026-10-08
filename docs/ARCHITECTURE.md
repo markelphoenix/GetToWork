@@ -82,7 +82,12 @@ below and [docs/DISTRIBUTION.md](DISTRIBUTION.md) for the build itself.
 7. **Jev onboarding** (`onboarding.py`): "Do you want to enable Jev?" with a
    plain-language explanation, including a privacy line saying exactly what
    Jev receives (the typed plan, the challenge, a story summary, progress) and
-   where it goes (TypeSafe AI's host). Yes → paste API key (hidden input; if
+   where it goes (TypeSafe AI's host). When setup passes hardware specs, this
+   step is the System One menu instead (`system_one.py`): Clef or Clef-flash
+   on this computer, Jev, or the story model. Clef is not a storyteller. The
+   pinned llama.cpp build cannot load architecture `clef` (text support is
+   llama.cpp b11371); the menu says so and does not download the weights.
+   `yes` still means Jev. Yes → paste API key (hidden input; if
    the window can't hide input the player is told first and pointed to
    `TYPESAFE_API_KEY`), or "help me get one" (opens the TypeSafe website/docs
    in a browser, step-by-step), or back out to local-only at *any* step
@@ -153,7 +158,8 @@ src/gettowork/
     llamacpp.py      LlamaCppBackend (llama-cpp-python, optional)
     mock.py          MockBackend (scripted, offline, deterministic)
   jev.py             Jev HTTP client + game questions + verdict parsing
-  onboarding.py      Jev opt-in / API-key flow
+  system_one.py      local Clef referee (llama-server /v1/systemone); not a story model
+  onboarding.py      Jev opt-in / API-key flow, and the System One menu when specs are passed
   prompts.py         all LLM prompt text
   safety.py          family-friendly filter (check_text / soften / check_player_input)
   safety_terms.py    its word lists, ROT13-scrambled

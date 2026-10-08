@@ -63,6 +63,12 @@ __all__ = [
     "recommend",
     "explain_fit",
     "speed_breakdown",
+    "SYSTEM_ONE_CATALOG",
+    "get_system_one",
+    "is_decision_model",
+    "reserve_for_loaded_model",
+    "recommend_system_one",
+    "rank_system_one",
 ]
 
 # ---------------------------------------------------------------------------
@@ -422,14 +428,23 @@ class _Plan:
     context: Optional[int] = None  # conversation memory planned for (None = the model's usual)
 
 
+def _vram_contributors(specs: SystemSpecs) -> list:
+    """GPUs whose memory `_dedicated_vram_gb` adds together.
+
+    The primary card, plus every other card from the same vendor with at least
+    4 GB. Apple unified memory is not summed this way (it isn't dedicated VRAM).
+    """
+    main = perf.primary_gpu(specs)
+    if main is None or main.vendor == "apple":
+        return []
+    others = [g for g in specs.gpus if g is not main and g.vendor == main.vendor and g.vram_gb >= 4]
+    return [main, *others]
+
+
 def _dedicated_vram_gb(specs: SystemSpecs) -> float:
     """Usable dedicated VRAM. llama.cpp splits a model across several GPUs of the
     same kind, so we add up same-vendor cards with >= 4 GB each."""
-    main = perf.primary_gpu(specs)
-    if main is None or main.vendor == "apple":
-        return 0.0
-    same = [g.vram_gb for g in specs.gpus if g.vendor == main.vendor and g.vram_gb >= 4 and g is not main]
-    return main.vram_gb + sum(same)
+    return sum(g.vram_gb for g in _vram_contributors(specs))
 
 
 def _os_headroom_gb(specs: SystemSpecs) -> float:
@@ -857,7 +872,15 @@ def _reason(specs: SystemSpecs, model: ModelEntry, plan: _Plan, verdict: str) ->
         speed = "about 1 token/s" if tps >= 0.8 else "well under 1 token/s"
     gpu = perf.primary_gpu(specs)
     if plan.placement == "gpu":
-        where = f"Fits on your {gpu.name if gpu else 'graphics card'} (needs ~{need} of {budget} GB video memory)"
+        cards = _vram_contributors(specs)
+        if len(cards) > 1:
+            names = ", ".join(g.name for g in cards)
+            where = (
+                f"Fits across your {len(cards)} graphics cards ({names}) together "
+                f"(needs ~{need} of {budget} GB video memory combined)"
+            )
+        else:
+            where = f"Fits on your {gpu.name if gpu else 'graphics card'} (needs ~{need} of {budget} GB video memory)"
     elif plan.placement == "unified":
         where = f"Fits in your Mac's unified memory (needs ~{need} of {budget} GB usable)"
     elif plan.placement == "partial" and gpu is not None and gpu.vendor == "apple":
@@ -887,6 +910,10 @@ def _reason(specs: SystemSpecs, model: ModelEntry, plan: _Plan, verdict: str) ->
         sentence += "; it's a snug fit, so close other big apps first"
     elif perf.speed_label(tps) in ("slow", "very slow"):
         sentence += ", so expect some waiting"
+    if (model.architecture or "").lower() == "clef" and "token" in sentence:
+        # Clef does not generate story tokens. This figure is the chat heuristic
+        # in perf.py, not a latency Cloudflare measured for a local Clef run.
+        sentence += " (a chat-model speed estimate, not a measured decision latency)"
     return sentence + "."
 
 
@@ -1345,6 +1372,15 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
         "disk": "even the smallest version needs more free disk space than you have",
     }[tier]
     lines.append(f"- Why {quant}: {why}.")
+    if (model.architecture or "").lower() == "clef":
+        lines.append(
+            "- Decision model: one forward pass that scores the referee's questions. It does not write the story. "
+            "The tokens/s figure is this game's chat-model estimate, not a Clef latency. "
+            "Cloudflare has not published local video-memory use at the full 65,536-token window; "
+            "this plan asks for "
+            f"{context:,} tokens. The KV-cache shape for architecture clef is not published, so the cache "
+            "line above is the grouped-query rule of thumb (unverified for Clef)."
+        )
     lines.append("- *A home-grown estimate (MIT licensed), not a guarantee.*")
     return "\n".join(lines)
 
@@ -1483,3 +1519,218 @@ def get_model(key: str) -> Optional[ModelEntry]:
         if wanted in (model.key.lower(), model.hf_repo.lower()):
             return model
     return None
+
+
+# ---------------------------------------------------------------------------
+# System One (the referee), not the storyteller
+# ---------------------------------------------------------------------------
+#
+# Clef does not write free-form text, so it must not join MODEL_CATALOG: the
+# story recommender would otherwise offer it as the narrator. Specs below are
+# taken from Cloudflare's model card / blog and the ggml-org GGUF repos.
+# Anything Cloudflare did not publish is marked unverified at the point of use
+# (KV-cache shape, local VRAM at 64k context, Ollama / vLLM / LM Studio).
+#
+# GGUF byte lengths (Hugging Face file sizes, decimal GB = bytes / 1e9):
+#   ggml-org/Clef-GGUF
+#     Clef-Q4_K_M.gguf      19,232,219,200
+#     Clef-Q8_0.gguf        28,732,215,360
+#     Clef-BF16.gguf        54,064,664,640
+#   ggml-org/Clef-Flash-GGUF
+#     Clef-Flash-Q4_K_M.gguf   6,486,448,288
+#     Clef-Flash-Q8_0.gguf     9,657,260,192
+#     Clef-Flash-BF16.gguf    18,164,488,352
+# Parameter totals from the GGUF headers: 27,024,054,788 and 9,075,566,084.
+# Published context is 65,536 tokens (Cloudflare: "64K"). The GGUF header's
+# 262,144 is the Qwen backbone figure and is not used here — whether the
+# decision head was trained at that length was not verified.
+# The text referee does not need the optional mmproj vision file.
+# ollama_ref follows this catalog's hf.co pattern. Whether Ollama (or vLLM,
+# or LM Studio) can load architecture "clef" was not verified.
+# llama.cpp text support is the b11371 release note ("text-only", 2026-10-03).
+# Requested context is 4,096: a short referee call. Full-64k KV memory is
+# not published, so it is not claimed here.
+
+def is_decision_model(model: ModelEntry) -> bool:
+    """True for Clef-style referees, which must not be offered as the storyteller."""
+    return (model.architecture or "").strip().lower() == "clef"
+
+
+def get_system_one(key: str) -> Optional[ModelEntry]:
+    """A System One option by key ("clef", "clef-flash") or GGUF repo id."""
+    wanted = (key or "").strip().lower()
+    for model in SYSTEM_ONE_CATALOG:
+        if wanted in (model.key.lower(), model.hf_repo.lower()):
+            return model
+    return None
+
+
+SYSTEM_ONE_CATALOG: list[ModelEntry] = [
+    _seed(
+        "clef-flash", "Clef-flash", "Clef", 9.08,
+        "ggml-org/Clef-Flash-GGUF", "Cloudflare/clef-flash", "Apache-2.0",
+        "Cloudflare's smaller decision model (Apache-2.0). It scores the referee's "
+        "questions in one forward pass and does not write the story.",
+        (6.49, 9.66, 18.16),
+        quants=("Q4_K_M", "Q8_0", "BF16"),
+        default_quant="Q4_K_M",
+        gguf_file="Clef-Flash-Q4_K_M.gguf",
+        architecture="clef",
+        native_context=65536,
+    ),
+    _seed(
+        "clef", "Clef", "Clef", 27.02,
+        "ggml-org/Clef-GGUF", "Cloudflare/clef", "Apache-2.0",
+        "Cloudflare's 27B decision model (Apache-2.0). It scores the referee's "
+        "questions in one forward pass and does not write the story.",
+        (19.23, 28.73, 54.06),
+        quants=("Q4_K_M", "Q8_0", "BF16"),
+        default_quant="Q4_K_M",
+        gguf_file="Clef-Q4_K_M.gguf",
+        architecture="clef",
+        native_context=65536,
+    ),
+]
+# _seed leaves context_tokens at 4,096 (a short referee call, not the published
+# 65,536) and thinking at "none" because reasoning is false. ModelEntry is frozen.
+
+
+def _subtract_vram(gpus: list, vendor: str, amount: float) -> list:
+    """Take `amount` GB off the largest cards of `vendor` first."""
+    if amount <= 0:
+        return list(gpus)
+    order = sorted(
+        (i for i, gpu in enumerate(gpus) if gpu.vendor == vendor),
+        key=lambda i: gpus[i].vram_gb,
+        reverse=True,
+    )
+    updated = list(gpus)
+    left = amount
+    for index in order:
+        gpu = updated[index]
+        take = min(gpu.vram_gb, left)
+        updated[index] = replace(gpu, vram_gb=max(0.0, gpu.vram_gb - take))
+        left -= take
+        if left <= 0:
+            break
+    return updated
+
+
+def reserve_for_loaded_model(specs: SystemSpecs, story_fit: Optional[FitResult]) -> SystemSpecs:
+    """Memory and disk still free once the story model is loaded.
+
+    The referee is chosen after the story model is already running, but the
+    hardware snapshot was taken before that download. Subtract the story fit's
+    estimated memory from the placement it uses, and its download size from
+    free disk (skipped when free disk is unknown, ``disk_free_gb < 0``).
+
+    A GPU+RAM split subtracts the whole estimate from system RAM as well as
+    from video memory. That is conservative: part of the model is not in RAM.
+    Two-model memory is an estimate, not a measurement after the load.
+    """
+    if story_fit is None:
+        return specs
+    used = max(0.0, float(story_fit.est_memory_gb or 0.0))
+    disk = specs.disk_free_gb
+    if disk >= 0 and story_fit.download_gb:
+        disk = max(0.0, disk - float(story_fit.download_gb) * GIB_PER_GB)
+    gpus = list(specs.gpus)
+    ram = float(specs.ram_total_gb)
+    placement = story_fit.placement
+    gpu = perf.primary_gpu(specs)
+    if used and placement in ("gpu", "partial") and gpu is not None and gpu.vendor != "apple":
+        gpus = _subtract_vram(gpus, gpu.vendor, used)
+        if placement == "partial":
+            ram = max(0.0, ram - used)
+    elif used and placement in ("unified", "cpu", "partial"):
+        ram = max(0.0, ram - used)
+        # Apple unified memory is the same pool the CPU plan just used.
+        if gpu is not None and gpu.vendor == "apple" and placement in ("unified", "cpu", "partial"):
+            gpus = _subtract_vram(gpus, "apple", used)
+    available = min(float(specs.ram_available_gb), ram)
+    return replace(specs, gpus=gpus, ram_total_gb=ram, ram_available_gb=max(0.0, available), disk_free_gb=disk)
+
+
+def _decision_comfortable(fit: FitResult) -> bool:
+    """A referee fit we will actually recommend.
+
+    Comfortable means great or ok, and not a thin GPU+RAM split. Decision
+    models are not gated on the story menu's 8 tokens/s chat-speed floor:
+    Clef does not generate those tokens.
+    """
+    if fit.verdict not in ("great", "ok"):
+        return False
+    if fit.placement == "partial" and (fit.gpu_share or 0.0) < SPLIT_RECOMMENDED_MIN_GPU_SHARE:
+        return False
+    return fit.placement != "none"
+
+
+def _decision_home(fit: FitResult) -> int:
+    """0 = on the graphics card (including a split that keeps most of the model there),
+    1 = a thin split, 2 = processor only.
+
+    A settled split competes with a model that fits wholly on the card, so a
+    16 GB card can still be offered the larger Clef when it holds about three
+    quarters of it. A model that has fallen all the way to system RAM does not
+    beat a smaller one that still fits on the card.
+    """
+    if fit.placement in ("gpu", "unified"):
+        return 0
+    if fit.placement == "partial" and (fit.gpu_share or 0.0) >= SPLIT_RECOMMENDED_MIN_GPU_SHARE:
+        return 0
+    if fit.placement == "partial":
+        return 1
+    if fit.placement == "cpu":
+        return 2
+    return 3
+
+
+def _pick_system_one(fits: list[FitResult]) -> Optional[FitResult]:
+    """Best referee that fits. Never a verdict of "no".
+
+    Comfortable (great/ok, and not a thin split) beats a snug fit. On the same
+    kind of home, the larger model wins, so Clef beats Clef-flash when both
+    fit on the graphics card. A larger model that only fits in system RAM does
+    not beat a smaller one that still fits on the card. The story menu's
+    8 tokens/s chat-speed gate is not applied.
+    """
+    comfortable = [fit for fit in fits if _decision_comfortable(fit)]
+    pool = comfortable or [fit for fit in fits if fit.verdict == "tight"]
+    if not pool:
+        return None
+    best_home = min(_decision_home(fit) for fit in pool)
+    housed = [fit for fit in pool if _decision_home(fit) == best_home]
+
+    def rank(fit: FitResult) -> tuple:
+        return (fit.model.params_b, quant_quality(fit.quant or ""), -fit.est_memory_gb)
+
+    return max(housed, key=rank)
+
+
+def recommend_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = None) -> Optional[FitResult]:
+    """The local System One option that fits best, or None if none fit.
+
+    Prefers Clef over Clef-flash when both fit comfortably, because Clef is
+    the larger model. Does not use the story recommender's chat-speed gate.
+    """
+    reserved = reserve_for_loaded_model(specs, story_fit)
+    fits = [evaluate_fit(reserved, model) for model in SYSTEM_ONE_CATALOG]
+    chosen = _pick_system_one(fits)
+    if chosen is None:
+        return None
+    return replace(chosen, badges=tuple(dict.fromkeys(("recommended",) + tuple(chosen.badges))))
+
+
+def rank_system_one(specs: SystemSpecs, story_fit: Optional[FitResult] = None) -> list[FitResult]:
+    """Every System One option, recommended first, then the rest by size.
+
+    Models that do not fit stay in the list so the menu can explain why.
+    """
+    reserved = reserve_for_loaded_model(specs, story_fit)
+    fits = [evaluate_fit(reserved, model) for model in SYSTEM_ONE_CATALOG]
+    chosen = _pick_system_one(fits)
+    ordered = sorted(fits, key=lambda fit: (fit.verdict == "no", -fit.model.params_b))
+    if chosen is None:
+        return ordered
+    marked = replace(chosen, badges=tuple(dict.fromkeys(("recommended",) + tuple(chosen.badges))))
+    return [marked] + [fit for fit in ordered if fit.model.key != marked.model.key]

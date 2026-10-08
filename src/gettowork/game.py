@@ -742,7 +742,7 @@ class Game:
             storyteller = self.llm.model_label
         except Exception:  # a label is nice to have, never worth crashing over
             storyteller = getattr(self.llm, "name", "your local model")
-        referee = f"Jev ({self.jev.model})" if self.jev is not None else self._local_referee_name
+        referee = self._referee_label
         ui.info(f"Storyteller: {escape(str(storyteller))}  |  Referee: {escape(referee)}")
 
     @property
@@ -753,6 +753,26 @@ class Game:
     @property
     def _local_referee_name(self) -> str:
         return "the pretend model (a simple scripted rule)" if self._pretend else "your local model"
+
+    @property
+    def _referee_label(self) -> str:
+        """Who the status line names. A local Clef sets ``referee_name`` so it isn't called Jev."""
+        if self.jev is None:
+            return self._local_referee_name
+        custom = getattr(self.jev, "referee_name", None)
+        if isinstance(custom, str) and custom.strip():
+            return custom.strip()
+        return f"Jev ({self.jev.model})"
+
+    @property
+    def _referee_who(self) -> str:
+        """The name at the start of the verdict sentence ("Jev" or "Clef")."""
+        if self.jev is None:
+            return "Jev"
+        custom = getattr(self.jev, "referee_name", None)
+        if isinstance(custom, str) and custom.strip():
+            return custom.split("(")[0].strip() or "Jev"
+        return "Jev"
 
     def _opening(self) -> None:
         """The intro story. (No obstacle yet: round 1 asks how the player will get to work.)"""
@@ -819,7 +839,7 @@ class Game:
     def _jev_explanation(self, record: RoundRecord, verdict: JevVerdict) -> str:
         """Jev's verdict in words. The game writes the sentence, but the labels in it come from Jev's
         reply, so it goes through the family-friendly filter too (a built-in line if it doesn't pass)."""
-        text = jevlib.explain_verdict(verdict)
+        text = jevlib.explain_verdict(verdict, who=self._referee_who)
         checked = safety.check_text(text)
         if checked.ok:
             return safety.soften(text)

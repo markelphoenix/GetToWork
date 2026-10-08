@@ -584,6 +584,10 @@ def rejection_reason(info: Any, *, allow_all_licenses: bool = False) -> Optional
         return "not family-friendly (uncensored, abliterated or adult content)"
     pipeline = _attr(info, "pipeline_tag")
     words = _words(name) + _words(_repo_name(_base_model(info) or ""))  # a GGUF of a specialist is one too
+    if "clef" in words:
+        # Clef scores labelled answers. It is a System One option, not a storyteller,
+        # even when someone names the GGUF repo themselves.
+        return "a decision model (Clef scores labelled answers; it does not write story text)"
     if (pipeline in _NOT_CHAT_PIPELINES or _NOT_CHAT_WORDS.intersection(words)
             or any(part in word for word in words for part in _NOT_CHAT_PARTS)):
         return "a specialist model (coding, maths, embeddings, vision, speech...), not a storyteller"

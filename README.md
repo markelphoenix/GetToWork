@@ -410,10 +410,14 @@ explains it the first time you see it.
 
 How to turn it on:
 
-1. After your model is ready, the game asks *"Enable Jev for this game?"*
-   Choose `yes`, `no` (local only) or `learn` (tell me more first). The screen
-   also says what Jev receives each round (your plan, the challenge and a short
-   story summary; see [Privacy](#privacy-what-leaves-your-computer)).
+1. After your model is ready, the game asks who should referee.
+   On a real model that is the **System One** menu: **Clef**, **Clef-flash**
+   (both local; see below), **Jev**, or **no** (your story model referees).
+   `yes` still means Jev. Enter keeps the story model, so it does not start a
+   download. A pretend-model game (`--mock`) keeps the shorter question
+   *"Enable Jev for this game?"* with `yes`, `no` or `learn`. Either way the
+   screen says what Jev receives each round (your plan, the challenge and a
+   short story summary; see [Privacy](#privacy-what-leaves-your-computer)).
 2. Paste your API key (it stays hidden while you type - the game's window
    masks it; if a terminal can't hide it, for example an IDE's Run console,
    the game warns you first and suggests the environment variable below),
@@ -449,6 +453,48 @@ set TYPESAFE_API_KEY=your-key             # Windows Command Prompt
 > its own pricing and terms of service. Check them on their website before
 > signing up. Get To Work is not affiliated with TypeSafe AI, and any charges
 > for using Jev are between you and TypeSafe.
+
+### Clef (optional local referee)
+
+**Clef** and **Clef-flash** are Cloudflare's open-weight decision models
+([announcement](https://blog.cloudflare.com/clef-decision-models/),
+[Clef model card](https://huggingface.co/Cloudflare/clef),
+[Clef-flash model card](https://huggingface.co/Cloudflare/clef-flash)).
+They answer the same kind of typed questions Jev does (a probability, not a
+paragraph). They do **not** write the story, so they are not in the story
+model menu.
+
+| | Clef-flash | Clef |
+|--|--|--|
+| Parameters (GGUF header) | 9.08B | 27.02B |
+| License | Apache-2.0 | Apache-2.0 |
+| Weights | [ggml-org/Clef-Flash-GGUF](https://huggingface.co/ggml-org/Clef-Flash-GGUF) | [ggml-org/Clef-GGUF](https://huggingface.co/ggml-org/Clef-GGUF) |
+| Q4_K_M file | 6.49 GB | 19.23 GB |
+| Q8_0 file | 9.66 GB | 28.73 GB |
+| BF16 file | 18.16 GB | 54.06 GB |
+
+Those sizes are the files on Hugging Face (bytes ÷ 1e9, rounded to 0.01 GB).
+Published context is **65,536** tokens. The game asks the server for **4,096**
+for a short referee call. Cloudflare has not published how much video memory
+a local run needs at the full window, and the GGUF header's 262,144-token
+figure is not used here (it was not verified for the decision head). The
+game's "fits / doesn't fit" line is its usual estimate: file size, plus a
+rule-of-thumb KV cache whose shape is **unverified** for architecture `clef`,
+plus engine overhead. It also subtracts the story model that is already loaded.
+
+The text referee does not need the optional `mmproj` vision file. llama.cpp
+**b11371** (3 October 2026) is the first release whose notes say it can load
+Clef, and those notes say **text-only**. This game's pinned engine
+(`packaging/llama_cpp_tag.txt`) is older, so the menu shows Clef and explains
+why it will not download the file. A newer engine installed for the game is
+used when its tag is b11371 or newer. Whether Ollama, vLLM or LM Studio can
+load `clef` was not verified, and neither was image support in llama.cpp
+after b11371.
+
+Running Clef stays on `127.0.0.1`. The download is from Hugging Face. The
+game does not send plans to Cloudflare. Before the download you get the
+license link, a hardware warning, an "AS IS" line, and a reminder that you
+are responsible for AI output.
 
 ## How to play
 
@@ -628,6 +674,7 @@ model runs locally and is only reachable at `127.0.0.1`.
 | Downloading the engine (copies run from source only: first time, or a new build) | GitHub (`api.github.com`, `github.com` and its download servers) | A request for the list of recent llama.cpp releases, then the download of one archive. If you set `GITHUB_TOKEN`, it's sent only to `api.github.com`. The Steam and test builds never do this: their engine is built in. |
 | Each round, **only if Jev is enabled** | TypeSafe AI (`api.typesafe.ai`) | This round's state: a trimmed "story so far", the current challenge, your plan, your progress and a short summary of recent rounds (including your earlier plans), plus the three questions and your API key (in the `Authorization` header). The key is only ever sent over https to that address: the game never follows a redirect elsewhere. |
 | Checking your Jev key | TypeSafe AI | One `GET /v1/models` request with your key. |
+| Downloading Clef or Clef-flash (only if you confirm, and only if the engine can load it) | Hugging Face | The GGUF file you confirmed. Inference stays at `127.0.0.1`. The game does not send plans to Cloudflare. |
 | "Open the website" in the Jev help, or a link you click | Your web browser | Only when you ask; it opens typesafe.ai, its docs, or the link. |
 | The **Keyboard** button (Steam Deck) | The Steam app on your computer | A `steam://open/keyboard` request, so Steam shows its on-screen keyboard. |
 | **Report a problem** in the game's window | Your web browser | Only when you click it: it opens the game's Steam Discussions. |
@@ -851,7 +898,8 @@ src/gettowork/
   reasoning.py       separates chain-of-thought from answers
   backends/          llamaserver.py (default), ollama.py, llamacpp.py, mock.py
   jev.py             Jev API client, the game's three questions, verdicts
-  onboarding.py      the friendly "enable Jev?" flow
+  system_one.py      optional local Clef referee (same question shape, on this computer)
+  onboarding.py      the friendly "enable Jev?" flow, and the System One menu
   prompts.py         every word the game says to the local model
   safety.py          the family-friendly filter for AI text and typed plans
   safety_terms.py    its word lists (scrambled with ROT13, so they're not on show)
@@ -891,8 +939,9 @@ build in `THIRD_PARTY_LICENSES.txt` - are listed in [NOTICE.md](NOTICE.md).
 >   and model recommendations are home-grown heuristics. They may be inaccurate
 >   for your computer, and a recommended model may still run slowly or fail.
 > - **Not affiliated.** This project is not affiliated with, endorsed by or
->   sponsored by TypeSafe AI, Hugging Face, ggml-org / the llama.cpp project,
->   Ollama, Valve / Steam, or any model author or publisher. Product and
+>   sponsored by TypeSafe AI, Hugging Face, Cloudflare, ggml-org / the llama.cpp project,
+>   Ollama, Valve / Steam, or any model author or publisher (including Qwen, whose
+>   models Clef is trained on top of). Product and
 >   company names are trademarks of their respective owners and are used only
 >   to identify their products and services.
 > - **Third-party downloads are your responsibility.** No model weights are
@@ -905,7 +954,11 @@ build in `THIRD_PARTY_LICENSES.txt` - are listed in [NOTICE.md](NOTICE.md).
 >   license (and, for NVIDIA CUDA builds, NVIDIA's terms).
 > - **Jev may cost money.** Using Jev may incur charges under TypeSafe AI's own
 >   pricing and terms. The game works fully without it.
+> - **Hardware.** A local model uses your processor, graphics card, memory, disk
+>   and power. It can make the computer hot, loud, slow or unstable, and a model
+>   that does not fit can make that worse. Close other heavy programs first.
+>   You are responsible for how you use your own machine.
 > - **AI output is unpredictable.** The prompts ask for farcical, family-friendly
 >   stories and a filter checks what the model writes, but AI models can still
->   produce odd, wrong or inappropriate text. Nothing the game or a model says
->   is advice.
+>   produce odd, wrong or inappropriate text. You are responsible for what you
+>   do with that output. Nothing the game or a model says is advice.

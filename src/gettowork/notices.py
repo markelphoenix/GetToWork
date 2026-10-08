@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Optional
 
 __all__ = ["AI_CONTENT_NOTICE", "STEAM_AI_DISCLOSURE", "REPORT_HOW", "REPORT_BUTTON", "STEAM_APP_ID",
-           "report_url"]
+           "report_url", "HARDWARE_STRAIN_NOTICE", "NO_WARRANTY_NOTICE", "AI_OUTPUT_RESPONSIBILITY",
+           "LOCAL_RUN_NOTICES"]
 
 # The game's Steam app ID - set it once Steam has given the game one (see the release
 # checklist in packaging/steam/README.md). Until then "Report a problem" opens a Steam
@@ -61,8 +62,12 @@ are marketed as uncensored, have had their safety training removed, or are made 
 such a model is refused even when a player names it themselves. \
 Optionally, players can connect their own account for TypeSafe AI's Jev referee service: it then \
 receives the player's plan and a short summary of the story, and returns only numbers and labels that \
-decide each round - it writes no text that appears in the story. The game creates no AI images, audio \
-or voices.
+decide each round - it writes no text that appears in the story. Optionally, the game can also download \
+Cloudflare's Clef or Clef-flash (Apache-2.0) to referee locally: they score the same kinds of questions \
+and return probabilities, not story text. Clef text needs llama.cpp b11371 or newer (that release's notes \
+say the support is text-only). If the engine shipped with the game is older, the game explains that and \
+does not download Clef. Scoring stays on the player's computer; the game does not send plans to Cloudflare. \
+The game creates no AI images, audio or voices.
 
 Guardrails for the live-generated text:
 - Every request tells the model to write farcical, family-friendly slapstick in which nobody gets hurt, \
@@ -80,3 +85,21 @@ before it reaches any AI model or service.
 inappropriate: a "Report a problem" button in the game's window opens the game's Steam Discussions, which \
 are also reachable from the store page.
 """
+
+# Shown before the first confirmed local-model download or local referee run.
+# Plain language. These are not a complete contract and they do not add legal
+# protection beyond the MIT license's own disclaimer.
+HARDWARE_STRAIN_NOTICE = (
+    "Running a model on this computer uses the processor, graphics card, memory and power. "
+    "It can make the machine hot, loud or slow, and a model that does not fit can make it unstable. "
+    "Close other heavy apps first."
+)
+NO_WARRANTY_NOTICE = (
+    'The game and its hardware estimates are provided "AS IS", without warranty of any kind. '
+    "A recommended model may still run slowly or fail to load. You use this at your own risk."
+)
+AI_OUTPUT_RESPONSIBILITY = (
+    "AI output can be wrong, odd or offensive. You are responsible for how you use it. "
+    "Nothing a model says is advice."
+)
+LOCAL_RUN_NOTICES = (HARDWARE_STRAIN_NOTICE, NO_WARRANTY_NOTICE, AI_OUTPUT_RESPONSIBILITY)

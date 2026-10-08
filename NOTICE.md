@@ -96,6 +96,15 @@ Notes:
   download them from Hugging Face, where they are shared by their authors
   under the license shown on each model's page. You are responsible for
   complying with it.
+- **Clef and Clef-flash** (optional local referee, not bundled) are Apache-2.0,
+  copyright Cloudflare, following the Qwen models they were trained on top of
+  (also Apache-2.0: Qwen3.8-27B and Qwen3.5-9B). The license texts are on the
+  model cards: https://huggingface.co/Cloudflare/clef and
+  https://huggingface.co/Cloudflare/clef-flash. The GGUF files the game knows
+  how to run, when the engine is new enough, are
+  https://huggingface.co/ggml-org/Clef-GGUF and
+  https://huggingface.co/ggml-org/Clef-Flash-GGUF (Apache-2.0). The game does
+  not send plans to Cloudflare.
 
 ## Separate software the game can use
 
@@ -129,10 +138,10 @@ Notes:
 ## Not affiliated
 
 Get To Work is an independent project. It is **not affiliated with, endorsed
-by or sponsored by** TypeSafe AI, Hugging Face, ggml-org / the llama.cpp
+by or sponsored by** TypeSafe AI, Hugging Face, Cloudflare, ggml-org / the llama.cpp
 project, Ollama, Valve / Steam, the Python Software Foundation, the Tcl/Tk
-or PyInstaller projects, NVIDIA, AMD, Intel, Apple, Microsoft, GitHub, or any
-model author or publisher. All product names, logos and trademarks belong to
+or PyInstaller projects, NVIDIA, AMD, Intel, Apple, Microsoft, GitHub, Qwen,
+or any model author or publisher. All product names, logos and trademarks belong to
 their respective owners and are used here only to identify their products and
 services.
 

@@ -788,6 +788,16 @@ That's a common pattern, but notice its weak spots:
 **Jev**, from TypeSafe AI, is built for judging rather than chatting. You
 define the *type* of answer you want, and it answers in exactly that type:
 
+The same `POST /v1/systemone` shape can run **on your computer** with
+**Clef** or **Clef-flash** (Cloudflare, Apache-2.0, GGUF from ggml-org) when
+llama.cpp is new enough to load architecture `clef`. Text support is
+documented at **b11371**, and that note says text-only. They score the
+questions; they do not narrate. This game's pinned engine is older, so the
+referee menu explains that and does not download them until the engine can
+load them. Local video memory at the published 65,536-token window, the KV
+shape, and Ollama / vLLM / LM Studio support were not verified. Details are
+in the README.
+
 - a **Noul** (yes/no) returns the **probability of yes**;
 - a **Choice** returns one of *your* labels, plus a probability for each;
 - a **Score** returns an **expected score** on your ordered rubric.

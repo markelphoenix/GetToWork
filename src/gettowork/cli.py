@@ -36,6 +36,7 @@ from rich.table import Table
 
 from . import __version__, catalog, config, crashlog, launcher, onboarding, perf, runtime_install
 from .config import Settings, command_name
+from .types import SystemSpecs
 from .setup_flow import (
     planned_engine_key,
     SetupServices,
@@ -310,12 +311,44 @@ def list_models(ui: UI, args: argparse.Namespace, settings: Settings, services: 
             ui.warn(escape(advice) + " You can still play with --mock!")
         else:
             ui.warn("None of the models I found run comfortably on this computer. You can still play with --mock!")
+        _show_system_one(ui, specs)
         return
     show_model_table(ui, search.shortlist, show_repo=True, interactive=False)
     first = search.recommended or search.shortlist[0]
     name = command_name()
     ui.info(f"To play with one directly: [bold]{name} --model {escape(first.model.hf_repo)}[/bold] "
             f"- or just run [bold]{name}[/bold] and pick from the menu.")
+    _show_system_one(ui, specs)
+
+
+def _show_system_one(ui: UI, specs: SystemSpecs) -> None:
+    """The optional local referee, separate from the story menu.
+
+    Clef is listed even when it does not fit or this engine cannot load it,
+    with the reason in the table. It is never offered as the storyteller.
+    """
+    from .system_one import clef_engine_status, engine_block_message, resolve_engine_tag
+
+    fits = catalog.rank_system_one(specs)
+    ui.heading("System One referee (optional — not the story)")
+    ui.say(
+        "Clef and Clef-flash score the referee's questions. They do not write the story, "
+        "so they are not in the list above. Speed is a chat-model estimate, not a measured Clef latency."
+    )
+    show_model_table(ui, fits, show_repo=True, interactive=False)
+    tag = resolve_engine_tag()
+    status = clef_engine_status(tag)
+    if status != "ok":
+        ui.warn(escape(engine_block_message(tag, status)))
+    else:
+        recommended = next((fit for fit in fits if "recommended" in fit.badges), None)
+        if recommended is None:
+            ui.info("Neither Clef model fits in the memory you have left. Jev, or your story model, can still referee.")
+        else:
+            ui.info(
+                f"Best local referee that fits: [bold]{escape(recommended.model.display_name)}[/bold] "
+                f"({escape(recommended.quant or '')}). The game asks before downloading it."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +481,7 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
     ui = ui or UI()
     services = services or SetupServices()
     backend = None
+    jev = None
     restore_signals = _stop_politely_on_termination()
     try:
         if args.reset:
@@ -486,9 +520,14 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
             # A pretend-model game is a trial: a "no" to Jev there isn't remembered, so the first
             # game with a real model still offers it.
             trial = getattr(backend, "name", "") == "mock"
+            # A pretend-model trial has no hardware snapshot: keep the original
+            # Jev question. A real model passes specs so Clef can be offered,
+            # matched against the memory the story model is already using.
             jev = None if args.no_jev else onboarding.run_jev_onboarding(
                 ui, settings, local_model_elsewhere=_remote_ollama(backend),
-                ask_again=args.jev or getattr(result, "ask_jev", False), remember_no=not trial)
+                ask_again=args.jev or getattr(result, "ask_jev", False), remember_no=not trial,
+                specs=None if trial else getattr(result, "specs", None),
+                story_fit=None if trial else getattr(result, "fit", None))
             # The player's API key in every form it could appear: masked in the
             # review and transcripts, and refused if it's pasted as a plan.
             secret_values = getattr(jev, "secret_values", None)
@@ -565,6 +604,12 @@ def _run(argv: Optional[list[str]], *, ui: Optional[UI], services: Optional[Setu
                 _offer_fresh_start(ui)
         return EXIT_ERROR
     finally:
+        closer = getattr(jev, "close", None)
+        if callable(closer):
+            try:
+                closer()  # stop a local Clef server, if this referee started one
+            except Exception:
+                pass
         if backend is not None:
             try:
                 backend.close()  # always stop the local model's engine

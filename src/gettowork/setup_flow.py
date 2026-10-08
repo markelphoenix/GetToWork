@@ -45,7 +45,7 @@ from rich import box
 from rich.markup import escape
 from rich.table import Table
 
-from . import catalog, config, download, hf_discovery, perf, runtime_install
+from . import catalog, config, download, hf_discovery, notices, perf, runtime_install
 from . import specs as specs_module
 from .backends import ollama as ollama_backend
 from .backends.base import BackendError, EngineStopped, LLMBackend
@@ -331,6 +331,8 @@ def why_line(fit: FitResult) -> str:
         return fit.reason
     model = fit.model
     bits = [PLACEMENT_WORDS.get(fit.placement, "Runs on this computer")]
+    if catalog.is_decision_model(model):
+        bits.insert(0, "decision model (referee only, not the story)")
     if fit.verdict == "tight":
         bits.append("snug fit, so close big apps first")
     if model.active_params_b:
@@ -1664,6 +1666,10 @@ class _SetupFlow:
                    f"{escape(str(config.config_dir()))}. Delete that folder any time to remove it all.[/dim]")
         if needs_download and self._opt("offline"):
             ui.warn("You're in offline mode, so this only works if these files are already on your computer.")
+        # Same warnings the Clef download shows. One confirm; these lines don't ask another question.
+        if needs_download:
+            for line in notices.LOCAL_RUN_NOTICES:
+                ui.say(f"[dim]{escape(line)}[/dim]")
         return ui.confirm("Shall I go ahead?", default=True)
 
     # -- step 5: install and start, with automatic fallbacks ------------------------------
