@@ -220,10 +220,13 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
 - CPU name: `platform.processor()`, falling back to `/proc/cpuinfo` "model name"
   (Linux), `sysctl -n machdep.cpu.brand_string` (macOS), `wmic`/PowerShell
   best effort on Windows; never fail — "Unknown CPU". CPU flags: `/proc/cpuinfo`
-  flags (avx, avx2, avx512f, f16c, fma), `sysctl hw.optional` on macOS (neon on
+  flags (avx, avx2, avx512f, f16c, fma, bmi2), `sysctl hw.optional` on macOS (neon on
   arm64), best effort elsewhere.
-- NVIDIA: `nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits`
-  (MiB). AMD (Linux): `rocm-smi --showmeminfo vram --json` best effort; also
+- NVIDIA: `nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version,compute_cap --format=csv,noheader,nounits`
+  (MiB). A total that is not a positive number is dropped, and used memory is
+  clamped to that total. AMD (Linux): `mem_info_vram_used` next to
+  `mem_info_vram_total` under `/sys/class/drm/cardN/device` when amdgpu
+  publishes it; `rocm-smi --showmeminfo vram --json` best effort; also
   detect AMD/Intel GPUs by name via `lspci` / Windows `Win32_VideoController`
   (VRAM unknown → 0, noted). Apple Silicon (`Darwin` + `arm64`): one
   GPUInfo(vendor="apple", vram_gb≈0.70 × RAM (0.75 if RAM ≥ 64 GB)),
@@ -242,6 +245,9 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
   A built-in chip is skipped even when its shared memory is reported as
   VRAM, which is what a laptop with both chips looks like. Steam Deck's
   "Custom GPU 0405" is that kind of chip: the 16 GB is shared with the CPU.
+  When in-use video memory was not read, the fit keeps about 2 GiB spare
+  instead of 0.8 GiB. The engine is started with `--device` set to the
+  planned cards from `--list-devices`, so a built-in chip is not given layers.
 
 ### perf.py
 ```python

@@ -28,9 +28,11 @@ class GPUInfo:
     # NVIDIA "compute capability" (the chip generation), e.g. 6.1 for a GTX 1080,
     # 8.6 for an RTX 3060 - newer CUDA builds leave out older generations.
     compute_capability: Optional[float] = None
-    # Video memory already in use by other programs, from nvidia-smi or NVML.
-    # 0 when the probe did not report it. The fit budget subtracts this.
+    # Video memory already in use by other programs, from nvidia-smi, NVML,
+    # or the AMD driver's sysfs file. 0 when the card is empty or when the
+    # probe could not read it. ``vram_used_known`` says which of those it is.
     vram_used_gb: float = 0.0
+    vram_used_known: bool = True
 
 
 @dataclass

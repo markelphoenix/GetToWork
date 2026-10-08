@@ -57,7 +57,7 @@ _SYSFS_DRM = Path("/sys/class/drm")
 # CPU features that matter to llama.cpp's CPU kernels. "sse2"/"sse4_2" are
 # there so a successful check of a CPU *without* AVX (Celeron, Atom...) is
 # never mistaken for "couldn't tell" (an empty list).
-_X86_FLAGS = ("sse2", "sse4_2", "avx", "avx2", "avx512f", "avx_vnni", "f16c", "fma")
+_X86_FLAGS = ("sse2", "sse4_2", "avx", "avx2", "avx512f", "avx_vnni", "f16c", "fma", "bmi2")
 _ARM_FEATURES = {"asimd": "neon", "asimddp": "dotprod", "sve": "sve", "i8mm": "i8mm"}
 
 # Display adapters that are not useful for AI (virtual machines, remote
@@ -354,8 +354,11 @@ def _vendor_from_name(name: str) -> str:
 def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
     """Parse nvidia-smi CSV: name, total MiB, optional used MiB, driver, optional compute cap.
 
-    ``memory.used`` is an integer. A driver version always contains a dot, so a
-    line from an older query (no used-memory column) still parses.
+    ``memory.used`` is an integer (a leading minus is clamped to 0). A driver
+    version always contains a dot, so a line from an older query (no
+    used-memory column) still parses, and that card's in-use figure stays
+    unknown. A total that is missing, ``[N/A]``, or not positive is dropped:
+    a 0 GB card would be planned as empty. Used memory is clamped to the total.
     """
     gpus = []
     for line in out.splitlines():
@@ -363,16 +366,25 @@ def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
         if len(parts) < 2 or not parts[0]:
             continue
         try:
-            vram = _gib(float(parts[1]) * 1024 * 1024)
+            total_mib = float(parts[1])
         except ValueError:
-            vram = 0.0  # "[N/A]" on some systems
+            continue  # "[N/A]" and other non-numbers are not a card we can plan
+        if total_mib <= 0:
+            continue
+        vram = _gib(total_mib * 1024 * 1024)
+        if vram <= 0:
+            continue
         rest = parts[2:]
         used = 0.0
-        if rest and re.fullmatch(r"\d+", rest[0]):
+        used_known = False
+        if rest and re.fullmatch(r"-?\d+", rest[0]):
+            used_known = True
             try:
-                used = _gib(float(rest[0]) * 1024 * 1024)
+                used_mib = float(rest[0])
             except ValueError:
-                used = 0.0
+                used_mib = 0.0
+            used_mib = min(total_mib, max(0.0, used_mib))
+            used = min(vram, _gib(used_mib * 1024 * 1024))
             rest = rest[1:]
         driver = rest[0] if rest and re.match(r"^\d+(\.\d+)*$", rest[0]) else None
         if driver:
@@ -380,7 +392,7 @@ def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
         compute = float(rest[0]) if rest and re.match(r"^\d+\.\d+$", rest[0]) else None
         gpus.append(GPUInfo(
             name=_clean(parts[0]), vendor="nvidia", vram_gb=vram, vram_used_gb=used,
-            driver_version=driver, compute_capability=compute,
+            driver_version=driver, compute_capability=compute, vram_used_known=used_known,
         ))
     return gpus
 
@@ -520,15 +532,20 @@ def _nvidia_nvml_gpus() -> list[GPUInfo]:
     for record in _nvml_device_records():
         if len(record) >= 4:
             name, total_bytes, used_bytes, driver = record[0], record[1], record[2], record[3]
+            used_known = True
         else:
             name, total_bytes, driver = record[0], record[1], record[2]
             used_bytes = 0
+            used_known = False
         if not name or total_bytes <= 0:
             continue
+        total_gb = _gib(total_bytes)
+        used_gb = _gib(max(0, int(used_bytes))) if used_known else 0.0
+        if used_gb > total_gb:
+            used_gb = total_gb
         gpus.append(GPUInfo(
-            name=_clean(name), vendor="nvidia", vram_gb=_gib(total_bytes),
-            vram_used_gb=_gib(used_bytes) if used_bytes else 0.0,
-            driver_version=driver,
+            name=_clean(name), vendor="nvidia", vram_gb=total_gb,
+            vram_used_gb=used_gb, driver_version=driver, vram_used_known=used_known,
         ))
     return gpus
 
@@ -613,8 +630,13 @@ def _drm_pci_slot(device: Path) -> str:
         return ""
 
 
-def _linux_drm_cards() -> list[tuple[str, str, float]]:
-    """[(pci_slot, vendor, vram_gb)] from /sys/class/drm (amdgpu reports VRAM there)."""
+def _linux_drm_cards() -> list[tuple[str, str, float, float, bool]]:
+    """[(pci_slot, vendor, vram_gb, vram_used_gb, vram_used_known)] from sysfs.
+
+    amdgpu publishes ``mem_info_vram_total`` and ``mem_info_vram_used`` under
+    ``/sys/class/drm/cardN/device``. Other vendors here do not get an in-use
+    figure from this path, so their used-memory flag stays false.
+    """
     cards = []
     vendor_ids = {"0x1002": "amd", "0x10de": "nvidia", "0x8086": "intel"}
     try:
@@ -628,7 +650,14 @@ def _linux_drm_cards() -> list[tuple[str, str, float]]:
         raw = (_read_text(device / "mem_info_vram_total") or "").strip()
         if raw.isdecimal():
             vram = _gib(int(raw))
-        cards.append((_drm_pci_slot(device), vendor, vram))
+        used = 0.0
+        used_known = False
+        if vendor == "amd" and vram > 0:
+            raw_used = (_read_text(device / "mem_info_vram_used") or "").strip()
+            if raw_used.isdecimal():
+                used = min(vram, _gib(int(raw_used)))
+                used_known = True
+        cards.append((_drm_pci_slot(device), vendor, vram, used, used_known))
     return cards
 
 
@@ -660,8 +689,17 @@ def _rocm_vram() -> list[float]:
 def _linux_gpus(nvidia: list[GPUInfo], nvidia_status: str, notes: list[str]) -> list[GPUInfo]:
     """Non-NVIDIA GPUs (and NVIDIA ones nvidia-smi missed) on Linux."""
     drm = _linux_drm_cards()
-    drm_by_slot = {slot: (vendor, vram) for slot, vendor, vram in drm if slot}
+    drm_by_slot = {
+        slot: (vendor, vram, used, known)
+        for slot, vendor, vram, used, known in drm if slot
+    }
     found: list[GPUInfo] = []
+
+    def _drm_memory(slot: str) -> tuple[float, float, bool]:
+        for sys_slot, (_vendor, vram, used, known) in drm_by_slot.items():
+            if sys_slot == slot or sys_slot.endswith(":" + slot):
+                return vram, used, known
+        return 0.0, 0.0, False
 
     devices = _lspci_display_devices()
     if devices:
@@ -672,15 +710,26 @@ def _linux_gpus(nvidia: list[GPUInfo], nvidia_status: str, notes: list[str]) -> 
             if vendor == "nvidia" and nvidia:
                 continue  # nvidia-smi already told us everything
             # sysfs slots carry a PCI domain prefix ("0000:03:00.0"); lspci's usually don't.
-            vram = next((v for s, (_, v) in drm_by_slot.items() if s == slot or s.endswith(":" + slot)), 0.0)
-            found.append(GPUInfo(name=_pretty_lspci_name(desc), vendor=vendor, vram_gb=vram))  # type: ignore[arg-type]
+            vram, used, known = _drm_memory(slot)
+            # Intel and other non-AMD cards do not report in-use memory here.
+            if vendor != "amd":
+                used, known = 0.0, False
+            found.append(GPUInfo(
+                name=_pretty_lspci_name(desc), vendor=vendor, vram_gb=vram,  # type: ignore[arg-type]
+                vram_used_gb=used, vram_used_known=known,
+            ))
     else:  # no lspci (minimal installs): fall back to sysfs vendor ids
-        for _, vendor, vram in drm:
+        for _, vendor, vram, used, known in drm:
             if vendor == "nvidia" and nvidia:
                 continue
             if vendor in ("amd", "intel", "nvidia"):
                 label = {"amd": "AMD GPU", "intel": "Intel GPU", "nvidia": "NVIDIA GPU"}[vendor]
-                found.append(GPUInfo(name=label, vendor=vendor, vram_gb=vram))  # type: ignore[arg-type]
+                if vendor != "amd":
+                    used, known = 0.0, False
+                found.append(GPUInfo(
+                    name=label, vendor=vendor, vram_gb=vram,  # type: ignore[arg-type]
+                    vram_used_gb=used, vram_used_known=known,
+                ))
 
     # rocm-smi can fill in AMD VRAM that sysfs didn't give us.
     amd_unknown = [g for g in found if g.vendor == "amd" and g.vram_gb <= 0]
@@ -699,22 +748,62 @@ def _linux_gpus(nvidia: list[GPUInfo], nvidia_status: str, notes: list[str]) -> 
     return found
 
 
+def _vram_from_adapter_subkeys(entries: list[tuple[str, Optional[str], Optional[int]]]) -> dict[str, float]:
+    """{adapter name: VRAM GiB} from display-class subkeys.
+
+    The subkeys are ``0000``, ``0001``, and so on. Any four-digit name counts.
+    ``Properties`` and other names under the same class key do not.
+    ``entries`` is ``(subkey, DriverDesc, size in bytes)``.
+    """
+    found: dict[str, float] = {}
+    for subkey, name, size in entries:
+        if not re.fullmatch(r"\d{4}", subkey or ""):
+            continue
+        if not name or not size or int(size) <= 0:
+            continue
+        found[_clean(name)] = _gib(int(size))
+    return found
+
+
+def _enum_key_names(key) -> list[str]:
+    """Every subkey name of a winreg key, in the order Windows returns them."""
+    import winreg  # type: ignore[import-not-found]
+
+    names: list[str] = []
+    index = 0
+    while True:
+        try:
+            names.append(winreg.EnumKey(key, index))
+        except OSError:
+            return names
+        index += 1
+
+
 def _windows_registry_vram() -> dict[str, float]:
     """{adapter name: VRAM GiB} from the display-driver registry keys.
 
     Win32_VideoController.AdapterRAM is a 32-bit number and tops out at 4 GB,
     but drivers also store the real size as a 64-bit value in the registry.
+    Every four-digit subkey is read, not only ``0000`` through ``0015``.
     """
     _block_hardware_probe("Windows registry")
-    result: dict[str, float] = {}
     try:
         import winreg  # type: ignore[import-not-found]
     except ImportError:
-        return result
+        return {}
     base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-    for index in range(16):
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base)
+    except OSError:
+        return {}
+    try:
+        names = _enum_key_names(root)
+    finally:
+        winreg.CloseKey(root)
+    entries: list[tuple[str, Optional[str], Optional[int]]] = []
+    for subkey in names:
         try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f"{base}\\{index:04d}")
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f"{base}\\{subkey}")
         except OSError:
             continue
         try:
@@ -727,13 +816,12 @@ def _windows_registry_vram() -> dict[str, float]:
                     continue
                 size = int.from_bytes(raw, "little") if isinstance(raw, (bytes, bytearray)) else int(raw)
                 break
-            if size:
-                result[_clean(name)] = _gib(size)
+            entries.append((subkey, name, size))
         except Exception:
-            pass
+            entries.append((subkey, None, None))
         finally:
             winreg.CloseKey(key)
-    return result
+    return _vram_from_adapter_subkeys(entries)
 
 
 def _windows_dxgi_vram() -> dict[str, float]:
@@ -873,7 +961,10 @@ def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
                 vram = 4.0
         if vram < 1.0:
             vram = 0.0  # integrated graphics: a tiny slice of shared memory, not real VRAM
-        found.append(GPUInfo(name=name, vendor=vendor, vram_gb=vram))  # type: ignore[arg-type]
+        # Registry and DXGI report a size, not how much of it is already in use.
+        found.append(GPUInfo(
+            name=name, vendor=vendor, vram_gb=vram, vram_used_known=False,  # type: ignore[arg-type]
+        ))
         if vendor == "nvidia" and not nvidia:
             notes.append(f"Found {name}, but nvidia-smi didn't answer. Is the NVIDIA driver up to date?")
     return found

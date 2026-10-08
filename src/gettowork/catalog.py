@@ -325,6 +325,10 @@ GIB_PER_GB = 1e9 / 2**30  # 0.931
 OVERHEAD_GB = 0.6  # llama.cpp itself, scratch buffers, tokenizer...
 GPU_COMPUTE_BUFFER_GB = 0.3  # extra scratch space when running on a GPU
 GPU_VRAM_RESERVE_GB = 0.8  # leave room for your desktop, browser, etc.
+# AMD, Intel, the Windows registry, and DXGI often cannot say how much video
+# memory is already taken. A reported 0 then means "unknown", not "empty".
+# Hold about 2 GiB back instead of the 0.8 GiB measured reserve.
+UNKNOWN_VRAM_IN_USE_GB = 2.0
 # On Windows, llama.cpp b11485's own projection ran about 2.9 GB under the
 # memory a Clef launch actually used, and CUDA's "free" figure ignored apps
 # nvidia-smi could see. Keep this much extra unused on each Windows card.
@@ -623,6 +627,30 @@ def _vram_in_use_gb(gpu) -> float:
     return max(0.0, float(getattr(gpu, "vram_used_gb", 0.0) or 0.0))
 
 
+def _vram_used_known(gpu) -> bool:
+    """False when this card's in-use figure was never read.
+
+    Hand-built cards default to True, so a stated 0 stays "empty" and the
+    measured 0.8 GB reserve still applies. Detection sets False when the
+    probe had no used-memory reading.
+    """
+    return getattr(gpu, "vram_used_known", True) is not False
+
+
+def _card_holdback_gb(gpu, extra_gb: float = 0.0) -> float:
+    """GiB this card must keep free.
+
+    A measured card keeps the 0.8 GB reserve plus whatever is already in use.
+    An unmeasured card keeps about 2 GiB instead, so a zero that means
+    "unknown" is not treated as an empty card. ``extra_gb`` is the Windows
+    Clef margin, added on top of either figure.
+    """
+    extra = max(0.0, float(extra_gb))
+    if not _vram_used_known(gpu):
+        return UNKNOWN_VRAM_IN_USE_GB + extra
+    return GPU_VRAM_RESERVE_GB + _vram_in_use_gb(gpu) + extra
+
+
 def windows_vram_margin_gb(specs: SystemSpecs) -> float:
     """Extra per-card margin on Windows. 0 everywhere else."""
     if (specs.os_name or "").lower().startswith("win"):
@@ -633,17 +661,18 @@ def windows_vram_margin_gb(specs: SystemSpecs) -> float:
 def _usable_vram_gb(specs: SystemSpecs, *, extra_per_card_gb: float = 0.0) -> float:
     """Video memory a model may use.
 
-    Each card keeps ``GPU_VRAM_RESERVE_GB`` free and loses whatever nvidia-smi
-    or NVML already shows as in use. ``extra_per_card_gb`` is the Clef
-    projection margin on Windows (see ``windows_vram_margin_gb``). Story
-    models do not take that extra cut: it was measured on Clef, and taking it
-    from a 6 GB card would drop the story below the published 4B recommendation.
-    The "needs ~X of Y GB" line uses this Y, so Y is free memory, not the
-    card's total.
+    Each measured card keeps ``GPU_VRAM_RESERVE_GB`` free and loses whatever
+    nvidia-smi, NVML, or the AMD sysfs file already shows as in use. A card
+    whose in-use figure was never read keeps ``UNKNOWN_VRAM_IN_USE_GB``
+    instead. ``extra_per_card_gb`` is the Clef projection margin on Windows
+    (see ``windows_vram_margin_gb``). Story models do not take that extra
+    cut: it was measured on Clef, and taking it from a 6 GB card would drop
+    the story below the published 4B recommendation. The "needs ~X of Y GB"
+    line uses this Y, so Y is free memory, not the card's total.
     """
-    reserve = GPU_VRAM_RESERVE_GB + max(0.0, extra_per_card_gb)
+    extra = max(0.0, extra_per_card_gb)
     return sum(
-        max(0.0, g.vram_gb - _vram_in_use_gb(g) - reserve) for g in _vram_contributors(specs)
+        max(0.0, g.vram_gb - _card_holdback_gb(g, extra)) for g in _vram_contributors(specs)
     )
 
 
@@ -653,20 +682,17 @@ def fit_target_mib(specs: Optional[SystemSpecs] = None, *, decision: bool = Fals
     With no specs this is the 819 MiB menu reserve, which is what the docs
     show. CUDA on the Windows test machine reported ~30,991 MiB free while
     nvidia-smi showed other programs using 1–6 GB, so a live launch adds that
-    in-use memory. A Clef launch (``decision=True``) also adds
-    ``WINDOWS_VRAM_MARGIN_GB`` on Windows, because that run used about 2.9 GB
-    more than llama.cpp projected. Story launches do not, so the engine margin
-    stays the one the story menu already counted.
+    in-use memory. When the probe never read in-use memory, the target is
+    about 2 GiB instead of 0.8 GiB. A Clef launch (``decision=True``) also
+    adds ``WINDOWS_VRAM_MARGIN_GB`` on Windows, because that run used about
+    2.9 GB more than llama.cpp projected. Story launches do not, so the
+    engine margin stays the one the story menu already counted.
     """
-    kept = float(GPU_VRAM_RESERVE_GB)
-    used = 0.0
-    if specs is not None:
-        if decision:
-            kept += windows_vram_margin_gb(specs)
-        gpu = perf.primary_gpu(specs)
-        if gpu is not None:
-            used = _vram_in_use_gb(gpu)
-    return max(1, round((kept + used) * 1024))
+    extra = windows_vram_margin_gb(specs) if specs is not None and decision else 0.0
+    gpu = perf.primary_gpu(specs) if specs is not None else None
+    if gpu is None:
+        return max(1, round((GPU_VRAM_RESERVE_GB + extra) * 1024))
+    return max(1, round(_card_holdback_gb(gpu, extra) * 1024))
 
 
 def _os_headroom_gb(specs: SystemSpecs) -> float:

@@ -617,6 +617,21 @@ def test_in_use_memory_and_the_windows_margin_change_the_budget():
     )
 
 
+def test_unknown_vram_in_use_keeps_two_gib_instead_of_the_measured_reserve():
+    card = gpu("AMD Radeon RX 7800 XT", "amd", 16.0)
+    card.vram_used_known = False
+    linux = machine(32, 40, (card,))
+    windows = dataclasses.replace(linux, os_name="Windows")
+    assert catalog._usable_vram_gb(linux) == pytest.approx(16.0 - catalog.UNKNOWN_VRAM_IN_USE_GB)
+    assert catalog.fit_target_mib(linux) == round(catalog.UNKNOWN_VRAM_IN_USE_GB * 1024)
+    assert catalog.fit_target_mib(windows, decision=True) - catalog.fit_target_mib(windows) == round(
+        catalog.WINDOWS_VRAM_MARGIN_GB * 1024
+    )
+    assert catalog.fit_target_mib(windows, decision=True) == round(
+        (catalog.UNKNOWN_VRAM_IN_USE_GB + catalog.WINDOWS_VRAM_MARGIN_GB) * 1024
+    )
+
+
 def test_local_clef_timeout_and_request_cannot_exceed_the_batch():
     from gettowork.jev import (
         JevError,

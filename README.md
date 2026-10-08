@@ -253,7 +253,9 @@ automatic, explained in plain English, and reversible.
    Apple Silicon unified memory, and free disk space. A laptop with both a
    built-in chip and a separate graphics card is planned on the separate
    card, even when Windows reports a large shared-memory number for the
-   built-in chip. Steam Deck's graphics chip shares its 16 GB with the
+   built-in chip. The engine is then started on the card or cards that plan
+   counted, so a built-in chip beside them is not given part of the model.
+   Steam Deck's graphics chip shares its 16 GB with the
    processor, so the plan uses that shared memory. A 0.3-second memory
    speed test measures how fast your RAM is. Nothing is sent anywhere.
 2. **Live Hugging Face search.** The game asks the free
@@ -504,7 +506,9 @@ partial GPU split waits 2 minutes. If that runs out, the message talks about
 hardware speed, not a slow connection to Jev.
 
 "Needs ~X of Y GB" uses video memory that is actually free: the card's total,
-minus what other programs are already using, minus 0.8 GB kept spare. On
+minus what other programs are already using, minus 0.8 GB kept spare. When
+the computer cannot say how much is already in use, the plan keeps about
+2 GB spare instead of 0.8 GB. On
 Windows the Clef line also keeps another 3 GB spare, because a measured run
 used about 2.9 GB more than the engine projected. Story models do not take
 that extra cut. `llama-server --fit-target` is told to leave the same spare

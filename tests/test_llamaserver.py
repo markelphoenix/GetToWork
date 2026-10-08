@@ -7,6 +7,7 @@ of llama-server's /health and /v1/chat/completions endpoints.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import io
 import json
@@ -266,7 +267,7 @@ class FakeDownloader:
             raise self.error
         path = self.root / "models" / f"{entry.key}-{quant or entry.quant}.gguf"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"GGUF")
+        path.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
         return path
 
 
@@ -523,6 +524,11 @@ def test_the_engine_is_started_inside_the_normal_dll_search(monkeypatch, tmp_pat
         ("", -9, "memory"),
         ("llama_model_load: error loading model: unknown model architecture: 'qwen9'", 1, "model_unsupported"),
         ("gguf_init_from_file: invalid magic characters 'abcd'", 1, "model"),
+        ("CUDA error: an illegal memory access was encountered\n"
+         "gguf_init_from_file: invalid magic characters 'abcd'", 1, "model"),
+        ("gguf_init_from_reader: failed to open GGUF file 'model.gguf'", 1, "model"),
+        ("llama_model_load: error loading model: wrong number of tensors", 1, "model"),
+        ("ggml_cuda_init: failed to initialize CUDA: out of memory\nfailed to load model", 1, "gpu"),
         # strerror(EINVAL) and CUDA's "invalid argument" are not rejected command-line flags.
         ("llama_model_load: error loading model: mmap failed: Invalid argument\nfailed to load model", 1, "model"),
         ("CUDA error: invalid argument\n  current device: 0, in function ggml_backend_cuda_buffer_set_tensor", 1, "gpu"),
@@ -756,7 +762,7 @@ def test_existing_exe_and_model_skip_install_and_download(tmp_path):
     exe.write_bytes(b"x")
     (folder / "install.json").write_text(json.dumps({"tag": "b7000", "variant": "vulkan", "exe": "llama-server"}))
     model = tmp_path / "m.gguf"
-    model.write_bytes(b"GGUF")
+    model.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     installer, downloader = FakeInstaller(tmp_path), FakeDownloader(tmp_path)
     popen = FakePopen()
     backend = make_backend(tmp_path, popen=popen, installer=installer, downloader=downloader,
@@ -814,7 +820,7 @@ def test_download_module_is_imported_lazily(tmp_path, monkeypatch):
     def download_gguf(entry, ui, dest_dir=None, *, quant=None, hf_api=None, hf_download=None):
         calls.append((entry.key, quant))
         p = tmp_path / "lazy.gguf"
-        p.write_bytes(b"GGUF")
+        p.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
         return p
 
     fake = types.ModuleType("gettowork.download")
@@ -1344,7 +1350,7 @@ def test_health_timeout_grows_with_the_model_size():
 
 def test_big_model_file_gets_a_longer_wake_up_time(tmp_path, monkeypatch):
     model = tmp_path / "big.gguf"
-    model.write_bytes(b"GGUF")
+    model.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     fake_file_sizes(monkeypatch, {model: 40 * 10**9})  # 40 GB on paper, nothing on disk
     backend = LlamaServerBackend(ENTRY, specs=make_specs(), http=FakeServerHttp(), popen=FakePopen(),
                                  installer=FakeInstaller(tmp_path), downloader=FakeDownloader(tmp_path),
@@ -1770,8 +1776,178 @@ def test_device_listing_is_parsed():
                                        "Available devices:\n  (none)\n") == []
     listing = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)\n"
     assert ls.gpu_devices_from_listing(listing) == ["CUDA0"]
+    assert ls.device_rows_from_listing(listing) == [("CUDA0", "NVIDIA GeForce RTX 3060", 12288)]
     assert ls.gpu_devices_from_listing("Available devices:\n  BLAS: Accelerate\n") == []
     assert ls.gpu_devices_from_listing("error: invalid argument: --list-devices") is None
+
+
+def _gguf_v3() -> bytes:
+    return b"GGUF" + (3).to_bytes(4, "little")
+
+
+def test_a_bad_gguf_is_refused_before_the_engine_starts_or_stops(tmp_path):
+    good = tmp_path / "ok.gguf"
+    good.write_bytes(_gguf_v3())
+    bad = tmp_path / "bad.gguf"
+    bad.write_bytes(b"GGUF")
+    weird = tmp_path / "weird.gguf"
+    weird.write_bytes(b"GGUF" + (99).to_bytes(4, "little"))
+    assert ls.gguf_file_problem(good) is None
+    assert "GGUF header" in (ls.gguf_file_problem(bad) or "")
+    assert "version 99" in (ls.gguf_file_problem(weird) or "")
+
+    popen = FakePopen()
+    backend = make_backend(tmp_path, popen=popen, model_path=good)
+    backend.prepare(make_ui())
+    running = backend._proc
+    assert running.terminate_calls == 0
+    backend.model_path = bad
+    with pytest.raises(BackendError, match="isn't a usable GGUF model file"):
+        backend.prepare(make_ui())
+    assert running.terminate_calls == 0
+    assert popen.calls  # the first, good launch happened
+    assert len(popen.calls) == 1  # the bad file never started a second engine
+
+    fresh = make_backend(tmp_path, popen=FakePopen(), model_path=weird)
+    with pytest.raises(BackendError, match="engine was not started"):
+        fresh.prepare(make_ui())
+    assert fresh._proc is None
+
+    projector = tmp_path / "mmproj.gguf"
+    projector.write_bytes(b"not a gguf")
+    with_projector = make_backend(tmp_path, popen=FakePopen(), model_path=good)
+    with_projector.mmproj_path = projector
+    with pytest.raises(BackendError, match="projector file"):
+        with_projector.prepare(make_ui())
+    assert with_projector._proc is None
+
+
+def test_missing_cpu_instruction_is_named_only_when_the_probe_reads_it(tmp_path):
+    assert ls.missing_cpu_instructions(["sse2", "sse4_2", "avx", "fma", "f16c", "bmi2"], "Linux") == ["avx2"]
+    text = ls.missing_cpu_instruction_text(["sse2", "sse4_2", "avx"], "Linux")
+    assert text is not None
+    assert "AVX2" in text and "FMA" in text and "F16C" in text and "BMI2" in text
+    windows = ls.missing_cpu_instructions(["sse2", "sse4_2"], "Windows")
+    assert windows == ["avx", "avx2"]
+    assert "FMA" not in (ls.missing_cpu_instruction_text(["sse2"], "Windows") or "")
+    assert ls.missing_cpu_instructions([], "Linux") == []
+    assert ls.missing_cpu_instructions(["neon"], "Darwin") == []
+    backend = make_backend(
+        tmp_path,
+        specs=make_specs(flags=["sse2", "sse4_2", "avx", "f16c", "fma", "bmi2"]),
+    )
+    said = backend._explain_failure("cpu_unsupported", 132)
+    assert "AVX2" in said and "F16C" not in said
+    generic = make_backend(tmp_path, specs=make_specs(flags=["neon"]))
+    assert "missing an instruction" in generic._explain_failure("cpu_unsupported", 132)
+
+
+def test_a_long_cpu_or_partial_load_says_where_the_weights_are(tmp_path):
+    def wait(backend, *, cpu_only: bool):
+        clock = FakeClock()
+        backend._clock = clock
+        backend._sleep = clock.sleep
+        backend._proc = FakeProcess()
+        backend.port = 9
+        start = clock.t
+        backend._probe_health = lambda: "ok" if clock.t - start > 70 else "loading"
+        seen: list[str] = []
+
+        @contextlib.contextmanager
+        def status(text, **kwargs):
+            seen.append(text)
+
+            def update(new):
+                seen.append(new)
+
+            yield update
+
+        ui = make_ui()
+        ui.status = status  # type: ignore[method-assign]
+        assert backend._wait_until_healthy(ui, cpu_only=cpu_only) == ("ok", None)
+        return seen
+
+    cpu = make_backend(tmp_path)
+    assert ls.CPU_LOAD_MESSAGE in wait(cpu, cpu_only=True)
+    small = GPUInfo(name="NVIDIA GeForce GTX 1650", vendor="nvidia", vram_gb=4.0)
+    partial = make_backend(tmp_path, specs=make_specs(gpus=[small]))
+    assert ls.PARTIAL_LOAD_MESSAGE in wait(partial, cpu_only=False)
+    full = make_backend(tmp_path, specs=make_specs(gpus=[NVIDIA]))
+    assert wait(full, cpu_only=False) == [ls.WAKE_UP_MESSAGE]
+
+
+def test_the_engine_is_pinned_to_the_planned_cards(tmp_path):
+    two = (
+        "Available devices:\n"
+        "  CUDA0: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)\n"
+        "  CUDA1: NVIDIA GeForce RTX 3060 (12288 MiB, 10000 MiB free)\n"
+    )
+    mixed = (
+        "Available devices:\n"
+        "  Vulkan0: Intel(R) Iris(R) Xe Graphics (16384 MiB, 14000 MiB free)\n"
+        "  Vulkan1: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)\n"
+    )
+    amd = (
+        "Available devices:\n"
+        "  Vulkan0: AMD Radeon Graphics (512 MiB, 400 MiB free)\n"
+        "  Vulkan1: AMD Radeon RX 7800 XT (16384 MiB, 15000 MiB free)\n"
+    )
+    cards = [
+        GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0),
+        GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0),
+    ]
+    runner = DeviceRunner({"cuda-12": two})
+    popen = FakePopen()
+    backend = make_backend(tmp_path, popen=popen, specs=make_specs(gpus=cards), installer=FakeInstaller(tmp_path),
+                           runner=runner)
+    backend.prepare(make_ui())
+    args, kwargs = popen.calls[0]
+    assert args[args.index("--device") + 1] == "CUDA0,CUDA1"
+    assert kwargs["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert runner.list_envs[0]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert "CUDA_VISIBLE_DEVICES" not in runner.list_envs[0]
+
+    intel = GPUInfo(name="Intel Iris Xe Graphics", vendor="intel", vram_gb=0.0)
+    runner = DeviceRunner({"vulkan": mixed})
+    popen = FakePopen()
+    backend = make_backend(
+        tmp_path, popen=popen, specs=make_specs(gpus=[intel, cards[0]], flags=["vulkan"]),
+        installer=FakeInstaller(tmp_path), runner=runner,
+    )
+    backend.prepare(make_ui())
+    args, kwargs = popen.calls[0]
+    assert "vulkan" in args[0]
+    assert args[args.index("--device") + 1] == "Vulkan1"
+    assert kwargs["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert "CUDA_VISIBLE_DEVICES" not in kwargs["env"]
+    assert all("CUDA_VISIBLE_DEVICES" not in env for env in runner.list_envs)
+
+    igpu = GPUInfo(name="AMD Radeon Graphics", vendor="amd", vram_gb=0.5)
+    discrete = GPUInfo(name="AMD Radeon RX 7800 XT", vendor="amd", vram_gb=16.0)
+    runner = DeviceRunner({"vulkan": amd})
+    popen = FakePopen()
+    backend = make_backend(
+        tmp_path, popen=popen, specs=make_specs(gpus=[igpu, discrete], flags=["vulkan"]),
+        installer=FakeInstaller(tmp_path), runner=runner,
+    )
+    backend.prepare(make_ui())
+    args, kwargs = popen.calls[0]
+    assert args[args.index("--device") + 1] == "Vulkan1"
+    assert "CUDA_DEVICE_ORDER" not in kwargs["env"]
+    assert "CUDA_VISIBLE_DEVICES" not in kwargs["env"]
+
+    lone = ls.device_launch_pin(
+        make_specs(gpus=[cards[0]]),
+        [("CUDA1", "NVIDIA GeForce RTX 3060", 12288)],
+    )
+    assert lone is not None
+    assert lone[0] == ["CUDA0"] and lone[1]["CUDA_VISIBLE_DEVICES"] == "1"
+    ti = ls.device_launch_pin(
+        make_specs(gpus=[GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0)]),
+        [("CUDA0", "NVIDIA GeForce RTX 3060 Ti", 8192), ("CUDA1", "NVIDIA GeForce RTX 3060", 12288)],
+    )
+    assert ti is not None and ti[0] == ["CUDA0"] and ti[1]["CUDA_VISIBLE_DEVICES"] == "1"
 
 
 class DeviceRunner(FakeRunner):
@@ -1780,10 +1956,12 @@ class DeviceRunner(FakeRunner):
     def __init__(self, devices):
         super().__init__()
         self.devices = devices
+        self.list_envs: list[dict] = []
 
     def __call__(self, args, **kwargs):
         if args[1:] == ["--list-devices"]:
             self.calls.append(list(args))
+            self.list_envs.append(dict(kwargs.get("env") or {}))
             out = self.devices.get(Path(args[0]).parent.name, "Available devices:\n  (none)\n")
             return subprocess.CompletedProcess(args, 0, stdout=out.encode("utf-8"))
         return super().__call__(args, **kwargs)
@@ -1862,6 +2040,7 @@ def test_a_split_model_gets_time_to_load_every_part(tmp_path, monkeypatch):
     assert ls._model_total_bytes(first) == 15  # real (tiny) files: every part is counted
     fake_file_sizes(monkeypatch, dict(zip(parts, (15 * 10**9, 15 * 10**9, 5 * 10**9))))  # nothing big on disk
     assert ls._model_total_bytes(first) == 35 * 10**9
+    parts[0].write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     backend = make_backend(tmp_path, model_path=first)
     backend.prepare(make_ui())
     assert backend._health_timeout_s == pytest.approx(ls.health_timeout_for(35.0))
@@ -2112,7 +2291,7 @@ def test_a_saved_engine_from_a_moved_game_is_found_again(tmp_path, monkeypatch, 
     exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
     old = tmp_path / "OldLibrary" / "steamapps" / "common" / "GetToWork" / "engine" / "b7000-cpu" / "llama-server"
     model = tmp_path / "m.gguf"
-    model.write_bytes(b"GGUF")
+    model.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
     installer = FakeInstaller(tmp_path, fail={"cpu", "vulkan", "cuda-12"})  # must not be needed
     popen = FakePopen()
     backend = make_backend(tmp_path, popen=popen, installer=installer, server_exe=old, model_path=model)

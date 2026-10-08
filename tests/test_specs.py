@@ -154,7 +154,9 @@ def machine(monkeypatch, tmp_path):
     return build
 
 
-def add_drm_card(tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes: int | None) -> None:
+def add_drm_card(
+    tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes: int | None, *, used_bytes: int | None = None,
+) -> None:
     """Create /sys/class/drm/cardN/device with the files the kernel puts there.
 
     In real sysfs `device` is a symlink to a folder named after the PCI slot
@@ -169,6 +171,8 @@ def add_drm_card(tmp_path: Path, index: int, slot: str, vendor: str, vram_bytes:
     (device / "uevent").write_text(f"DRIVER={driver}\nPCI_CLASS=30000\nPCI_SLOT_NAME={slot}\n")
     if vram_bytes is not None:
         (device / "mem_info_vram_total").write_text(f"{vram_bytes}\n")
+    if used_bytes is not None:
+        (device / "mem_info_vram_used").write_text(f"{used_bytes}\n")
     (tmp_path / "drm" / f"card{index}-DP-1").mkdir()  # connectors must be ignored
 
 
@@ -213,9 +217,19 @@ def test_nvidia_smi_used_memory_is_kept_and_old_lines_still_parse():
     assert used[0].vram_gb == pytest.approx(round(32607 * 1024 * 1024 / 2**30, 1))
     assert used[0].vram_used_gb == pytest.approx(round(6144 * 1024 * 1024 / 2**30, 1))
     assert used[0].driver_version == "617.14" and used[0].compute_capability == 12.0
+    assert used[0].vram_used_known is True
     old = specs._parse_nvidia_smi("NVIDIA GeForce GTX 1080, 8192, 580.95.05, 6.1\n")
     assert old[0].vram_used_gb == 0.0 and old[0].driver_version == "580.95.05"
     assert old[0].compute_capability == 6.1
+    assert old[0].vram_used_known is False
+    clamped = specs._parse_nvidia_smi(
+        "NVIDIA GeForce RTX 3060, 12288, -4, 550.54, 8.6\n"
+        "NVIDIA GeForce RTX 3060 Ti, 8192, 99999, 550.54, 8.6\n"
+        "NVIDIA Broken, 0, 10, 550.54\n"
+    )
+    assert [gpu.name for gpu in clamped] == ["NVIDIA GeForce RTX 3060", "NVIDIA GeForce RTX 3060 Ti"]
+    assert clamped[0].vram_used_gb == 0.0 and clamped[0].vram_used_known is True
+    assert clamped[1].vram_used_gb == clamped[1].vram_gb
 
 
 def test_real_gpu_probes_refuse_to_run_under_pytest():
@@ -231,8 +245,8 @@ def test_real_gpu_probes_refuse_to_run_under_pytest():
 def test_multiple_nvidia_gpus_and_na_memory():
     out = "NVIDIA GeForce RTX 4090, 24564, 580.65\nNVIDIA GH200 480GB, [N/A], 580.65\ngarbage line\n"
     gpus = specs._parse_nvidia_smi(out)
-    assert [g.name for g in gpus] == ["NVIDIA GeForce RTX 4090", "NVIDIA GH200 480GB"]
-    assert gpus[0].vram_gb == 24.0 and gpus[1].vram_gb == 0.0
+    assert [g.name for g in gpus] == ["NVIDIA GeForce RTX 4090"]
+    assert gpus[0].vram_gb == 24.0 and gpus[0].vram_used_known is False
     assert gpus[0].driver_version == "580.65"
 
 
@@ -376,8 +390,36 @@ def test_amd_gpu_vram_from_sysfs(machine, tmp_path):
     gpu = s.gpus[0]
     assert gpu.vendor == "amd" and gpu.name == "AMD Radeon RX 7900 XTX"
     assert gpu.vram_gb == 24.0
+    assert gpu.vram_used_known is False
     assert gpu.bandwidth_gbs == 960
     assert "an AMD Radeon RX 7900 XTX with 24 GB" in specs.friendly_summary(s)
+
+
+def test_linux_amd_reads_used_memory_and_clamps_it(machine, tmp_path):
+    add_drm_card(tmp_path, 0, "0000:03:00.0", "0x1002", 16 * GIB, used_bytes=int(3.5 * GIB))
+    add_drm_card(tmp_path, 1, "0000:04:00.0", "0x1002", 8 * GIB, used_bytes=20 * GIB)
+    machine(commands={
+        "lspci": (
+            "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 32 [Radeon RX 7800 XT]\n"
+            "04:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]\n"
+        ),
+    })
+    cards = {gpu.name: gpu for gpu in specs.detect_specs(tmp_path).gpus}
+    big = cards["AMD Radeon RX 7800 XT"]
+    small = cards["AMD Radeon RX 6600"]
+    assert big.vram_used_known is True and big.vram_used_gb == pytest.approx(3.5)
+    assert small.vram_used_known is True and small.vram_used_gb == small.vram_gb
+
+
+def test_registry_vram_accepts_any_four_digit_subkey():
+    found = specs._vram_from_adapter_subkeys([
+        ("0000", "AMD Radeon RX 6600", 8 * GIB),
+        ("0016", "AMD Radeon RX 7800 XT", 16 * GIB),
+        ("Properties", "Ignore Me", 32 * GIB),
+        ("000", "Too Short", 4 * GIB),
+        ("12345", "Too Long", 4 * GIB),
+    ])
+    assert found == {"AMD Radeon RX 6600": 8.0, "AMD Radeon RX 7800 XT": 16.0}
 
 
 def test_amd_gpu_vram_from_rocm_smi(machine, tmp_path):
