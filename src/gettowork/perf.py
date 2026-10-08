@@ -68,6 +68,10 @@ OVERHEAD_S_PER_TOKEN: dict[str, float] = {"gpu": 0.0013, "unified": 0.005, "cpu"
 DEFAULT_CPU_BANDWIDTH_GBS = 20.0
 DEFAULT_GPU_BANDWIDTH_GBS = 200.0
 DEFAULT_UNIFIED_BANDWIDTH_GBS = 100.0
+# RTX Spark / DGX Spark (GB10) / GB300: LPDDR5X-9400 on a 256-bit bus is about
+# 301 GB/s (9.4 GT/s × 32 bytes). A published-class guess, not a measurement,
+# and not a discrete-GPU bus.
+SPARK_UNIFIED_BANDWIDTH_GBS = 301.0
 
 # Calibration (plausibility checks, also asserted in tests/test_perf.py).
 # Numbers people commonly report for llama.cpp text generation:
@@ -301,6 +305,14 @@ def measure_ram_bandwidth(budget_s: float = 0.3, threads: Optional[int] = None) 
 # "4070 ti" before "4070"). Spaces in a pattern match any whitespace, and the
 # pattern must end on a word boundary, so "rx 7900 xt" does not match "7900 xtx".
 _GPU_TABLE: list[tuple[str, float, Optional[float]]] = [
+    # NVIDIA unified-memory superchips (LPDDR5X-9400 class, ~301 GB/s). These
+    # must match before any VRAM-size guess: a 128 GB pool is not a 900 GB/s card.
+    ("rtx spark", 301, 301),
+    ("dgx spark", 301, 301),
+    ("grace blackwell", 301, 301),
+    ("gb300", 301, 301),
+    ("gb10", 301, 301),
+    ("n1x", 301, 301),
     # --- NVIDIA GeForce RTX 50 / 40 / 30 / 20 series ---
     ("rtx 5090", 1792, 896),
     ("rtx 5080", 960, 896),
@@ -505,6 +517,12 @@ def estimate_gpu_bandwidth(gpu: GPUInfo) -> Optional[float]:
                 value = 2039.0  # A100 80 GB
             return value
 
+        # A shared-memory chip that missed the table must not inherit a
+        # discrete-card guess from how large its RAM share is.
+        if getattr(gpu, "unified_pool", False):
+            if gpu.vendor == "nvidia":
+                return SPARK_UNIFIED_BANDWIDTH_GBS
+            return None
         return _bandwidth_from_vram_tier(gpu.vendor, vram, laptop)
     except Exception:
         return None
@@ -537,7 +555,7 @@ def pooled_gpus(specs: SystemSpecs) -> list[GPUInfo]:
     4 GB. Apple unified memory is not pooled (it is not dedicated VRAM).
     """
     main = primary_gpu(specs)
-    if main is None or main.vendor == "apple":
+    if main is None or main.vendor == "apple" or specs.unified_memory or getattr(main, "unified_pool", False):
         return []
     others = [gpu for gpu in specs.gpus if gpu is not main and gpu.vendor == main.vendor and gpu.vram_gb >= 4]
     return [main, *others]
@@ -607,15 +625,19 @@ def primary_gpu(specs: SystemSpecs) -> Optional[GPUInfo]:
     """
     if specs.gpu_offload is False:
         return None
-    if specs.unified_memory:
-        for gpu in specs.gpus:
-            if gpu.vendor == "apple":
-                return gpu
     from . import specs as hardware
+
+    if specs.unified_memory:
+        pool = [
+            g for g in specs.gpus
+            if g.vram_gb > 0 and not hardware._is_steam_deck_gpu(g)
+        ]
+        return max(pool, key=lambda g: g.vram_gb, default=None)
 
     dedicated = [
         g for g in specs.gpus
         if g.vendor != "apple" and g.vram_gb > 0 and not hardware._is_integrated(g)
+        and not hardware._is_steam_deck_gpu(g)
     ]
     return max(dedicated, key=lambda g: g.vram_gb, default=None)
 
@@ -642,7 +664,11 @@ def bandwidth_for(
             value = gpu.bandwidth_gbs or estimate_gpu_bandwidth(gpu)
             if value:
                 return float(value), "published spec, a rough guess"
-            default = DEFAULT_UNIFIED_BANDWIDTH_GBS if gpu.vendor == "apple" else DEFAULT_GPU_BANDWIDTH_GBS
+            default = (
+                DEFAULT_UNIFIED_BANDWIDTH_GBS
+                if gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+                else DEFAULT_GPU_BANDWIDTH_GBS
+            )
             return default, "default guess"
     measured = specs.ram_bandwidth_gbs
     if measured and measured > 0:
@@ -686,7 +712,7 @@ def _speed_on(specs: SystemSpecs, placement: str, active_gb: float) -> float:
         if gpu is None:
             placement = "cpu"
         else:  # an Apple GPU always behaves like "unified", any other like "gpu"
-            placement = "unified" if gpu.vendor == "apple" else "gpu"
+            placement = "unified" if gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False) else "gpu"
     if placement == "gpu":
         bandwidth, _ = bandwidth_for(specs, placement, demand_gb=active_gb)
     else:

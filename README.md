@@ -250,10 +250,12 @@ automatic, explained in plain English, and reversible.
 
 1. **Hardware check (about a second).** Your operating system, CPU (and which
    speed-up instructions it has), RAM, graphics card(s) and video memory,
-   Apple Silicon unified memory, and free disk space. A laptop with both a
-   built-in chip and a separate graphics card is planned on the separate
-   card, even when Windows reports a large shared-memory number for the
-   built-in chip. The engine is then started on the card or cards that plan
+   Apple Silicon unified memory, and free disk space. NVIDIA RTX Spark
+   (and DGX Spark / GB300) and a shared-memory laptop (Ryzen AI Max, Lunar
+   Lake, a generic iGPU) are planned from one share of RAM, not from VRAM
+   added on top of RAM. A laptop with both a built-in chip and a separate
+   graphics card is planned on the separate card, even when Windows reports
+   a large shared-memory number for the built-in chip. The engine is then started on the card or cards that plan
    counted, so a built-in chip beside them is not given part of the model.
    The referee is started the same way, on the card its own plan counted,
    which can be a different card once the story model is loaded.
@@ -609,9 +611,12 @@ and [perf.py](src/gettowork/perf.py), and explained step by step in
 - **Memory needed** = the model file's size + the KV cache (the model's
   short-term memory of the conversation) + about 0.6 GB of overhead (plus
   0.3 GB on a graphics card).
-- **Memory available** = your video memory minus 0.8 GB, *or* the share of a
-  Mac's unified memory its GPU may use, *or* your RAM minus 2.5 GB (3.5 GB on
-  Windows) for your system. Using up to 60% of it is *great*, up to 85% *ok*,
+- **Memory available** = your video memory minus 0.8 GB, *or* the share of
+  unified memory the GPU may use (about 65% on an 8 GB Mac, 70% up to 48 GB,
+  75% from 64 GB, about 80% from 128 GB — the same idea on RTX Spark and
+  other shared-memory chips, never that share plus the RAM again), *or* your
+  RAM minus 2.5 GB (3.5 GB on Windows) for your system. Using up to 60% of
+  it is *great*, up to 85% *ok*,
   up to 100% *tight*.
 - **Speed**: writing each word-piece means reading the model's weights from
   memory, so `tokens/sec ≈ efficiency × memory bandwidth ÷ GB read per token`.

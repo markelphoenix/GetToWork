@@ -402,8 +402,10 @@ def test_learn_unified_memory_share_matches_specs() -> None:
     if apple_gpu is None:  # pragma: no cover - the helper was renamed
         pytest.skip("specs._apple_gpu no longer exists; check LEARN.md's unified-memory share by hand")
     assert apple_gpu("Apple M2", 16.0).vram_gb == pytest.approx(16.0 * 0.70) == APPLE_M2.vram_gb
+    assert apple_gpu("Apple M1", 8.0).vram_gb == pytest.approx(8.0 * 0.65)
     assert apple_gpu("Apple M2 Max", 64.0).vram_gb == pytest.approx(64.0 * 0.75)
-    assert "about 70% (75% on Macs with 64 GB or more)" in flat(read(LEARN))
+    assert apple_gpu("Apple M3 Ultra", 128.0).vram_gb == pytest.approx(128.0 * 0.80)
+    assert "about 65% on an 8 GB Mac, 70% up to 48 GB, 75% from 64 GB, and about 80% from 128 GB" in flat(read(LEARN))
 
 
 def test_learn_speed_constants_match_perf() -> None:
@@ -529,13 +531,13 @@ def test_learn_build_table_matches_plan_variants() -> None:
     assert plan(os_name="Windows", gpus=[nvidia]) == ["cuda-13", "cuda-12", "vulkan", "cpu"]
     assert plan(os_name="Windows", gpus=[amd]) == ["vulkan", "cpu"]
     assert plan(os_name="Windows", arch="arm64") == ["cpu"]
-    assert plan(os_name="Windows", arch="arm64", gpus=[nvidia]) == ["cuda-13", "cpu"]
+    assert plan(os_name="Windows", arch="arm64", gpus=[nvidia]) == ["cuda-13", "vulkan", "cpu"]
     assert plan(gpus=[nvidia], cpu_flags=["avx2", "vulkan"]) == ["cuda-13", "cuda-12", "vulkan", "cpu"]
     assert plan(gpus=[amd], cpu_flags=["avx2", "vulkan"]) == ["vulkan", "cpu"]
     assert plan(gpus=[amd], cpu_flags=["avx2", "no-vulkan"]) == ["cpu"]
     text = flat(read(LEARN))
     assert "CUDA 13 (driver 580+) and/or CUDA 12 (driver 525+), then Vulkan, then CPU" in text
-    assert "Windows on ARM | CUDA 13 (with an NVIDIA GPU and driver 580+), then CPU" in text
+    assert "Windows on ARM | CUDA 13 arm64 (NVIDIA GPU, driver 580+), then Vulkan arm64, then CPU arm64" in text
     readme = flat(read(README))
     assert "about version 525 or newer for CUDA 12, 580 or newer for CUDA 13" in readme
 

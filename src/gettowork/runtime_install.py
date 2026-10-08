@@ -476,10 +476,16 @@ def plan_variants(specs: SystemSpecs) -> list[RuntimeVariant]:
                 plan.extend(_cuda_variants(specs, arch))
             if non_apple_gpu:
                 plan.append(VULKAN)  # works with NVIDIA, AMD and Intel drivers
-        elif arch == "arm64" and "nvidia" in vendors:
-            # Windows on ARM with an NVIDIA GPU: a CUDA 13 arm64 build is published
-            # (llama-...-bin-win-cuda-13.x-arm64.zip + its cudart); otherwise the CPU build.
-            plan.extend(_cuda_variants(specs, arch))
+        elif arch == "arm64":
+            # Windows on Arm. CUDA 13 arm64 is published for an NVIDIA GPU
+            # (llama-...-bin-win-cuda-13.x-arm64.zip + its cudart) when the
+            # driver can run it. Vulkan arm64 is the fallback (and the build
+            # for AMD/Intel). The CPU entry is the arm64 CPU zip. select_assets
+            # matches this architecture only, so an x64 engine is never chosen.
+            if "nvidia" in vendors:
+                plan.extend(_cuda_variants(specs, arch))
+            if non_apple_gpu:
+                plan.append(VULKAN)
     elif os_key == "linux" and arch is not None:
         glibc = _glibc_version()
 
@@ -493,6 +499,40 @@ def plan_variants(specs: SystemSpecs) -> list[RuntimeVariant]:
 
     plan.append(CPU)  # (if even this can't run here, `platform_problem` says so up front)
     return plan
+
+
+def arm64_build_note(specs: SystemSpecs) -> Optional[str]:
+    """Menu line for a Windows or Linux Arm machine, or None.
+
+    Names the arm64 build the plan will actually run. When the CUDA arm64
+    build is not in the plan (the driver is too old for CUDA 13), says so
+    and names the Vulkan or CPU arm64 fallback. An x64 engine under emulation
+    is never the quiet alternative.
+    """
+    os_key, arch = _os_key(specs.os_name), _arch_key(specs.arch)
+    if arch != "arm64" or os_key not in ("windows", "linux"):
+        return None
+    names = [variant.name for variant in plan_variants(specs)]
+    first = names[0] if names else "cpu"
+    nvidia = any(gpu.vendor == "nvidia" for gpu in specs.gpus)
+    host = "Windows on Arm" if os_key == "windows" else "Linux on Arm"
+    if nvidia and first == "cuda-13":
+        return (
+            f"{host} uses the arm64 CUDA build of the pinned llama.cpp release. "
+            "If that build cannot start, the next try is the arm64 Vulkan build, then the arm64 CPU build. "
+            "An x64 engine is not run under emulation."
+        )
+    if nvidia and "cuda-13" not in names:
+        fallback = "Vulkan arm64" if "vulkan" in names else "CPU arm64"
+        return (
+            f"{host} cannot use the arm64 CUDA build here (it needs an NVIDIA driver 580 or newer). "
+            f"This menu uses the {fallback} build instead. An x64 engine is not run under emulation."
+        )
+    if first == "vulkan":
+        return f"{host} uses the arm64 Vulkan build. An x64 engine is not run under emulation."
+    if first == "cpu":
+        return f"{host} uses the arm64 CPU build. An x64 engine is not run under emulation."
+    return None
 
 
 def engine_can_use_gpu(specs: SystemSpecs) -> bool:

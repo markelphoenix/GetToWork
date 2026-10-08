@@ -47,8 +47,11 @@ def _machine(
     unified: bool = False,
     vulkan: bool = False,
     os_version: str = "",
+    arch: str = "",
 ) -> SystemSpecs:
-    flags = ["neon"] if unified or os_name == "Darwin" else ["avx2", "fma"]
+    if not arch:
+        arch = "arm64" if unified or os_name == "Darwin" else "x86_64"
+    flags = ["neon"] if arch == "arm64" else ["avx2", "fma"]
     if vulkan or any(gpu.vendor in ("amd", "intel") and gpu.vram_gb > 0 for gpu in gpus):
         flags = [*flags, "vulkan"]
     if os_name == "Windows" and not os_version:
@@ -56,7 +59,7 @@ def _machine(
     return SystemSpecs(
         os_name=os_name,
         os_version=os_version,
-        arch="arm64" if unified or os_name == "Darwin" else "x86_64",
+        arch=arch,
         cpu_name="Survey CPU",
         cpu_cores_physical=cores,
         cpu_cores_logical=cores,
@@ -142,6 +145,33 @@ SURVEY = [
          ("qwen3-8b", "Q4_K_M", "ok", "partial", "fast", None, None, None, None, "RTX 4060")),
     _row("gtx1650_1p5gb_in_use", _machine("Windows", 16, 6, 40, (_gpu("NVIDIA GeForce GTX 1650", "nvidia", 4, 1.5),), os_version="11"),
          ("qwen3-4b", "Q4_K_M", "ok", "partial", "usable", "clef-flash", "Q4_K_M", "ok", "cpu", "GTX 1650")),
+    # Unified memory. The GPU figure is the share of RAM detection would
+    # record (65% at 8 GB, 70% through 48 GB, 75% at 64 GB, 80% at 128 GB),
+    # not the whole stick and not a second VRAM pool.
+    _row("mac_m1_8", _machine("Darwin", 8, 8, 68, (_gpu("Apple M1 GPU", "apple", 5.2),), unified=True),
+         ("qwen3-4b", "Q4_K_M", "ok", "unified", "usable", None, None, None, None, "Apple M1")),
+    _row("mac_m4_24", _machine("Darwin", 24, 10, 120, (_gpu("Apple M4 GPU", "apple", 16.8),), unified=True),
+         ("gpt-oss-20b", "MXFP4", "ok", "unified", "fast", "clef-flash", "Q4_K_M", "tight", "partial", "Apple M4 GPU")),
+    _row("mac_m4_pro_36", _machine("Darwin", 36, 12, 273, (_gpu("Apple M4 Pro GPU", "apple", 25.2),), unified=True),
+         ("qwen3-14b", "Q4_K_M", "great", "unified", "fast", "clef-flash", "Q8_0", "ok", "unified", "M4 Pro")),
+    _row("mac_m4_max_64", _machine("Darwin", 64, 14, 546, (_gpu("Apple M4 Max GPU", "apple", 48.0),), unified=True),
+         ("qwen3-32b", "Q4_K_M", "great", "unified", "fast", "clef", "Q4_K_M", "ok", "unified", "M4 Max")),
+    _row("mac_m3_ultra_128", _machine("Darwin", 128, 16, 819, (_gpu("Apple M3 Ultra GPU", "apple", 102.4),), unified=True),
+         ("qwen3-32b", "Q6_K", "great", "unified", "fast", "clef", "Q8_0", "great", "unified", "M3 Ultra")),
+    _row("rtx_spark_32_w11", _machine("Windows", 32, 18, 200, (_gpu("NVIDIA RTX Spark", "nvidia", 22.4),), unified=True, os_version="11"),
+         ("qwen3-14b", "Q5_K_M", "great", "unified", "fast", "clef-flash", "Q4_K_M", "tight", "unified", "RTX Spark")),
+    _row("rtx_spark_64_w11", _machine("Windows", 64, 20, 250, (_gpu("NVIDIA RTX Spark", "nvidia", 48.0),), unified=True, os_version="11"),
+         ("qwen3-14b", "Q5_K_M", "great", "unified", "fast", "clef", "Q4_K_M", "great", "unified", "RTX Spark")),
+    _row("rtx_spark_128_w11", _machine("Windows", 128, 20, 300, (_gpu("NVIDIA RTX Spark", "nvidia", 102.4),), unified=True, os_version="11"),
+         ("qwen3.8-27b", "Q4_K_M", "great", "unified", "usable", "clef", "Q4_K_M", "great", "unified", "RTX Spark")),
+    _row("dgx_spark_128", _machine("Linux", 128, 20, 300, (_gpu("NVIDIA GB10", "nvidia", 102.4),), unified=True, vulkan=True),
+         ("qwen3.8-27b", "Q4_K_M", "great", "unified", "usable", "clef", "Q4_K_M", "great", "unified", "GB10")),
+    _row("strix_halo_64_w11", _machine("Windows", 64, 16, 150, (_gpu("AMD Radeon 8060S Graphics", "amd", 48.0),), unified=True, os_version="11", arch="x86_64"),
+         ("qwen3-14b", "Q4_K_M", "great", "unified", "fast", "clef", "Q4_K_M", "great", "unified", "8060S")),
+    _row("strix_halo_128", _machine("Linux", 128, 16, 200, (_gpu("AMD Radeon 8060S Graphics", "amd", 102.4),), unified=True, arch="x86_64"),
+         ("qwen3-14b", "Q4_K_M", "great", "unified", "fast", "clef", "Q4_K_M", "great", "unified", "8060S")),
+    _row("lunar_lake_32_w11", _machine("Windows", 32, 8, 80, (_gpu("Intel Arc 140V GPU", "intel", 22.4),), unified=True, os_version="11", arch="x86_64"),
+         ("qwen3-30b-a3b", "Q4_K_M", "ok", "unified", "fast", None, None, None, None, "140V")),
     _row("below_minimum_2gb", _machine("Windows", 2, 2, 12),
          (None, None, None, None, None, None, None, None, None, None)),
 ]
@@ -170,7 +200,8 @@ def test_survey_machine_gets_a_playable_story_and_referee(name, specs, expect):
         assert primary is None
     else:
         assert primary is not None and primary_bit in primary.name
-        assert not __import__("gettowork.specs", fromlist=["_is_integrated"])._is_integrated(primary)
+        if not specs.unified_memory:
+            assert not __import__("gettowork.specs", fromlist=["_is_integrated"])._is_integrated(primary)
 
     story = catalog.recommend(specs)
     if story_key is None:

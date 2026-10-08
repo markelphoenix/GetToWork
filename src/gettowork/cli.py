@@ -261,7 +261,8 @@ def show_specs(ui: UI, services: SetupServices) -> None:
     rows = [("RAM bandwidth", f"~{cpu_bw:.0f} GB/s ({cpu_source})")]
     gpu = perf.primary_gpu(specs)
     if gpu is not None:
-        gpu_bw, gpu_source = perf.bandwidth_for(specs, "unified" if gpu.vendor == "apple" else "gpu")
+        kind = "unified" if gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False) else "gpu"
+        gpu_bw, gpu_source = perf.bandwidth_for(specs, kind)
         rows.append(("Graphics memory bandwidth", f"~{gpu_bw:.0f} GB/s ({gpu_source})"))
     try:
         # Only builds the game would really try: a built game counts just the ones it ships.

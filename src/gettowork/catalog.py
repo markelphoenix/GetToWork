@@ -718,16 +718,24 @@ def _place(
     gpu_need = base_need_gb + compute_gb
     ram_budget = _ram_budget_gb(specs)
     gpu = perf.primary_gpu(specs)
+    # Apple, RTX Spark, Strix Halo, Lunar Lake: one RAM pool. The GPU budget
+    # is already a share of that pool, so it is not added to system RAM.
+    # ``extra_vram_gb`` is the Windows Clef margin (0 for a story model, and
+    # 0 on a Mac).
+    one_pool = gpu is not None and (
+        gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+    )
 
-    if gpu is not None and gpu.vendor == "apple":
-        if gpu_need <= gpu.vram_gb:
-            return "unified", gpu_need, gpu.vram_gb, 1.0
-        # Past the share macOS lets the GPU use, llama.cpp's Metal build keeps
-        # what fits on the GPU and runs the rest on the processor - in the same
-        # memory. So it's a split ("partial"), never a separate CPU plan.
-        if gpu.vram_gb >= PARTIAL_MIN_GPU_SHARE * gpu_need and gpu_need <= ram_budget:
-            return "partial", gpu_need, ram_budget, gpu.vram_gb / gpu_need
-        return "none", base_need_gb, max(ram_budget, gpu.vram_gb), 0.0
+    if one_pool:
+        gpu_budget = max(0.0, gpu.vram_gb - extra_vram_gb)
+        if gpu_need <= gpu_budget:
+            return "unified", gpu_need, gpu_budget, 1.0
+        # Past the share the GPU may wire, the rest still runs in the same
+        # memory (Metal on a Mac, CUDA or Vulkan on the other chips). A split
+        # ("partial"), never a separate pool of VRAM plus RAM.
+        if gpu_budget >= PARTIAL_MIN_GPU_SHARE * gpu_need and gpu_need <= ram_budget:
+            return "partial", gpu_need, ram_budget, gpu_budget / gpu_need
+        return "none", base_need_gb, max(ram_budget, gpu_budget), 0.0
     elif gpu is not None:
         vram_budget = _usable_vram_gb(specs, extra_per_card_gb=extra_vram_gb)
         if vram_budget > 0 and gpu_need <= vram_budget:
@@ -748,8 +756,8 @@ def _place(
 
     # Doesn't fit: report against the biggest budget we could have offered.
     budgets = [ram_budget]
-    if gpu is not None and gpu.vendor == "apple":
-        budgets.append(gpu.vram_gb)
+    if one_pool:
+        budgets.append(max(0.0, gpu.vram_gb - extra_vram_gb))
     elif gpu is not None:
         budgets.append(_usable_vram_gb(specs, extra_per_card_gb=extra_vram_gb) + ram_budget)
     return "none", base_need_gb, max(budgets), 0.0
@@ -760,9 +768,17 @@ def _is_apple(specs: SystemSpecs) -> bool:
     return gpu is not None and gpu.vendor == "apple"
 
 
+def _one_memory_pool(specs: SystemSpecs) -> bool:
+    """True when the GPU budget is a share of system RAM, not a second pool."""
+    gpu = perf.primary_gpu(specs)
+    return gpu is not None and (
+        gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+    )
+
+
 def _shares_system_ram(specs: SystemSpecs, placement: str) -> bool:
     """Is the memory this placement fills the computer's own RAM?"""
-    return placement in ("cpu", "unified") or (placement == "partial" and _is_apple(specs))
+    return placement in ("cpu", "unified") or (placement == "partial" and _one_memory_pool(specs))
 
 
 def _verdict_for(ratio: float) -> str:
@@ -791,7 +807,7 @@ def _plan(specs: SystemSpecs, model: ModelEntry, quant: str, size_gb: float, *,
     extra = windows_vram_margin_gb(specs) if decision else 0.0
     placement, need, budget, offload = _place(specs, base_need, compute_gb=compute, extra_vram_gb=extra)
     ratio = need / budget if budget > 0 else math.inf
-    if placement == "partial" and _is_apple(specs):
+    if placement == "partial" and _one_memory_pool(specs):
         # A Mac's split runs past the GPU's share into the rest of the same RAM,
         # so it's always a squeeze of the whole computer's memory: snug.
         ratio = max(1.0, ratio)
@@ -1158,12 +1174,24 @@ def _reason(specs: SystemSpecs, model: ModelEntry, plan: _Plan, verdict: str) ->
         else:
             where = f"Fits on your {gpu.name if gpu else 'graphics card'} (needs ~{need} of {budget} GB video memory)"
     elif plan.placement == "unified":
-        where = f"Fits in your Mac's unified memory (needs ~{need} of {budget} GB usable)"
-    elif plan.placement == "partial" and gpu is not None and gpu.vendor == "apple":
-        where = (
-            f"Too big for the share of memory your Mac lets its GPU use, so ~{plan.offload_fraction:.0%} of it "
-            f"runs on the GPU and the rest on the processor (needs ~{need} of {budget} GB)"
-        )
+        if gpu is not None and gpu.vendor == "apple":
+            where = f"Fits in your Mac's unified memory (needs ~{need} of {budget} GB usable)"
+        else:
+            where = (
+                f"Fits in shared memory (the graphics chip uses the same RAM as the processor; "
+                f"needs ~{need} of {budget} GB)"
+            )
+    elif plan.placement == "partial" and _one_memory_pool(specs):
+        if _is_apple(specs):
+            where = (
+                f"Too big for the share of memory your Mac lets its GPU use, so ~{plan.offload_fraction:.0%} of it "
+                f"runs on the GPU and the rest on the processor (needs ~{need} of {budget} GB)"
+            )
+        else:
+            where = (
+                f"Too big for the share of shared memory the graphics chip may use, so ~{plan.offload_fraction:.0%} "
+                f"of it stays on the GPU and the rest runs in the same RAM (needs ~{need} of {budget} GB)"
+            )
     elif plan.placement == "partial":
         spill = plan.need_gb * (1.0 - plan.offload_fraction)
         where = (
@@ -1205,7 +1233,7 @@ def speed_breakdown(specs: SystemSpecs, fit: FitResult) -> Optional[tuple[float,
         gpu = perf.primary_gpu(specs)
         if gpu is None:
             return None
-        placement = "unified" if gpu.vendor == "apple" else "gpu"
+        placement = "unified" if gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False) else "gpu"
     bandwidth, _source = perf.bandwidth_for(specs, placement)
     return plan.active_gb, perf.efficiency_for(specs, placement) * bandwidth, perf.OVERHEAD_S_PER_TOKEN[placement]
 
@@ -1585,10 +1613,16 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
     )
     budget = f"{plan.budget_gb:.1f} GB"
     verdict_words = _VERDICT_WORDS.get(fit.verdict, fit.verdict)
-    if plan.placement == "partial" and _is_apple(specs):
+    if plan.placement == "partial" and _one_memory_pool(specs):
+        if _is_apple(specs):
+            whose = f"your Mac's memory ({specs.ram_total_gb:.0f} GB, keeping {_os_headroom_gb(specs)} GB for macOS)"
+        else:
+            whose = (
+                f"the shared memory ({specs.ram_total_gb:.0f} GB, keeping {_os_headroom_gb(specs)} GB "
+                "for the operating system)"
+            )
         lines.append(
-            f"- Budget: {budget} of your Mac's memory ({specs.ram_total_gb:.0f} GB, keeping "
-            f"{_os_headroom_gb(specs)} GB for macOS) → {plan.need_gb / max(plan.budget_gb, 0.01):.0%} used → "
+            f"- Budget: {budget} of {whose} → {plan.need_gb / max(plan.budget_gb, 0.01):.0%} used → "
             f"**{verdict_words}** (it runs past the share the GPU may use, into the rest of the same memory)"
         )
     elif plan.placement == "partial":
@@ -1950,15 +1984,19 @@ def reserve_for_loaded_model(specs: SystemSpecs, story_fit: Optional[FitResult])
     ram = float(specs.ram_total_gb)
     placement = story_fit.placement
     gpu = perf.primary_gpu(specs)
-    if used and placement in ("gpu", "partial") and gpu is not None and gpu.vendor != "apple":
+    one_pool = gpu is not None and (
+        gpu.vendor == "apple" or specs.unified_memory or getattr(gpu, "unified_pool", False)
+    )
+    if used and placement in ("gpu", "partial") and gpu is not None and not one_pool:
         gpus = _subtract_vram(gpus, gpu.vendor, used)
         if placement == "partial":
             ram = max(0.0, ram - used)
     elif used and placement in ("unified", "cpu", "partial"):
         ram = max(0.0, ram - used)
-        # Apple unified memory is the same pool the CPU plan just used.
-        if gpu is not None and gpu.vendor == "apple" and placement in ("unified", "cpu", "partial"):
-            gpus = _subtract_vram(gpus, "apple", used)
+        # One pool: the GPU share and the CPU plan are the same RAM, so the
+        # story model comes out of both figures.
+        if one_pool and placement in ("unified", "cpu", "partial"):
+            gpus = _subtract_vram(gpus, gpu.vendor, used)
     available = min(float(specs.ram_available_gb), ram)
     return replace(specs, gpus=gpus, ram_total_gb=ram, ram_available_gb=max(0.0, available), disk_free_gb=disk)
 

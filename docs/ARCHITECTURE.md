@@ -314,8 +314,9 @@ MEMORY_FORMULA_EXPLAINER: str   # Markdown for a UI.teach panel
   Extra public helpers:
   `is_permissive`, `quant_bits`, `quant_quality`, `estimate_quant_size_gb`,
   `kv_cache_gb`, `score_fit`, `explain_fit(specs, fit) -> Markdown`.
-- Placement: gpu if fits VRAM (keep ~0.8 GB free); unified if Apple and fits
-  usable unified memory; partial if VRAM ≥ 40% of need and RAM covers the
+- Placement: gpu if fits VRAM (keep ~0.8 GB free); unified if the GPU shares
+  system RAM (Apple, RTX Spark / GB10 / GB300, Strix Halo, Lunar Lake and
+  other iGPUs given a RAM share) and the model fits that share; partial if VRAM ≥ 40% of need and RAM covers the
   rest (*Round 4:* also at ≥ 15% when the CPU-only plan would be tight, and at
   any share when only VRAM + RAM together fit - llama.cpp's auto-fit uses the
   card anyway); cpu if RAM (total − ~2.5 GB OS headroom) fits; none otherwise.
@@ -497,7 +498,9 @@ def runtime_explainer() -> str    # whichever of the two fits this copy (the mod
   → vulkan, then cpu; Linux + NVIDIA → cuda-12.8 (+cudart) then vulkan (if
   loader present) then cpu; Linux AMD/Intel with vulkan loader → vulkan then
   cpu; else cpu. Windows arm64 → win-cuda-13.x-arm64 (+cudart) when an NVIDIA
-  GPU with driver ≥ 580 (or unknown) is present, then win-cpu-arm64. CUDA 13
+  GPU with driver ≥ 580 (or unknown) is present, then win-vulkan-arm64, then
+  win-cpu-arm64. An older NVIDIA driver skips CUDA and starts at Vulkan arm64.
+  An x64 archive is never selected on arm64. CUDA 13
   is skipped when every NVIDIA GPU reports a compute capability below 7.5
   (`GPUInfo.compute_capability`, from `nvidia-smi --query-gpu=…,compute_cap`,
   retried without it on drivers that don't know the field): CUDA 13 builds
@@ -1499,7 +1502,8 @@ engine-lifecycle notes above for `--list-devices`, buffer-based GPU detection,
 disk-read progress, per-install unusable notes and the update check. Also:
 `gpu_arch` ("no kernel image is available") is a permanent failure of that
 install; `GPUInfo.compute_capability` keeps CUDA 13 away from cards below 7.5;
-Windows on ARM with an NVIDIA GPU tries the CUDA 13 arm64 build; the
+Windows on ARM with an NVIDIA GPU tries the CUDA 13 arm64 build, then Vulkan
+arm64, then the CPU arm64 build (never an x64 engine under emulation); the
 "10.16" macOS compatibility answer is seen through (`specs.macos_release`:
 `sysctl kern.osproductversion`, or a fresh Python with
 `SYSTEM_VERSION_COMPAT=0`) and never treated as a real version;

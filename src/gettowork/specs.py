@@ -12,7 +12,8 @@ So this module gathers:
   - AMD via Linux sysfs / ``rocm-smi``, other cards by name via ``lspci`` or
     Windows' ``Win32_VideoController`` plus the display-driver registry
     (``qwMemorySize``) and DXGI dedicated video memory,
-  - Apple Silicon, where the GPU shares ("unified") system memory,
+  - Apple Silicon, NVIDIA RTX Spark / GB10 / GB300, and other chips whose
+    GPU shares system memory (one budget, never VRAM added on top of RAM),
 * free disk space where models will be downloaded,
 * whether a Vulkan loader is installed (lets AMD/Intel GPUs accelerate).
 
@@ -351,33 +352,47 @@ def _vendor_from_name(name: str) -> str:
     return "unknown"
 
 
-def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
+def _parse_nvidia_smi(out: str, *, keep_unreported: bool = False) -> list[GPUInfo]:
     """Parse nvidia-smi CSV: name, total MiB, optional used MiB, driver, optional compute cap.
 
     ``memory.used`` is an integer (a leading minus is clamped to 0). A driver
     version always contains a dot, so a line from an older query (no
     used-memory column) still parses, and that card's in-use figure stays
     unknown. A total that is missing, ``[N/A]``, or not positive is dropped:
-    a 0 GB card would be planned as empty. Used memory is clamped to the total.
+    a 0 GB card would be planned as empty. The exception is a unified-memory
+    NVIDIA chip (RTX Spark, GB10, GB300) and, when ``keep_unreported`` is set,
+    any non-discrete NVIDIA GPU on an Arm machine: those chips often report
+    ``[N/A]`` instead of a VRAM size, and dropping them would hide the GPU.
+    Used memory is clamped to the total.
     """
     gpus = []
     for line in out.splitlines():
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 2 or not parts[0]:
             continue
+        name = _clean(parts[0])
+        total_token = parts[1].strip()
+        unreported = total_token.upper() in ("[N/A]", "N/A", "[NOT SUPPORTED]")
         try:
-            total_mib = float(parts[1])
+            total_mib = None if unreported else float(total_token)
         except ValueError:
-            continue  # "[N/A]" and other non-numbers are not a card we can plan
-        if total_mib <= 0:
             continue
-        vram = _gib(total_mib * 1024 * 1024)
-        if vram <= 0:
-            continue
-        rest = parts[2:]
+        keep = _is_nvidia_unified_name(name) or (
+            keep_unreported and unreported and not _is_discrete_nvidia_name(name)
+        )
+        if total_mib is None or total_mib <= 0:
+            if not keep:
+                continue
+            vram = 0.0
+            total_mib = 0.0
+        else:
+            vram = _gib(total_mib * 1024 * 1024)
+            if vram <= 0 and not keep:
+                continue
+        rest = [p for p in parts[2:] if p and p.upper() not in ("[N/A]", "N/A", "[NOT SUPPORTED]")]
         used = 0.0
         used_known = False
-        if rest and re.fullmatch(r"-?\d+", rest[0]):
+        if rest and re.fullmatch(r"-?\d+", rest[0]) and total_mib > 0:
             used_known = True
             try:
                 used_mib = float(rest[0])
@@ -391,7 +406,7 @@ def _parse_nvidia_smi(out: str) -> list[GPUInfo]:
             rest = rest[1:]
         compute = float(rest[0]) if rest and re.match(r"^\d+\.\d+$", rest[0]) else None
         gpus.append(GPUInfo(
-            name=_clean(parts[0]), vendor="nvidia", vram_gb=vram, vram_used_gb=used,
+            name=name, vendor="nvidia", vram_gb=vram, vram_used_gb=used,
             driver_version=driver, compute_capability=compute, vram_used_known=used_known,
         ))
     return gpus
@@ -425,18 +440,46 @@ def _norm_gpu_name(name: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _lookup_gb(table: dict[str, float], name: str) -> float:
-    """VRAM from a {display name: GiB} table, exact first, then a contained name."""
+def _memory_pair(value) -> tuple[float, float]:
+    """(dedicated GiB, shared GiB) from a table cell.
+
+    Callers pass a plain GiB float, or ``(dedicated, shared)`` when DXGI
+    reported both. A bad cell is ``(0, 0)``.
+    """
+    if isinstance(value, (tuple, list)):
+        dedicated = float(value[0] or 0) if len(value) > 0 else 0.0
+        shared = float(value[1] or 0) if len(value) > 1 else 0.0
+        return dedicated, shared
+    try:
+        return float(value or 0), 0.0
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def _lookup_entry(table: dict, name: str):
+    """The table cell for `name`, exact first, then a contained name."""
     if not table or not name:
-        return 0.0
+        return None
     key = _norm_gpu_name(name)
     normalised = {_norm_gpu_name(label): value for label, value in table.items()}
-    if key in normalised and normalised[key] > 0:
-        return float(normalised[key])
+    if key in normalised:
+        return normalised[key]
     for other, value in normalised.items():
-        if value > 0 and other and (key in other or other in key):
-            return float(value)
-    return 0.0
+        dedicated, shared = _memory_pair(value)
+        if (dedicated > 0 or shared > 0) and other and (key in other or other in key):
+            return value
+    return None
+
+
+def _lookup_gb(table: dict, name: str) -> float:
+    """Dedicated VRAM from a {display name: GiB} table. 0 when the cell is missing or empty."""
+    dedicated, _shared = _memory_pair(_lookup_entry(table, name))
+    return dedicated if dedicated > 0 else 0.0
+
+
+def _lookup_pair(table: dict, name: str) -> tuple[float, float]:
+    """(dedicated GiB, shared GiB) for `name`. Shared stays 0 for a plain float cell."""
+    return _memory_pair(_lookup_entry(table, name))
 
 
 class _NvmlMemory(ctypes.Structure):
@@ -537,8 +580,12 @@ def _nvidia_nvml_gpus() -> list[GPUInfo]:
             name, total_bytes, driver = record[0], record[1], record[2]
             used_bytes = 0
             used_known = False
-        if not name or total_bytes <= 0:
+        if not name:
             continue
+        if total_bytes <= 0:
+            if not _is_nvidia_unified_name(name):
+                continue
+            total_bytes = 0
         total_gb = _gib(total_bytes)
         used_gb = _gib(max(0, int(used_bytes))) if used_known else 0.0
         if used_gb > total_gb:
@@ -550,7 +597,7 @@ def _nvidia_nvml_gpus() -> list[GPUInfo]:
     return gpus
 
 
-def _nvidia_gpus(notes: list[str]) -> tuple[list[GPUInfo], str]:
+def _nvidia_gpus(notes: list[str], *, arch: str = "") -> tuple[list[GPUInfo], str]:
     out, status = _run(_NVIDIA_QUERY)
     if status == "failed":
         out, status = _run(_NVIDIA_QUERY_OLD)
@@ -566,7 +613,7 @@ def _nvidia_gpus(notes: list[str]) -> tuple[list[GPUInfo], str]:
         if status == "failed":
             notes.append("nvidia-smi is installed but didn't answer, so NVIDIA video memory is unknown.")
         return [], status
-    gpus = _parse_nvidia_smi(out or "")
+    gpus = _parse_nvidia_smi(out or "", keep_unreported=(arch == "arm64"))
     if not gpus:
         nvml = _nvidia_nvml_gpus()
         if nvml:
@@ -585,7 +632,11 @@ def _nvidia_gpus(notes: list[str]) -> tuple[list[GPUInfo], str]:
                 match = nvml.get(_norm_gpu_name(gpu.name))
                 filled.append(match if match is not None and match.vram_gb > 0 else gpu)
             gpus = filled
-    if any(g.vram_gb <= 0 for g in gpus):
+    unfilled = [
+        g for g in gpus
+        if g.vram_gb <= 0 and not (_is_nvidia_unified_name(g.name) or arch == "arm64")
+    ]
+    if unfilled:
         notes.append("An NVIDIA GPU didn't report its video memory; we'll plan as if it had none.")
     return gpus, "ok"
 
@@ -824,11 +875,14 @@ def _windows_registry_vram() -> dict[str, float]:
     return _vram_from_adapter_subkeys(entries)
 
 
-def _windows_dxgi_vram() -> dict[str, float]:
-    """{adapter description: dedicated VRAM GiB} from DXGI, or {} off Windows.
+def _windows_dxgi_vram() -> dict:
+    """{adapter description: dedicated GiB, or (dedicated, shared)} from DXGI, or {} off Windows.
 
     ``Win32_VideoController.AdapterRAM`` is a 32-bit count and stops at 4 GB.
-    DXGI's ``DedicatedVideoMemory`` is the size the driver reports to DirectX.
+    DXGI's ``DedicatedVideoMemory`` is the BIOS carve-out. ``SharedSystemMemory``
+    is the extra system RAM that same GPU may also use. A tuple keeps both so
+    a shared-memory chip is not planned from the carve-out alone. A plain float
+    is still accepted (tests, and a probe that only knows the carve-out).
     """
     _block_hardware_probe("DXGI")
     if platform.system() != "Windows":
@@ -845,8 +899,13 @@ _UNPATCHED_REGISTRY_VRAM = _windows_registry_vram
 _UNPATCHED_DXGI_VRAM = _windows_dxgi_vram
 
 
-def _dxgi_dedicated_video_memory() -> dict[str, float]:
-    """Read DXGI adapter descriptions. Raises only if the caller wants the raw failure."""
+def _dxgi_dedicated_video_memory() -> dict[str, tuple[float, float]]:
+    """Read DXGI adapter descriptions. Raises only if the caller wants the raw failure.
+
+    Values are ``(dedicated GiB, shared GiB)``. An adapter the OS only exposes
+    through shared memory (dedicated 0) is kept, so a tiny carve-out is not
+    thrown away before the shared figure is read.
+    """
     _block_hardware_probe("DXGI")
     dxgi = ctypes.WinDLL("dxgi.dll")
     # IDXGIFactory1
@@ -884,7 +943,7 @@ def _dxgi_dedicated_video_memory() -> dict[str, float]:
     enum_adapters = ctypes.WINFUNCTYPE(
         ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p),
     )(_vtable(factory)[7])
-    found: dict[str, float] = {}
+    found: dict[str, tuple[float, float]] = {}
     try:
         for index in range(16):
             adapter = ctypes.c_void_p()
@@ -900,9 +959,11 @@ def _dxgi_dedicated_video_memory() -> dict[str, float]:
                 # The Microsoft Basic Render Driver is a software adapter.
                 if desc.VendorId == 0x1414 and desc.DeviceId == 0x8C:
                     continue
-                if desc.DedicatedVideoMemory <= 0:
+                dedicated = _gib(int(desc.DedicatedVideoMemory)) if desc.DedicatedVideoMemory > 0 else 0.0
+                shared = _gib(int(desc.SharedSystemMemory)) if desc.SharedSystemMemory > 0 else 0.0
+                if dedicated <= 0 and shared <= 0:
                     continue
-                found[_clean(desc.Description)] = _gib(int(desc.DedicatedVideoMemory))
+                found[_clean(desc.Description)] = (dedicated, shared)
             finally:
                 _release(adapter)
     finally:
@@ -950,20 +1011,24 @@ def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
         vendor = _vendor_from_name(name)
         if vendor == "nvidia" and nvidia:
             continue
-        vram = _lookup_gb(registry, name) or _lookup_gb(dxgi, name)
-        if not vram and adapter_ram > 0:
-            vram = _gib(adapter_ram)
-            if vram >= 3.9:
+        dedicated, shared = _lookup_pair(dxgi, name)
+        if dedicated <= 0:
+            dedicated = _lookup_gb(registry, name)
+        if dedicated <= 0 and adapter_ram > 0:
+            dedicated = _gib(adapter_ram)
+            if dedicated >= 3.9:
                 notes.append(
                     f"Windows only reports 'at least 4 GB' for {name} "
                     "(the registry and DXGI didn't have a size); we'll assume 4 GB."
                 )
-                vram = 4.0
-        if vram < 1.0:
-            vram = 0.0  # integrated graphics: a tiny slice of shared memory, not real VRAM
-        # Registry and DXGI report a size, not how much of it is already in use.
+                dedicated = 4.0
+        # A carve-out under 1 GB stays recorded. `_finalize_memory_pools` turns a
+        # shared-memory chip into one RAM share, and still zeros a leftover
+        # slice when a real discrete card is present. Registry and DXGI report
+        # a size, not how much of it is already in use.
         found.append(GPUInfo(
-            name=name, vendor=vendor, vram_gb=vram, vram_used_known=False,  # type: ignore[arg-type]
+            name=name, vendor=vendor, vram_gb=dedicated, shared_gb=shared,  # type: ignore[arg-type]
+            vram_used_known=False,
         ))
         if vendor == "nvidia" and not nvidia:
             notes.append(f"Found {name}, but nvidia-smi didn't answer. Is the NVIDIA driver up to date?")
@@ -989,15 +1054,195 @@ def _is_integrated(gpu: GPUInfo) -> bool:
     return False
 
 
+# NVIDIA chips whose CPU and GPU share one LPDDR pool. nvidia-smi reports that
+# pool as "[N/A]" or as the whole stick; neither number is a discrete VRAM size.
+_NVIDIA_UNIFIED_RE = re.compile(
+    r"rtx spark|\bn1x\b|\bgb10\b|\bgb300\b|dgx spark|grace blackwell",
+    re.IGNORECASE,
+)
+# A numbered GeForce / data-centre GPU. Its memory is its own, even on Arm.
+_DISCRETE_NVIDIA_RE = re.compile(
+    r"\b(?:rtx|gtx|gt)\s*\d{3,4}\b|\bquadro\b|\btesla\b|\ba100\b|\bh100\b|\bh200\b|\bgh200\b"
+    r"|\bl40\b|\bt4\b|\ba6000\b|\ba40\b|\ba10\b",
+    re.IGNORECASE,
+)
+# Steam Deck's APU stays on the CPU plan. The "VRAM" figure is the same RAM.
+_STEAM_DECK_GPU_RE = re.compile(
+    r"aerith|sephiroth|steam deck|custom gpu 0405|van gogh",
+    re.IGNORECASE,
+)
+# Ryzen AI Max / Strix Halo: a large BIOS carve-out of one LPDDR pool.
+_STRIX_HALO_RE = re.compile(r"strix halo|ryzen ai max|\b80[56]0s\b", re.IGNORECASE)
+
+
+def _is_nvidia_unified_name(name: str) -> bool:
+    return bool(_NVIDIA_UNIFIED_RE.search(name or ""))
+
+
+def _is_discrete_nvidia_name(name: str) -> bool:
+    return bool(_DISCRETE_NVIDIA_RE.search(name or ""))
+
+
+def _is_steam_deck_gpu(gpu: GPUInfo) -> bool:
+    return bool(_STEAM_DECK_GPU_RE.search(gpu.name or ""))
+
+
+def gpu_shares_system_ram(gpu: GPUInfo) -> bool:
+    """True when this GPU's budget is a slice of system RAM, not its own VRAM.
+
+    Steam Deck is excluded: its reported carve-out is not a graphics budget,
+    and the story stays on the CPU. A discrete card beside an iGPU is not
+    shared just because the iGPU is.
+    """
+    if gpu.vendor == "apple" or gpu.unified_pool:
+        return True
+    if _is_steam_deck_gpu(gpu):
+        return False
+    if gpu.vendor == "nvidia":
+        return _is_nvidia_unified_name(gpu.name)
+    if _STRIX_HALO_RE.search(gpu.name or ""):
+        return True
+    return _is_integrated(gpu)
+
+
+def _nvidia_memory_is_the_system_pool(gpu: GPUInfo, ram_gb: float, arch: str) -> bool:
+    """nvidia-smi named this chip, or handed us the whole RAM pool / nothing."""
+    if gpu.vendor != "nvidia":
+        return False
+    if _is_nvidia_unified_name(gpu.name):
+        return True
+    if arch != "arm64" or _is_discrete_nvidia_name(gpu.name):
+        return False
+    if gpu.vram_gb <= 0:
+        return True
+    return ram_gb > 0 and gpu.vram_gb >= 0.75 * ram_gb
+
+
+def unified_memory_share(ram_total_gb: float) -> float:
+    """Fraction of RAM a shared-memory GPU may use.
+
+    A recommendedMaxWorkingSetSize-style guess, not a live Metal query:
+    about 65% on an 8 GB machine, 70% through 48 GB (a 16 GB Mac stays at
+    11.2 GB), 75% from 64 GB, and about 80% from 128 GB up. The rest is the
+    operating system's and other apps' headroom. It is not the whole stick.
+    """
+    nice = _nice_gb(ram_total_gb)
+    if nice <= 8:
+        return 0.65
+    if nice < 64:
+        return 0.70
+    if nice < 128:
+        return 0.75
+    return 0.80
+
+
+def shared_memory_budget_gb(ram_total_gb: float, dedicated_gb: float, shared_gb: float) -> float:
+    """One GPU budget for a chip that borrows system RAM.
+
+    ``dedicated_gb`` is the BIOS carve-out. ``shared_gb`` is DXGI
+    SharedSystemMemory (0 when the probe did not report it). The carve-out
+    is part of RAM, not a second pool. When both numbers exist, the budget
+    is their sum capped at :func:`unified_memory_share` of RAM, so a 512 MB
+    carve-out is not the whole plan and the whole stick is not either. When
+    shared memory was not reported, the share of RAM is the budget: larger
+    than a tiny carve-out, smaller than all of RAM.
+    """
+    cap = max(0.0, float(ram_total_gb)) * unified_memory_share(ram_total_gb)
+    dedicated = max(0.0, float(dedicated_gb or 0))
+    shared = max(0.0, float(shared_gb or 0))
+    if shared > 0:
+        return round(min(dedicated + shared, cap), 1)
+    return round(cap, 1)
+
+
+def _apply_unified_budget(gpu: GPUInfo, budget_gb: float) -> None:
+    """Replace a carve-out or a whole-pool reading with one RAM share."""
+    reported = float(gpu.vram_gb or 0)
+    budget = max(0.0, float(budget_gb))
+    if gpu.vram_used_known and reported > 0 and gpu.vram_used_gb > 0:
+        gpu.vram_used_gb = min(budget, gpu.vram_used_gb * (budget / reported))
+    else:
+        gpu.vram_used_gb = 0.0
+        # The share is a plan, not a failed VRAM probe. Leaving "unknown"
+        # would keep another 2 GB spare on top of the headroom the share
+        # already left.
+        gpu.vram_used_known = True
+    gpu.vram_gb = budget
+    gpu.shared_gb = 0.0
+    gpu.unified_pool = True
+
+
+def _finalize_memory_pools(gpus: list[GPUInfo], ram_gb: float, arch: str, notes: list[str]) -> bool:
+    """Turn shared-memory GPUs into one RAM budget. True when that is this computer.
+
+    A discrete card beside an iGPU wins: the iGPU's carve-out is cleared so
+    it cannot outrank the card. Steam Deck stays cleared too. Everyone else
+    who shares RAM gets :func:`shared_memory_budget_gb` (or, for RTX Spark and
+    the same NVIDIA chips, the unified share even when nvidia-smi reported
+    the whole pool or nothing).
+    """
+    def _is_discrete(gpu: GPUInfo) -> bool:
+        if gpu.vendor == "apple" or _is_steam_deck_gpu(gpu):
+            return False
+        if _nvidia_memory_is_the_system_pool(gpu, ram_gb, arch) or gpu_shares_system_ram(gpu):
+            return False
+        # A named GeForce we could not size is still the discrete card. Planning
+        # the iGPU instead would hide it.
+        if gpu.vendor == "nvidia" and _is_discrete_nvidia_name(gpu.name):
+            return True
+        return gpu.vram_gb >= 1.0
+
+    if any(_is_discrete(gpu) for gpu in gpus):
+        for gpu in gpus:
+            if gpu.vendor != "nvidia" and gpu.vram_gb > 0 and (
+                gpu.vram_gb < 1.0 or _is_integrated(gpu) or _is_steam_deck_gpu(gpu)
+            ):
+                gpu.vram_gb = 0.0
+                gpu.shared_gb = 0.0
+        return False
+
+    promoted: list[GPUInfo] = []
+    for gpu in gpus:
+        if _is_steam_deck_gpu(gpu):
+            gpu.vram_gb = 0.0
+            gpu.shared_gb = 0.0
+            gpu.unified_pool = False
+            continue
+        if _nvidia_memory_is_the_system_pool(gpu, ram_gb, arch):
+            _apply_unified_budget(gpu, round(ram_gb * unified_memory_share(ram_gb), 1))
+            promoted.append(gpu)
+            continue
+        if gpu_shares_system_ram(gpu):
+            _apply_unified_budget(gpu, shared_memory_budget_gb(ram_gb, gpu.vram_gb, gpu.shared_gb))
+            promoted.append(gpu)
+            continue
+        if gpu.vendor != "nvidia" and 0 < gpu.vram_gb < 1.0:
+            gpu.vram_gb = 0.0
+    if promoted:
+        shown = ", ".join(f"{gpu.name} (~{gpu.vram_gb:.0f} GB)" for gpu in promoted)
+        notes.append(
+            "Graphics share system memory with the processor, so the model budget is a share of RAM "
+            f"({shown}), not video memory added on top of RAM."
+        )
+        return True
+    if not any(gpu.vram_gb > 0 for gpu in gpus) and any(gpu.vendor in ("amd", "intel", "unknown") for gpu in gpus):
+        notes.append("Built-in (integrated) graphics share system RAM, so we plan with the CPU and RAM.")
+    return False
+
+
 def _apple_gpu(cpu_name: str, ram_total_gb: float) -> GPUInfo:
     """Apple Silicon: the GPU can use most (not all) of the unified memory.
 
-    macOS lets the GPU "wire" roughly 70-75% of RAM by default, so that is
-    the budget we plan with.
+    macOS lets the GPU wire roughly 65-75% of RAM by default (a bit more on
+    a 128 GB Mac). That recommendedMaxWorkingSetSize-style share is the
+    budget, not the whole stick.
     """
-    share = 0.75 if _nice_gb(ram_total_gb) >= 64 else 0.70
+    share = unified_memory_share(ram_total_gb)
     chip = cpu_name if cpu_name.lower().startswith("apple") else "Apple Silicon"
-    return GPUInfo(name=f"{chip} GPU", vendor="apple", vram_gb=round(ram_total_gb * share, 1))
+    return GPUInfo(
+        name=f"{chip} GPU", vendor="apple", vram_gb=round(ram_total_gb * share, 1),
+        unified_pool=True,
+    )
 
 
 def _vulkan_loader_present(os_name: str) -> bool:
@@ -1019,14 +1264,28 @@ def has_vulkan(specs: SystemSpecs) -> bool:
 
 
 def uses_built_in_graphics(specs: SystemSpecs) -> bool:
-    """Will the engine's Vulkan build run on built-in graphics (no dedicated video memory)?
+    """Will the engine's Vulkan build run on built-in graphics (no separate video memory)?
 
-    True for an Intel Iris Xe / AMD APU PC where the built-in engine picks its
-    Vulkan build (always on Windows; on Linux when the Vulkan loader is there).
+    True for an Intel Iris Xe / AMD APU / Strix Halo PC where the engine picks
+    Vulkan (always on Windows; on Linux when the Vulkan loader is there).
+    A discrete card, or an NVIDIA unified chip on CUDA, is not "built-in".
     """
-    if any(g.vendor != "apple" and g.vram_gb > 0 for g in specs.gpus):
+    if any(g.vendor == "apple" for g in specs.gpus):
         return False
-    built_in = [g for g in specs.gpus if g.vendor in ("intel", "amd") and g.vram_gb <= 0]
+    if any(
+        g.vendor == "nvidia" and g.vram_gb > 0 and not g.unified_pool and not _is_nvidia_unified_name(g.name)
+        for g in specs.gpus
+    ):
+        return False
+    if any(
+        g.vram_gb > 0 and g.vendor in ("amd", "intel", "unknown") and not gpu_shares_system_ram(g)
+        for g in specs.gpus
+    ):
+        return False
+    built_in = [
+        g for g in specs.gpus
+        if g.vendor != "nvidia" and (gpu_shares_system_ram(g) or (g.vendor in ("intel", "amd") and g.vram_gb <= 0))
+    ]
     if not built_in or specs.gpu_offload is False:
         return False
     return specs.os_name == "Windows" or (specs.os_name == "Linux" and has_vulkan(specs))
@@ -1129,18 +1388,14 @@ def _detect(models_path: Optional[Path], benchmark: bool, notes: list[str]) -> S
         else:
             notes.append("On Intel Macs the game runs models on the CPU.")
     else:
-        nvidia, nvidia_status = _nvidia_gpus(notes)
+        nvidia, nvidia_status = _nvidia_gpus(notes, arch=arch)
         gpus.extend(nvidia)
         if os_name == "Linux":
             gpus.extend(_linux_gpus(nvidia, nvidia_status, notes))
         elif os_name == "Windows":
             gpus.extend(_windows_gpus(nvidia, notes))
-        for gpu in gpus:
-            if gpu.vendor != "nvidia" and gpu.vram_gb > 0 and (gpu.vram_gb < 1.0 or _is_integrated(gpu)):
-                gpu.vram_gb = 0.0  # a carve-out of system RAM, not dedicated video memory
-        has_dedicated = any(g.vram_gb > 0 for g in gpus)
-        if not has_dedicated and any(g.vendor in ("amd", "intel", "unknown") for g in gpus):
-            notes.append("Built-in (integrated) graphics share system RAM, so we plan with the CPU and RAM.")
+        if _finalize_memory_pools(gpus, ram_total, arch, notes):
+            unified = True
 
     if _vulkan_loader_present(os_name):
         flags.append("vulkan")
@@ -1224,6 +1479,8 @@ def describe_specs(specs: SystemSpecs) -> list[tuple[str, str]]:
         bits = [gpu.name]
         if gpu.vendor == "apple":
             bits.append(f"can use ~{gpu.vram_gb:.0f} GB of unified memory")
+        elif gpu.unified_pool:
+            bits.append(f"can use ~{gpu.vram_gb:.0f} GB of shared memory")
         elif gpu.vram_gb > 0:
             bits.append(f"{_fmt_gb(gpu.vram_gb)} video memory")
         else:
@@ -1237,7 +1494,7 @@ def describe_specs(specs: SystemSpecs) -> list[tuple[str, str]]:
     accel = []
     if any(g.vendor == "nvidia" and g.vram_gb > 0 for g in specs.gpus):
         accel.append("CUDA (NVIDIA)")
-    if specs.unified_memory:
+    if any(g.vendor == "apple" for g in specs.gpus):
         accel.append("Metal (Apple)")
     if has_vulkan(specs) and any(g.vendor != "apple" and g.vram_gb > 0 for g in specs.gpus):
         accel.append("Vulkan")
@@ -1328,6 +1585,20 @@ def friendly_summary(specs: SystemSpecs) -> str:
         text = (
             f"You're on a Mac with an {chip} chip and {ram} of unified memory — the graphics side can "
             f"borrow about {usable:.0f} GB of it, which is {verdict}"
+        )
+    elif specs.unified_memory and gpu is not None:
+        usable = gpu.vram_gb
+        if usable >= 40:
+            verdict = "serious muscle — even big models are on the table!"
+        elif usable >= 20:
+            verdict = "room for some genuinely clever mid-sized models!"
+        elif usable >= 10:
+            verdict = "great for small-to-mid-sized models!"
+        else:
+            verdict = "perfect for small, speedy models!"
+        text = (
+            f"You've got {ram} of memory shared by the processor and the {gpu.name}. "
+            f"The graphics side can use about {usable:.0f} GB of it — {verdict}"
         )
     elif gpu is not None:
         vram = gpu.vram_gb

@@ -21,6 +21,11 @@
 # archives' (download them from the release page and run `sha256sum` on them,
 # or copy the "sha256:" digests the release page shows), let CI build it, and
 # play a test build.
+#
+# b11485 also publishes arm64 engines, and those digests are pinned below:
+# Windows CUDA 13.4 + cudart, Vulkan, and CPU; Linux (ubuntu) CUDA 13.4 +
+# cudart, Vulkan, and CPU. There is no CUDA 12 arm64 build. An arm64 computer
+# uses these archives, never an x64 build under emulation.
 b11485
 2adedc3469288620cd3877d79a1001dd052e91a7546fac2a0227e08f7371ccdd  llama-b11485-bin-win-vulkan-x64.zip
 ac51218237b4e9fdd0525e7a6ef56ba10c450cab200398d848fee6e7dd81c917  llama-b11485-bin-win-cpu-x64.zip

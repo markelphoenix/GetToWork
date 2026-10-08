@@ -153,9 +153,14 @@ memory. There are three kinds that matter:
   second) but limited: 4 to 24 GB on typical cards.
 - **RAM** is your computer's main memory. There's usually more of it, but it's
   much *slower* (tens of GB per second).
-- **Unified memory** is how Apple Silicon Macs work: the CPU and GPU share one
-  pool of fast memory. macOS lets the GPU use most, not all, of it; the game
-  assumes about 70% (75% on Macs with 64 GB or more).
+- **Unified memory** is one pool shared by the CPU and the GPU: Apple Silicon,
+  NVIDIA RTX Spark / DGX Spark / GB300, and AMD Ryzen AI Max (Strix Halo) or
+  an Intel Arc iGPU with a BIOS carve-out. The game does not add "VRAM" on
+  top of RAM. On a Mac the GPU share follows a recommendedMaxWorkingSetSize-style
+  limit: about 65% on an 8 GB Mac, 70% up to 48 GB, 75% from 64 GB, and about
+  80% from 128 GB. The same share is the budget on the other unified chips
+  (a DXGI dedicated-plus-shared total is used when Windows reports both, and
+  it is still capped at that share).
 
 If a model doesn't fit in VRAM, llama.cpp can keep some layers on the graphics
 card and the rest in RAM: a **partial offload**. It works, but every token has
@@ -167,7 +172,7 @@ top of [`catalog.py`](../src/gettowork/catalog.py)):
 | Where it runs | Memory budget |
 |---------------|---------------|
 | `gpu` | Your video memory (cards of the same brand with 4 GB+ are added up) minus 0.8 GB, kept free for your desktop and other apps. |
-| `unified` | The share of a Mac's memory the GPU may use (see above). |
+| `unified` | The share of one memory pool the GPU may use (see above), not VRAM plus RAM. |
 | `partial` | Video memory minus 0.8 GB, plus RAM minus 2.5 GB. Chosen if the graphics card holds at least 40% of the model - or at least 15% when running it on the processor alone would fill your RAM, or any share when it only fits across both. |
 | `cpu` | Your RAM minus 2.5 GB, kept free for the operating system and other apps. |
 
@@ -631,7 +636,7 @@ best first. The CPU build always comes last because it always works:
 | Mac with an Intel chip | CPU |
 | Windows PC with NVIDIA | CUDA 13 (driver 580+) and/or CUDA 12 (driver 525+), then Vulkan, then CPU |
 | Windows PC with AMD or Intel graphics | Vulkan, then CPU |
-| Windows on ARM | CUDA 13 (with an NVIDIA GPU and driver 580+), then CPU |
+| Windows on ARM | CUDA 13 arm64 (NVIDIA GPU, driver 580+), then Vulkan arm64, then CPU arm64. No x64 build under emulation. |
 | Linux with NVIDIA | CUDA, then Vulkan (if the Vulkan loader is installed), then CPU |
 | Linux with AMD or Intel graphics | Vulkan (if the Vulkan loader is installed), then CPU |
 | Anything else | CPU |

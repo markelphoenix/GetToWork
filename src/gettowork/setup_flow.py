@@ -1512,7 +1512,20 @@ class _SetupFlow:
             return "llamacpp"
         return None
 
+    def _with_arm_note(self, title: str, lines: list[str], needs: bool) -> tuple[str, list[str], bool]:
+        """Append the Arm-engine line when this computer must not run an x64 build."""
+        if self.specs is None:
+            return title, lines, needs
+        note = runtime_install.arm64_build_note(self.specs)
+        if not note:
+            return title, lines, needs
+        return title, [*lines, f"[dim]{escape(note)}[/dim]"], needs
+
     def _engine_step(self, choice: _Choice) -> tuple[str, list[str], bool]:
+        """(title, lines, needs a download?) for the llama.cpp engine."""
+        return self._with_arm_note(*self._engine_step_body(choice))
+
+    def _engine_step_body(self, choice: _Choice) -> tuple[str, list[str], bool]:
         """(title, lines, needs a download?) for the llama.cpp engine."""
         title = "The llama.cpp engine - the program that runs the model"
         if choice.server_exe is not None and choice.server_exe.is_file():

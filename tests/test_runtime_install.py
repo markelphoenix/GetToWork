@@ -441,9 +441,9 @@ def plan_names(specs):
         (make_specs("Windows", "AMD64", [AMD]), ["vulkan", "cpu"]),
         (make_specs("Windows", "AMD64", [INTEL]), ["vulkan", "cpu"]),
         (make_specs("Windows", "AMD64", []), ["cpu"]),
-        (make_specs("Windows", "ARM64", [NVIDIA]), ["cuda-13", "cpu"]),
-        (make_specs("Windows", "ARM64", [NVIDIA], notes=["NVIDIA driver 572.16"]), ["cpu"]),
-        (make_specs("Windows", "ARM64", [AMD]), ["cpu"]),
+        (make_specs("Windows", "ARM64", [NVIDIA]), ["cuda-13", "vulkan", "cpu"]),
+        (make_specs("Windows", "ARM64", [NVIDIA], notes=["NVIDIA driver 572.16"]), ["vulkan", "cpu"]),
+        (make_specs("Windows", "ARM64", [AMD]), ["vulkan", "cpu"]),
         (make_specs("Windows", "AMD64", [PASCAL], notes=["NVIDIA driver 580.95"]), ["cuda-12", "vulkan", "cpu"]),
         (make_specs("Linux", "x86_64", [PASCAL], notes=["NVIDIA driver 580.95.05"]), ["cuda-12", "cpu"]),
         (make_specs("Linux", "x86_64", [TURING], notes=["NVIDIA driver 580.95.05"]), ["cuda-13", "cuda-12", "cpu"]),
@@ -462,6 +462,31 @@ def plan_names(specs):
 )
 def test_plan_variants(specs, expected):
     assert plan_names(specs) == expected
+
+
+def test_arm64_never_selects_an_x64_engine():
+    for os_name, arch in (("Windows", "ARM64"), ("Linux", "aarch64"), ("Darwin", "arm64")):
+        for variant in (CUDA13, CUDA12, VULKAN, CPU, METAL, ROCM):
+            chosen = select_assets(ALL_ASSETS, variant, os_name, arch)
+            for asset in chosen:
+                assert "x64" not in asset["name"].lower()
+                assert "amd64" not in asset["name"].lower()
+
+
+def test_arm64_menu_names_the_real_build_and_the_fallback():
+    spark = make_specs("Windows", "ARM64", [GPUInfo(name="NVIDIA RTX Spark", vendor="nvidia", vram_gb=22.4)])
+    assert ri.arm64_build_note(spark).startswith("Windows on Arm uses the arm64 CUDA build")
+    assert "not run under emulation" in ri.arm64_build_note(spark)
+    old = make_specs(
+        "Windows", "ARM64",
+        [GPUInfo(name="NVIDIA RTX Spark", vendor="nvidia", vram_gb=22.4, driver_version="572.16")],
+    )
+    note = ri.arm64_build_note(old)
+    assert "Vulkan arm64" in note and "driver 580" in note
+    linux = make_specs("Linux", "aarch64", [GPUInfo(name="NVIDIA GB10", vendor="nvidia", vram_gb=102.4)], flags=["vulkan"])
+    assert ri.arm64_build_note(linux).startswith("Linux on Arm uses the arm64 CUDA build")
+    assert ri.arm64_build_note(make_specs("Darwin", "arm64", [APPLE])) is None
+    assert ri.arm64_build_note(make_specs("Windows", "AMD64", [NVIDIA])) is None
 
 
 def test_plan_reads_gpu_driver_version_field():

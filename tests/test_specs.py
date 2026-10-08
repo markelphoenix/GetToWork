@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from gettowork import perf, specs
+from gettowork import catalog, perf, specs
 from gettowork.types import GPUInfo, SystemSpecs
 
 GIB = 1024**3
@@ -250,6 +250,106 @@ def test_multiple_nvidia_gpus_and_na_memory():
     assert gpus[0].driver_version == "580.65"
 
 
+def _assert_one_pool(found: SystemSpecs) -> None:
+    """The fit budget is the GPU's RAM share, not that share plus the RAM again."""
+    assert catalog._dedicated_vram_gb(found) == 0
+    placement, _need, budget, _off = catalog._place(found, 4.0)
+    assert placement == "unified"
+    assert budget == pytest.approx(perf.primary_gpu(found).vram_gb)
+    assert budget < found.ram_total_gb
+
+
+def test_rtx_spark_na_memory_is_kept_and_budgeted_as_one_pool(machine, tmp_path):
+    machine(
+        system="Windows", machine_name="ARM64", ram_gb=32, processor="ARMv8",
+        commands={"nvidia-smi": "NVIDIA RTX Spark, [N/A], [N/A], 580.95, 10.0\n", "powershell": "[]"},
+        cpuinfo=None,
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.arch == "arm64" and found.unified_memory is True
+    gpu = found.gpus[0]
+    assert gpu.vendor == "nvidia" and "Spark" in gpu.name
+    assert gpu.vram_gb == pytest.approx(22.4)  # 70% of 32 GB, not N/A and not 32+32
+    assert gpu.bandwidth_gbs == 301
+    assert gpu.driver_version == "580.95" and gpu.compute_capability == 10.0
+    assert perf.primary_gpu(found) is gpu
+    _assert_one_pool(found)
+
+
+def test_dgx_spark_whole_pool_reading_is_not_added_to_ram(machine, tmp_path):
+    # 131072 MiB is 128 GiB: nvidia-smi handed us the whole LPDDR pool.
+    machine(
+        system="Linux", machine_name="aarch64", ram_gb=128,
+        commands={"nvidia-smi": "NVIDIA GB10, 131072, 4096, 580.95, 10.0\n"},
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.arch == "arm64" and found.unified_memory is True
+    assert found.gpus[0].vram_gb == pytest.approx(102.4)  # 80% of 128, not 128 and not 128+128
+    assert found.gpus[0].bandwidth_gbs == 301
+    assert found.gpus[0].vram_used_gb == pytest.approx(102.4 * (4 / 128), rel=0.02)
+    _assert_one_pool(found)
+
+
+def test_gb300_matches_the_same_unified_budget(machine, tmp_path):
+    machine(
+        system="Linux", machine_name="aarch64", ram_gb=128,
+        commands={"nvidia-smi": "NVIDIA GB300, [N/A], 580.95\n"},
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is True
+    assert found.gpus[0].vram_gb == pytest.approx(102.4)
+    assert found.gpus[0].bandwidth_gbs == 301
+
+
+def test_strix_halo_carve_out_plus_shared_is_one_capped_pool(machine, monkeypatch, tmp_path):
+    machine(
+        system="Windows", machine_name="AMD64", ram_gb=128,
+        commands={"powershell": '[{"Name":"AMD Radeon 8060S Graphics","AdapterRAM":0}]'},
+        cpuinfo=None,
+    )
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {"AMD Radeon 8060S Graphics": (64.0, 32.0)})
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is True
+    assert found.arch == "x86_64"
+    # 64 + 32 = 96, under the 80% cap of 128 GB (102.4). Not 64, and not 64+128.
+    assert found.gpus[0].vram_gb == pytest.approx(96.0)
+    assert found.gpus[0].bandwidth_gbs == 256
+    _assert_one_pool(found)
+
+
+def test_lunar_lake_tiny_carve_out_uses_dedicated_plus_shared(machine, monkeypatch, tmp_path):
+    machine(
+        system="Windows", machine_name="AMD64", ram_gb=32,
+        commands={"powershell": '[{"Name":"Intel Arc 140V GPU","AdapterRAM":134217728}]'},
+        cpuinfo=None,
+    )
+    monkeypatch.setattr(specs, "_windows_dxgi_vram", lambda: {"Intel Arc 140V GPU": (0.125, 15.5)})
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is True
+    assert found.gpus[0].vram_gb == pytest.approx(15.6)  # 0.125 + 15.5, not 0.125 and not 32
+    assert found.gpus[0].bandwidth_gbs == 136
+    assert found.gpus[0].vram_gb < found.ram_total_gb
+    _assert_one_pool(found)
+
+
+def test_discrete_card_still_beats_a_shared_memory_chip(machine, tmp_path):
+    machine(
+        commands={
+            "nvidia-smi": "NVIDIA GeForce GTX 1650, 4096, 0, 550.54, 7.5\n",
+            "lspci": (
+                "00:02.0 VGA compatible controller: Intel Corporation Alder Lake-P GT2 [Iris Xe Graphics]\n"
+                "01:00.0 VGA compatible controller: NVIDIA Corporation TU117 [GeForce GTX 1650]\n"
+            ),
+        },
+        vulkan=True,
+    )
+    found = specs.detect_specs(tmp_path)
+    assert found.unified_memory is False
+    assert perf.primary_gpu(found).name.endswith("GTX 1650")
+    iris = next(gpu for gpu in found.gpus if gpu.vendor == "intel")
+    assert iris.vram_gb == 0.0
+
+
 def test_nvidia_smi_missing_but_card_present(machine, tmp_path):
     machine(commands={"lspci": LSPCI_NVIDIA_LAPTOP})
     s = specs.detect_specs(tmp_path)
@@ -267,8 +367,10 @@ def test_nvidia_smi_missing_and_no_nvidia_card_is_silent(machine, tmp_path):
     s = specs.detect_specs(tmp_path)
     assert all("nvidia" not in n.lower() for n in s.notes)
     assert [g.vendor for g in s.gpus] == ["intel"]
-    assert s.gpus[0].vram_gb == 0.0
-    assert any("integrated" in n.lower() for n in s.notes)
+    assert s.unified_memory is True
+    assert s.gpus[0].vram_gb == pytest.approx(11.2)  # a share of the 16 GB, not a 0 GB chip
+    assert s.gpus[0].vram_gb < s.ram_total_gb
+    assert any("share" in n.lower() for n in s.notes)
 
 
 def test_nvidia_smi_failing(machine, tmp_path):
@@ -435,12 +537,16 @@ def test_amd_gpu_vram_from_rocm_smi(machine, tmp_path):
 
 
 def test_amd_apu_carve_out_is_not_vram(machine, tmp_path):
+    """A 4 GB Phoenix carve-out is not a graphics card, and it is not the whole 16 GB either."""
     add_drm_card(tmp_path, 0, "0000:c4:00.0", "0x1002", 4 * GIB)
     machine(commands={"lspci": "c4:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Phoenix1 (rev c4)\n"})
     s = specs.detect_specs(tmp_path)
-    assert s.gpus[0].vram_gb == 0.0
     assert s.gpus[0].name == "AMD Phoenix1"
-    assert perf.primary_gpu(s) is None
+    assert s.unified_memory is True
+    assert s.gpus[0].vram_gb == pytest.approx(11.2)  # 70% of 16 GB, not the 4 GB carve-out
+    assert s.gpus[0].vram_gb < s.ram_total_gb
+    assert perf.primary_gpu(s) is s.gpus[0]
+    _assert_one_pool(s)
 
 
 def test_steam_deck_uma_is_shared_memory_not_vram(machine, tmp_path):
@@ -521,6 +627,18 @@ def test_big_macs_can_lend_more_memory_to_the_gpu(machine, tmp_path):
     s = specs.detect_specs(tmp_path)
     assert s.gpus[0].vram_gb == pytest.approx(48.0)  # 75 % of 64 GB
     assert s.gpus[0].bandwidth_gbs == 400
+
+
+def test_small_and_huge_macs_scale_the_gpu_share(machine, tmp_path):
+    machine(system="Darwin", machine_name="arm64", processor="arm", ram_gb=8, commands=apple_commands("Apple M1"))
+    small = specs.detect_specs(tmp_path)
+    assert small.gpus[0].vram_gb == pytest.approx(5.2)  # 65% of 8 GB, not all of it
+    assert small.gpus[0].bandwidth_gbs == 68
+    machine(system="Darwin", machine_name="arm64", processor="arm", ram_gb=128, commands=apple_commands("Apple M3 Ultra"))
+    huge = specs.detect_specs(tmp_path)
+    assert huge.gpus[0].vram_gb == pytest.approx(102.4)  # 80% of 128 GB
+    assert huge.gpus[0].bandwidth_gbs == 819
+    assert huge.gpus[0].vram_gb < huge.ram_total_gb
 
 
 def test_rosetta_is_seen_through(machine, tmp_path):
