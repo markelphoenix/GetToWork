@@ -5,7 +5,7 @@ Face Hub (https://huggingface.co) every few days:
 
 1. **Search.** One `list_models` call per trusted publisher (unsloth,
    bartowski, ggml-org, ...) plus one global search, each asking for the most
-   downloaded GGUF text-generation repos together with their metadata
+   downloaded GGUF repos (text-generation, image-text-to-text, or untagged)
    (GGUF header info, license, tags, downloads, gated flag).
 2. **Screen.** Drop anything that isn't a family-friendly, instruction-tuned
    chat model with a permissive license (`rejection_reason` explains each
@@ -169,10 +169,11 @@ class DiscoveryResult:
 # us matching inside longer words, or the old ARM repacks like "Q4_0_4_4".
 _QUANT_RE = re.compile(
     r"(?<![A-Z0-9])(UD-)?"
-    r"(IQ[1-4]_(?:XXS|XS|NL|S|M)|Q[2-8]_K(?:_(?:XL|L|M|S))?|Q[4-8]_[01]|TQ[12]_0|MXFP4(?:_MOE)?|BF16|FP16|F16|FP32|F32"
+    r"(IQ[1-4][-_]MIX|IQ[1-4]_(?:XXS|XS|NL|S|M)|Q[2-8]_K(?:_(?:XL|L|M|S))?|Q[4-8]_[01]|TQ[12]_0|MXFP4(?:_MOE)?|BF16|FP16|F16|FP32|F32"
     r"|Q[2-8](?=$|[-.]))"  # a bare "q4" / "q8", as in Microsoft's "Phi-3-mini-4k-instruct-q4.gguf"
     r"(?![A-Z0-9]|_\d)"
 )
+_IQ_MIX_RE = re.compile(r"IQ([1-4])[-_]MIX")
 _SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})$", re.IGNORECASE)  # "model-Q8_0-00001-of-00002"
 
 
@@ -182,12 +183,14 @@ def parse_quant(filename: str) -> Optional[str]:
     "Qwen3-4B-Q4_K_M.gguf" -> "Q4_K_M"; "Qwen3-4B-UD-Q4_K_XL.gguf" -> "UD-Q4_K_XL"
     (Unsloth's dynamic quants keep their own tag); "gpt-oss-20b-mxfp4.gguf" -> "MXFP4";
     "model-Q8_0-00001-of-00002.gguf" -> "Q8_0"; "Q4_K_M/model-00001-of-00003.gguf"
-    -> "Q4_K_M" (tag in the folder name). Vision projectors ("mmproj-*") and
-    non-GGUF files -> None.
+    -> "Q4_K_M" (tag in the folder name). Vision projectors ("mmproj-*"),
+    LoRA adapters (any path containing "lora"), and non-GGUF files -> None.
+    "model-IQ2-mix.gguf" -> "IQ2-MIX".
     """
     parts = filename.replace("\\", "/").split("/")
     base = parts[-1]
-    if not base.lower().endswith(".gguf") or "mmproj" in base.lower():
+    lowered = "/".join(parts).lower()
+    if not base.lower().endswith(".gguf") or "mmproj" in base.lower() or "lora" in lowered:
         return None
     stem = _SHARD_RE.sub("", base[: -len(".gguf")])
     # The tag is normally in the file name; big split models sometimes keep it
@@ -197,6 +200,9 @@ def parse_quant(filename: str) -> Optional[str]:
         if matches:
             last = matches[-1]  # the tag normally sits at the end of the name
             tag = {"FP16": "F16", "FP32": "F32", "MXFP4_MOE": "MXFP4"}.get(last.group(2), last.group(2))
+            mix = _IQ_MIX_RE.fullmatch(tag)
+            if mix:
+                tag = f"IQ{mix.group(1)}-MIX"
             return f"UD-{tag}" if last.group(1) else tag
     return None
 
@@ -752,7 +758,10 @@ def entry_from_hub(info: Any, files: list[tuple[str, int]], header: Optional[dic
     repo = str(_attr(info, "id", default=""))
     if "/" not in repo:
         return None
-    groups = {q: v for q, v in group_quant_files(files).items() if catalog.quant_bits(q) and v[1] > 0}
+    # Keep a label we have no bits row for (IQ2-MIX). Quality uses the byte
+    # size once the parameter count is known. LoRA and mmproj never arrive
+    # here: parse_quant already skipped them.
+    groups = {q: v for q, v in group_quant_files(files).items() if v[1] > 0}
     if not groups:
         return None
     params_b, active_b = _params(info, {q: size for q, (_, size) in groups.items()})
@@ -1100,19 +1109,53 @@ def repo_gguf_files(api: Any, repo_id: str) -> list[tuple[str, int]]:
     return [(str(path), _file_size(item)) for path, item in pairs if path and str(path).lower().endswith(".gguf")]
 
 
-def _search_hub(api: Any, author: Optional[str], limit: int) -> list[Any]:
-    """One `list_models` call: the most-downloaded GGUF text-generation repos (+ metadata)."""
-    kwargs: dict[str, Any] = dict(filter="gguf", pipeline_tag="text-generation", sort="downloads",
-                                  limit=limit, expand=list(EXPAND_FIELDS))
-    if author:
-        kwargs["author"] = author
+# GGUF repos the story search will look at. image-text-to-text and untagged
+# repos still hold text weights (Qwen3.8-27B is one of them). The caller
+# still skips mmproj files, and rejection_reason still drops specialists.
+ACCEPTED_GGUF_PIPELINES = ("text-generation", "image-text-to-text")
+
+
+def _pipeline_accepted(info: Any) -> bool:
+    """Text-generation, image-text-to-text, or no pipeline tag at all."""
+    tag = _attr(info, "pipeline_tag")
+    if tag is None or str(tag).strip() == "":
+        return True
+    return str(tag) in ACCEPTED_GGUF_PIPELINES
+
+
+def _list_models(api: Any, kwargs: dict[str, Any]) -> list[Any]:
+    limit = kwargs["limit"]
     try:
         return list(itertools.islice(api.list_models(**kwargs), limit))
     except TypeError:
         # Older huggingface_hub without `expand`: ask for the model card data instead.
-        kwargs.pop("expand")
-        kwargs["cardData"] = True
-        return list(itertools.islice(api.list_models(**kwargs), limit))
+        older = dict(kwargs)
+        older.pop("expand", None)
+        older["cardData"] = True
+        return list(itertools.islice(api.list_models(**older), limit))
+
+
+def _search_hub(api: Any, author: Optional[str], limit: int) -> list[Any]:
+    """The most-downloaded GGUF repos this game can narrate with.
+
+    One search per accepted pipeline, plus one with no pipeline tag so an
+    untagged GGUF repo is not invisible. Results are merged by repo id.
+    """
+    found: dict[str, Any] = {}
+    queries: list[dict[str, str]] = [{"pipeline_tag": tag} for tag in ACCEPTED_GGUF_PIPELINES]
+    queries.append({})
+    for extra in queries:
+        kwargs: dict[str, Any] = dict(filter="gguf", sort="downloads", limit=limit,
+                                      expand=list(EXPAND_FIELDS), **extra)
+        if author:
+            kwargs["author"] = author
+        for info in _list_models(api, kwargs):
+            if not _pipeline_accepted(info):
+                continue
+            repo = str(_attr(info, "id", default=""))
+            if repo:
+                found.setdefault(repo, info)
+    return list(found.values())
 
 
 _SKIPPED = object()  # marks a job we never ran because time was up
@@ -1246,7 +1289,7 @@ def _measure(api: Any, info: Any, header_fetcher: Optional[Callable[[str, str], 
     files = repo_gguf_files(api, repo)
     header: Optional[dict] = None
     if header_fetcher is not None and _needs_header(info):
-        groups = {q: v for q, v in group_quant_files(files).items() if catalog.quant_bits(q) and v[1] > 0}
+        groups = {q: v for q, v in group_quant_files(files).items() if v[1] > 0}
         if groups:
             first_file = groups[_default_quant(groups)][0][0]
             try:
@@ -1517,7 +1560,8 @@ Here's what the game does, in about one second of network time:
 
 1. **Search** the Hub's free public API for the most-downloaded GGUF chat
    models, from well-known publishers (unsloth, bartowski, ggml-org...) and
-   from everyone.
+   from everyone. A repo tagged image-text-to-text, or with no pipeline tag,
+   is included too; its vision projector file (`mmproj`) is not.
 2. **Read the labels.** Each GGUF file's header says how many parameters the
    model has, its architecture and how much text it can remember (context).
    We also read the *real* size of every quantization (Q4_K_M, Q8_0, ...).

@@ -187,6 +187,15 @@ def test_pick_skips_mmproj_and_non_gguf():
     assert pick_gguf_file([], "Q4_K_M") is None
 
 
+def test_pick_skips_a_lora_adapter_named_like_a_full_quant():
+    adapter = "lora/name-LoRA-r320-F16.gguf"
+    assert pick_gguf_file([adapter], "F16") is None
+    names = ["model-Q4_K_M.gguf", adapter, "weights/Name-LoRA-Q4_K_M.gguf"]
+    assert pick_gguf_file(names, "F16") != adapter
+    assert "lora" not in (pick_gguf_file(names, "F16") or "").lower()
+    assert pick_gguf_file(names, "Q4_K_M") == "model-Q4_K_M.gguf"
+
+
 def test_pick_split_model_returns_first_shard():
     assert pick_gguf_file(FILES, "Q6_K") == "Q6_K/Model-Q6_K-00001-of-00002.gguf"
 

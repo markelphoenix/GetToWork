@@ -94,6 +94,7 @@ EXPECTED_REPOS = {
     "ggml-org/gpt-oss-20b-GGUF",
     "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF",
     "unsloth/Qwen3-30B-A3B-GGUF",
+    "unsloth/Qwen3.8-27B-GGUF",
     "unsloth/Qwen3-32B-GGUF",
 }
 
@@ -208,7 +209,76 @@ def test_quant_quality_follows_the_preference_ladder():
     assert qualities == sorted(qualities, reverse=True)
     assert catalog.quant_quality("Q2_K") < catalog.quant_quality("IQ3_M")
     assert catalog.quant_quality("F16") == 1.0
-    assert 0 < catalog.quant_quality("MYSTERY") < 1
+    assert catalog.quant_quality("MYSTERY") == catalog.UNKNOWN_QUANT_QUALITY
+    assert catalog.quant_quality("MYSTERY") < catalog.quant_quality("Q2_K")
+    assert catalog.quant_quality("IQ2-MIX") == catalog.UNKNOWN_QUANT_QUALITY
+
+
+# Saluki's published file, not a catalog entry: 7,898,369,152 bytes, 26,895,998,464 params.
+SALUKI_BYTES = 7_898_369_152
+SALUKI_PARAMS = 26_895_998_464
+# ISTA-DASLab Qwen3.8-27B-GSQ-RCO IQ3_S.gguf. The name says IQ3_S; the bytes are ~3.5 bits.
+GSQ_IQ3_S_BYTES = 11_771_546_784
+GSQ_PARAMS = 26_895_998_464
+
+
+def test_file_size_beats_the_quant_label():
+    saluki_bits = catalog.measured_bits_per_weight(SALUKI_BYTES, SALUKI_PARAMS)
+    assert saluki_bits == pytest.approx(2.35, abs=0.01)
+    saluki_quality = catalog.quant_quality("IQ2-MIX", file_bytes=SALUKI_BYTES, params=SALUKI_PARAMS)
+    assert saluki_quality == catalog._quality_from_bits(saluki_bits)
+    assert saluki_quality < catalog.quant_quality("Q3_K_M")
+    assert catalog._quant_tier("IQ2-MIX", file_bytes=SALUKI_BYTES, params=SALUKI_PARAMS) == "last"
+    # No size: the unknown label is not scored like a normal 4-bit quant.
+    assert catalog.quant_quality("IQ2-MIX") < 0.9
+
+    gsq_bits = catalog.measured_bits_per_weight(GSQ_IQ3_S_BYTES, GSQ_PARAMS)
+    assert gsq_bits == pytest.approx(3.5, abs=0.02)
+    # The IQ3_S label alone is a last resort. The file's real density is the low rung.
+    assert catalog._quant_tier("IQ3_S") == "last"
+    assert catalog._quant_tier("IQ3_S", file_bytes=GSQ_IQ3_S_BYTES, params=GSQ_PARAMS) == "low"
+    labeled = catalog.quant_quality("IQ3_S")
+    measured = catalog.quant_quality("IQ3_S", file_bytes=GSQ_IQ3_S_BYTES, params=GSQ_PARAMS)
+    assert measured == catalog._quality_from_bits(gsq_bits)
+    assert measured != labeled
+
+
+def test_a_mislabeled_3_5_bit_file_is_not_forced_tight():
+    model = make_entry(
+        key="ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
+        hf_repo="ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
+        display_name="Qwen3.8 27B GSQ",
+        params_b=GSQ_PARAMS / 1e9,
+        quant="IQ3_S",
+        file_size_gb=GSQ_IQ3_S_BYTES / 1e9,
+        quant_options=(("IQ3_S", GSQ_IQ3_S_BYTES / 1e9),),
+        architecture="qwen35",
+    )
+    fit = catalog.evaluate_fit(RTX_4090, model)
+    assert fit.verdict in ("great", "ok")
+    assert fit.quant == "IQ3_S"
+    assert "heavily compressed" not in fit.reason
+
+
+def test_qwen38_27b_stays_behind_a_comfortable_32b_on_a_5090():
+    card = machine(64, 50, (gpu("NVIDIA GeForce RTX 5090", "nvidia", 32.0),), cores=16)
+    big = fit_for(card, "qwen3-32b")
+    newer = fit_for(card, "qwen3.8-27b")
+    assert newer.model.architecture == "qwen35"
+    assert newer.model.hf_repo == "unsloth/Qwen3.8-27B-GGUF"
+    assert big.placement == "gpu" and big.verdict in ("great", "ok")
+    assert newer.placement == "gpu" and newer.verdict in ("great", "ok")
+    assert catalog._quant_tier(big.quant) != "last"
+    assert catalog._quant_tier(newer.quant) != "last"
+    assert catalog.recommend(card).model.key == "qwen3-32b"
+    assert big.score > newer.score
+    # Both spill off a 12 GB card. The 27B spill scores higher than the 32B
+    # spill, and a smaller model that still fits on the card is the pick.
+    small = machine(64, 50, (gpu("NVIDIA GeForce RTX 3060", "nvidia", 12.0),))
+    fits = {fit.model.key: fit for fit in catalog.rank_models(small)}
+    assert fits["qwen3.8-27b"].placement == "partial"
+    assert fits["qwen3.8-27b"].score > fits["qwen3-32b"].score
+    assert catalog.recommend(small).model.key == "qwen3-14b"
 
 
 def test_quant_helpers_handle_unsloth_dynamic_tags():
@@ -832,8 +902,10 @@ def test_q8_0_beats_the_bigger_ud_q8_k_xl():
 
 
 def test_a_tiny_machine_gets_4_bits_at_a_shorter_context_not_2_bits():
+    # The small files are sized like their labels (~2.7 and ~1.6 bits). A
+    # larger file with a 2-bit name would be scored by its real density.
     qwen = _hub("unsloth/Qwen3-0.6B-GGUF", "Qwen3 0.6B", 0.6,
-                (("Q8_0", 0.64), ("UD-Q4_K_XL", 0.40), ("Q4_K_M", 0.40), ("UD-IQ2_M", 0.28), ("UD-IQ1_S", 0.22)),
+                (("Q8_0", 0.64), ("UD-Q4_K_XL", 0.40), ("Q4_K_M", 0.40), ("UD-IQ2_M", 0.20), ("UD-IQ1_S", 0.12)),
                 architecture="qwen3", native_context=32768)
     fit = catalog.evaluate_fit(CHROMEBOOK, qwen)
     assert fit.verdict != "no"

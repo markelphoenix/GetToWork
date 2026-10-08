@@ -353,11 +353,14 @@ Now you know the ingredients, here's the whole recipe, step by step.
 ### Step 1: find candidates on Hugging Face
 
 [`hf_discovery.py`](../src/gettowork/hf_discovery.py) asks the Hugging Face
-Hub's free public API for the most-downloaded GGUF text-generation models:
-one search for each trusted publisher (unsloth, bartowski, ggml-org,
-lmstudio-community, Qwen, microsoft, mistralai, HuggingFaceTB, ibm-granite,
-NousResearch) plus one search across everybody. Each result arrives with its
-GGUF header data, tags, license, download count and "gated" flag.
+Hub's free public API for the most-downloaded GGUF models. It searches
+text-generation, image-text-to-text, and repos with no pipeline tag, because
+several Qwen3.8 GGUF repos use one of the last two. Vision projector files
+(`mmproj`) are skipped. One search of each kind runs for each trusted
+publisher (unsloth, bartowski, ggml-org, lmstudio-community, Qwen, microsoft,
+mistralai, HuggingFaceTB, ibm-granite, NousResearch) plus the same three
+across everybody. Each result arrives with its GGUF header data, tags,
+license, download count and "gated" flag.
 
 Then `rejection_reason` screens every model, in plain English:
 

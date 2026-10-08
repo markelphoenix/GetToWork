@@ -353,8 +353,10 @@ def group_quant_files(files: list[tuple[str, int]]) -> dict[str, tuple[tuple[str
 DISCOVERY_EXPLAINER: str   # Markdown: what the Hub is, GGUF, how we filter, licenses, caching
 ```
 - Uses `huggingface_hub.HfApi` (injectable `api` for tests):
-  `list_models(filter="gguf", pipeline_tag="text-generation", author=<publisher>, sort="downloads", limit=…, expand=["gguf","cardData","tags","downloads","likes","lastModified","gated"])`
-  for each trusted publisher (plus one global `filter="gguf"` query), then
+  `list_models(filter="gguf", pipeline_tag="text-generation"|"image-text-to-text"|omitted, author=<publisher>, sort="downloads", limit=…, expand=["gguf","cardData","tags","downloads","likes","lastModified","gated","pipeline_tag"])`
+  for each trusted publisher (plus one global query), three searches each so an
+  image-text-to-text or untagged GGUF repo is not missed. `mmproj` files are
+  still skipped. Then
   `list_repo_tree(repo, recursive=True, expand=False)` or
   `model_info(repo, files_metadata=True)` for real file sizes of the top
   `max_candidates` after pre-filtering. `ModelInfo.gguf` gives

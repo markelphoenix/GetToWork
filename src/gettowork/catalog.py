@@ -160,18 +160,70 @@ def quant_bits(tag: Optional[str]) -> Optional[float]:
     return QUANT_BITS.get(_normalise_quant(tag))
 
 
-def quant_quality(tag: Optional[str]) -> float:
-    """Rough quality retained (0-1) by a quant: 0.995 for Q8_0, 0.96 for Q4_K_M, 0.90 for Q3_K_M..."""
+# An unrecognised label used to score 0.9, near Q3_K_M. That overrates a
+# 2-bit mix whose name we don't have a row for. Unknown labels stay at the
+# bottom of the ladder until the file size says otherwise.
+UNKNOWN_QUANT_QUALITY = 0.55
+_BIT_QUALITY = ((8.0, 0.995), (6.5, 0.99), (5.5, 0.98), (4.7, 0.96), (4.2, 0.95),
+                (3.8, 0.90), (3.4, 0.86), (2.9, 0.80), (2.2, 0.70))
+
+
+def measured_bits_per_weight(file_bytes: Optional[float], params: Optional[float]) -> Optional[float]:
+    """Bits per weight from the file itself: ``bytes × 8 ÷ parameter count``.
+
+    None when either number is missing. This is the average across every
+    tensor, including the few kept at higher precision, so it can disagree
+    with the name (a file called IQ3_S can really be 3.5 bits).
+    """
+    if file_bytes is None or params is None:
+        return None
+    try:
+        nbytes = float(file_bytes)
+        count = float(params)
+    except (TypeError, ValueError):
+        return None
+    if nbytes <= 0 or count <= 0:
+        return None
+    return nbytes * 8.0 / count
+
+
+def _measured_bits(tag: Optional[str], *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+                   file_bytes: Optional[float] = None, params: Optional[float] = None) -> Optional[float]:
+    """Measured bits when the size and the parameter count are both known."""
+    if file_bytes is not None and params is not None:
+        return measured_bits_per_weight(file_bytes, params)
+    if size_gb and params_b and size_gb > 0 and params_b > 0:
+        return measured_bits_per_weight(float(size_gb) * 1e9, float(params_b) * 1e9)
+    return None
+
+
+def _quality_from_bits(bits: float) -> float:
+    for min_bits, quality in _BIT_QUALITY:
+        if bits >= min_bits:
+            return quality
+    return UNKNOWN_QUANT_QUALITY
+
+
+def quant_quality(
+    tag: Optional[str], *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+    file_bytes: Optional[float] = None, params: Optional[float] = None,
+) -> float:
+    """Quality retained (0-1). Uses the file's real bits per weight when the
+    size and the parameter count are known, and the label only when they aren't.
+
+    An unknown label with no size scores ``UNKNOWN_QUANT_QUALITY``, not a
+    middling 0.9.
+    """
+    measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
+    if measured is not None:
+        return _quality_from_bits(measured)
     key = _normalise_quant(tag)
     if key in _QUANT_QUALITY:
         return _QUANT_QUALITY[key]
     bits = QUANT_BITS.get(key)
     if bits is None:
-        return 0.9  # unknown tag: assume a middling quant
-    for min_bits, quality in ((8, 0.995), (6.5, 0.99), (5.5, 0.98), (4.7, 0.96), (4.2, 0.95), (3.8, 0.90), (3.4, 0.86), (2.9, 0.80), (2.2, 0.70)):
-        if bits >= min_bits:
-            return quality
-    return 0.55
+        return UNKNOWN_QUANT_QUALITY
+    return _quality_from_bits(bits)
 
 
 def estimate_quant_size_gb(params_b: float, quant: Optional[str]) -> Optional[float]:
@@ -183,8 +235,28 @@ def estimate_quant_size_gb(params_b: float, quant: Optional[str]) -> Optional[fl
     return round(params_b * bits / 8 * 1.05, 2)
 
 
-def _quant_tier(tag: str) -> str:
-    """Sort quants into rungs of the ladder: high / standard / low / last / full."""
+def _quant_tier(
+    tag: str, *, size_gb: Optional[float] = None, params_b: Optional[float] = None,
+    file_bytes: Optional[float] = None, params: Optional[float] = None,
+) -> str:
+    """Sort quants into rungs of the ladder: high / standard / low / last / full.
+
+    When the file size and the parameter count are known, the rung follows
+    those bits, not the label. A file named IQ3_S that is really about 3.5
+    bits per weight is the low rung, not a last resort. Below 3.5 bits
+    (a 2.35-bit mix, for example) stays last resort.
+    """
+    measured = _measured_bits(tag, size_gb=size_gb, params_b=params_b, file_bytes=file_bytes, params=params)
+    if measured is not None:
+        if measured > 9:
+            return "full"
+        if measured >= 5.5:
+            return "high"
+        if measured >= 4.3:
+            return "standard"
+        if measured >= 3.5:
+            return "low"
+        return "last"
     bits = quant_bits(tag) or 4.8
     if bits > 9:
         return "full"  # F16/BF16/F32: twice the size of Q8_0 for no visible gain
@@ -295,6 +367,7 @@ _KV_SHAPES: tuple[tuple[str, tuple[int, int, int]], ...] = (
     (r"qwen3-4b", (36, 8, 128)),
     (r"qwen3-8b", (36, 8, 128)),
     (r"qwen3-14b", (40, 8, 128)),
+    (r"qwen3\.8-27b", (64, 4, 256)),  # Qwen3.8-27B text config: 64 layers, 4 KV heads, head dim 256
     (r"qwen3-32b", (64, 8, 128)),
     (r"qwen2\.5-0\.5b", (24, 2, 64)),
     (r"qwen2\.5-1\.5b", (28, 2, 128)),
@@ -486,6 +559,7 @@ class _Plan:
     disk_ok: bool
     on_disk: bool = False  # this exact version is already downloaded
     context: Optional[int] = None  # conversation memory planned for (None = the model's usual)
+    params_b: float = 0.0  # so quality can use the file's real bits per weight
 
 
 def _vram_contributors(specs: SystemSpecs) -> list:
@@ -672,7 +746,7 @@ def _plan(specs: SystemSpecs, model: ModelEntry, quant: str, size_gb: float, *,
     if placement != "none":
         tps = perf.estimate_tokens_per_s(specs, active_gb=active, placement=placement, offload_fraction=offload)
     return _Plan(quant, size_gb, kv, need, placement, budget, ratio, verdict, offload, active, tps, disk_ok,
-                 on_disk, context)
+                 on_disk, context, model.params_b)
 
 
 def _quant_options(model: ModelEntry) -> list[tuple[str, float]]:
@@ -697,9 +771,9 @@ def _best(plans: Iterable[_Plan], keep: Callable[[_Plan], bool] = lambda p: True
     candidates = [p for p in plans if keep(p)]
     if not candidates:
         return None
-    top = max(quant_quality(p.quant) for p in candidates)
-    tied = [p for p in candidates if quant_quality(p.quant) >= top - QUALITY_TIE - 1e-9]
-    return min(tied, key=lambda p: (p.size_gb, -quant_quality(p.quant)))
+    top = max(_plan_quality(p) for p in candidates)
+    tied = [p for p in candidates if _plan_quality(p) >= top - QUALITY_TIE - 1e-9]
+    return min(tied, key=lambda p: (p.size_gb, -_plan_quality(p)))
 
 
 def _pick_home(plans: list[_Plan], keep: Callable[[_Plan], bool] = lambda p: True) -> Optional[_Plan]:
@@ -715,13 +789,23 @@ def _pick_home(plans: list[_Plan], keep: Callable[[_Plan], bool] = lambda p: Tru
     chosen = _best(home, _comfortable) or _best(home)
     assert chosen is not None
     slower = [p for p in candidates if _PLACEMENT_RANK[p.placement] > top
-              and quant_quality(p.quant) >= quant_quality(chosen.quant) + PLACEMENT_QUALITY_MARGIN]
+              and _plan_quality(p) >= _plan_quality(chosen) + PLACEMENT_QUALITY_MARGIN]
     return _best(slower, _comfortable) or _best(slower) or chosen
 
 
-def _quant_allowed(model: ModelEntry, quant: str) -> bool:
+def _plan_quality(plan: _Plan) -> float:
+    return quant_quality(plan.quant, size_gb=plan.size_gb, params_b=plan.params_b)
+
+
+def _plan_tier(plan: _Plan) -> str:
+    return _quant_tier(plan.quant, size_gb=plan.size_gb, params_b=plan.params_b)
+
+
+def _quant_allowed(model: ModelEntry, quant: str, *, size_gb: Optional[float] = None) -> bool:
     """Is this quant ever worth suggesting for this model? (See MIN_QUANT_BITS.)"""
-    bits = quant_bits(quant)
+    bits = _measured_bits(quant, size_gb=size_gb, params_b=model.params_b)
+    if bits is None:
+        bits = quant_bits(quant)
     if bits is None:
         return True
     if bits < MIN_QUANT_BITS:
@@ -752,9 +836,9 @@ def _choose_plan(specs: SystemSpecs, model: ModelEntry, downloaded: Optional[Dow
             return False
 
     plans = [_plan(specs, model, q, s, on_disk=have(q), context=context) for q, s in _quant_options(model)
-             if not floor or _quant_allowed(model, q)]
+             if not floor or _quant_allowed(model, q, size_gb=s)]
     usable = [p for p in plans if p.verdict != "no"]  # fits in memory AND on disk
-    tier = {p.quant: _quant_tier(p.quant) for p in usable}
+    tier = {p.quant: _plan_tier(p) for p in usable}
     # 0. A version that's already downloaded (and isn't a last resort) wins:
     #    no new download, and no disk space needed.
     ready = [p for p in usable if p.on_disk and tier[p.quant] != "last"]
@@ -788,7 +872,7 @@ def _choose_plan(specs: SystemSpecs, model: ModelEntry, downloaded: Optional[Dow
     upgrade = _best(
         high,
         lambda p: _comfortable(p)
-        and quant_quality(p.quant) > quant_quality(base.quant)
+        and _plan_quality(p) > _plan_quality(base)
         and _PLACEMENT_RANK[p.placement] <= _PLACEMENT_RANK[base.placement]
         and (p.tokens_per_s or 0.0) >= max(UPGRADE_MIN_TOKENS_PER_S, 0.5 * base_speed),
     )
@@ -867,7 +951,10 @@ def _effective_params_b(model: ModelEntry) -> float:
 
 
 def _quality_points(model: ModelEntry, quant: Optional[str]) -> float:
-    return W_QUALITY * math.log2(1 + _effective_params_b(model)) * quant_quality(quant or model.quant)
+    chosen = quant or model.quant
+    size = next((s for q, s in _quant_options(model) if (q or "").upper() == (chosen or "").upper()), None)
+    return (W_QUALITY * math.log2(1 + _effective_params_b(model))
+            * quant_quality(chosen, size_gb=size, params_b=model.params_b))
 
 
 def _is_curated(model: ModelEntry) -> bool:
@@ -1026,7 +1113,7 @@ def _reason(specs: SystemSpecs, model: ModelEntry, plan: _Plan, verdict: str) ->
     if always_thinks(model):
         sentence += (", but it always thinks at length before it answers (it can't be asked not to), "
                      "so every turn takes several times longer")
-    elif _quant_tier(plan.quant) == "last":
+    elif _plan_tier(plan) == "last":
         sentence += ", but only a heavily compressed version fits, so the writing may be rough"
     elif verdict == "tight":
         sentence += "; it's a snug fit, so close other big apps first"
@@ -1081,12 +1168,12 @@ def evaluate_fit(specs: SystemSpecs, model: ModelEntry, *, downloaded: Optional[
             quant=model.quant or None, download_gb=None, est_tokens_per_s=None, score=-150.0,
         )
     plan = _choose_plan(specs, model, downloaded, floor=quant_floor)
-    if ((plan is None or _quant_tier(plan.quant) == "last")
+    if ((plan is None or _plan_tier(plan) == "last")
             and (model.context_tokens or 4096) > MIN_CONTEXT_TOKENS):
         # A shorter conversation memory beats a heavily compressed model: try it
-        # before settling for a last-resort (sub-3.7-bit) quant.
+        # before settling for a last-resort (sub-3.5-bit) quant.
         short = _choose_plan(specs, model, downloaded, context=MIN_CONTEXT_TOKENS, floor=quant_floor)
-        if short is not None and (plan is None or _quant_tier(short.quant) != "last"):
+        if short is not None and (plan is None or _plan_tier(short) != "last"):
             plan = short
     if plan is None:
         # Nothing fits: explain using the smallest version worth running.
@@ -1104,7 +1191,7 @@ def evaluate_fit(specs: SystemSpecs, model: ModelEntry, *, downloaded: Optional[
                      if (model.context_tokens or 4096) > MIN_CONTEXT_TOKENS else None)
         plan.verdict = "no"
     verdict = plan.verdict
-    if verdict != "no" and _quant_tier(plan.quant) == "last":
+    if verdict != "no" and _plan_tier(plan) == "last":
         verdict = "tight"  # only a heavily-compressed version fits
     tps = round(plan.tokens_per_s, 1) if plan.tokens_per_s is not None else None
     return FitResult(
@@ -1364,7 +1451,8 @@ def pick_shortlist(ranked: list[FitResult], n: int = 6) -> list[FitResult]:
         fast_pool = quicker or ([recommended] if is_quickest and recommended in fast_pool else [])
     first_addable(_fastest_order(fast_pool), "fastest")
     smartest = sorted(
-        (f for f in viable if _turn_tps(f) >= 5 and not _squeezed(f) and _quant_tier(f.quant or "") != "last"),
+        (f for f in viable if _turn_tps(f) >= 5 and not _squeezed(f)
+         and _quant_tier(f.quant or "", size_gb=f.download_gb, params_b=f.model.params_b) != "last"),
         key=lambda f: (_quality_points(f.model, f.quant), f.model.params_b),
         reverse=True,
     )
@@ -1504,7 +1592,8 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
             f"- A story turn (reading ~{TURN_PROMPT_TOKENS:,} tokens of prompt, writing ~{TURN_ANSWER_TOKENS}) "
             f"takes roughly **{turn:.0f} seconds**{note}."
         )
-    tier = "only" if len(_quant_options(model)) == 1 else _quant_tier(quant)
+    tier = "only" if len(_quant_options(model)) == 1 else _quant_tier(
+        quant, size_gb=fit.download_gb, params_b=model.params_b)
     if fit.verdict == "no":
         tier = "disk" if not plan.disk_ok else "none"
     why = {
@@ -1646,6 +1735,11 @@ MODEL_CATALOG: list[ModelEntry] = [
           "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF", "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
           "Apache-2.0", "A polished, imaginative writer for machines with plenty of memory.",
           (25.1, 19.3, 16.8, 14.3, 12.8, 11.5), architecture="llama", native_context=131072),
+    _seed("qwen3.8-27b", "Qwen3.8 27B", "Qwen3", 27.32, "unsloth/Qwen3.8-27B-GGUF", "Qwen/Qwen3.8-27B", "Apache-2.0",
+          "A strong 27B storyteller for a big graphics card, and it can show its thinking.",
+          (29.05, 21.98, 19.77, 16.46, 14.25), reasoning=True,
+          quants=("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "IQ4_XS"),
+          gguf_file="Qwen3.8-27B-UD-Q4_K_M.gguf", architecture="qwen35", native_context=262144),
     _seed("qwen3-30b-a3b", "Qwen3 30B-A3B (MoE)", "Qwen3", 30.5, "unsloth/Qwen3-30B-A3B-GGUF", "Qwen/Qwen3-30B-A3B",
           "Apache-2.0", "A big Mixture-of-Experts brain that only wakes ~3B parameters per word, so it's quick.",
           (32.5, 25.1, 21.7, 18.6, 16.4, 14.7), active_params_b=3.3, reasoning=True, architecture="qwen3moe",

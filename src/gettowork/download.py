@@ -96,15 +96,17 @@ def _by_location(files: list[str]) -> list[str]:
 def pick_gguf_file(filenames: list[str], quant: str) -> Optional[str]:
     """Pick the GGUF file for `quant` from a repo's file list (the first shard if split).
 
-    Case-insensitive. Only `.gguf` files; vision projectors (`mmproj`) are
-    skipped. Exact quant first ("UD-Q4_K_XL" also matches a plain "Q4_K_XL"
+    Case-insensitive. Only `.gguf` files; vision projectors (`mmproj`) and
+    LoRA adapters (any path containing ``lora``) are skipped. Exact quant
+    first ("UD-Q4_K_XL" also matches a plain "Q4_K_XL"
     and vice versa), then the fallback order Q4_K_M, Q4_K_S, Q5_K_M, Q4_0,
     IQ4_XS, Q6_K, Q8_0, MXFP4, then anything (nearest ~4.8 bits). Files at the
     repo root win over sub-folders. None if the repo has no usable GGUF.
     """
     candidates = [
         f for f in filenames
-        if f.lower().endswith(".gguf") and "mmproj" not in _basename(f).lower() and shard_info(f)[1] == 1
+        if (f.lower().endswith(".gguf") and "mmproj" not in _basename(f).lower()
+            and "lora" not in f.replace("\\", "/").lower() and shard_info(f)[1] == 1)
     ]
     if not candidates:
         return None
