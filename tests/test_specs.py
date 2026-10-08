@@ -401,6 +401,19 @@ def test_amd_apu_carve_out_is_not_vram(machine, tmp_path):
     assert perf.primary_gpu(s) is None
 
 
+def test_steam_deck_uma_is_shared_memory_not_vram(machine, tmp_path):
+    """The Deck reports a VRAM carve-out. It is the same 16 GB as the CPU, not a graphics card."""
+    add_drm_card(tmp_path, 0, "0000:04:00.0", "0x1002", 8 * GIB)
+    machine(commands={
+        "lspci": "04:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Custom GPU 0405 (rev ae)\n",
+    })
+    s = specs.detect_specs(tmp_path)
+    assert s.gpus[0].name == "AMD Custom GPU 0405"
+    assert s.gpus[0].vram_gb == 0.0
+    assert perf.primary_gpu(s) is None
+    assert any("integrated" in note.lower() or "share system RAM" in note for note in s.notes)
+
+
 def test_sysfs_only_when_lspci_missing(machine, tmp_path):
     add_drm_card(tmp_path, 1, "0000:0a:00.0", "0x1002", 8 * GIB)
     machine(commands={})

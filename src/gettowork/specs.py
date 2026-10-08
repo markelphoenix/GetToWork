@@ -883,6 +883,8 @@ def _windows_gpus(nvidia: list[GPUInfo], notes: list[str]) -> list[GPUInfo]:
 _AMD_APU_RE = re.compile(
     r"\b\d{3}m\b|radeon graphics|vega \d+\b|phoenix|rembrandt|renoir|cezanne|raphael|barcelo|lucienne"
     r"|picasso|raven|mendocino|hawk point|granite ridge|strix point|krackan|van gogh|dragon range"
+    # Steam Deck's APU (LCD "Aerith" / "Custom GPU 0405", OLED "Sephiroth") shares the 16 GB.
+    r"|aerith|sephiroth|steam deck|custom gpu 0405"
 )
 
 

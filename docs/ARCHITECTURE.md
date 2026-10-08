@@ -238,6 +238,10 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
   `disk_free_gb = -1.0` means "unknown" (the fit engine then skips the disk
   check); a found Vulkan loader is recorded as `"vulkan"` in `cpu_flags`
   (`specs.has_vulkan(specs)`); integrated GPUs are listed with `vram_gb=0`.
+  The fit engine's primary card is the discrete GPU with the most VRAM.
+  A built-in chip is skipped even when its shared memory is reported as
+  VRAM, which is what a laptop with both chips looks like. Steam Deck's
+  "Custom GPU 0405" is that kind of chip: the 16 GB is shared with the CPU.
 
 ### perf.py
 ```python

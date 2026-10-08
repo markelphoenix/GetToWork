@@ -1311,6 +1311,11 @@ def _pick_recommended(viable: list[FitResult]) -> Optional[FitResult]:
 
     tiers: list[Callable[[FitResult], bool]] = [
         lambda f: f.verdict in ("great", "ok") and settled(f) and tps(f) >= 8,
+        # A split the card does not mostly hold is not the first choice when a
+        # settled model is already quick. It still beats a settled model that
+        # has dropped to a slow crawl, which is what a 4 GB card looks like
+        # once another app is using part of it.
+        lambda f: f.verdict in ("great", "ok") and tps(f) >= 8,
         lambda f: f.verdict in ("great", "ok") and settled(f) and tps(f) >= 3,
         lambda f: tps(f) >= 3,
     ]
@@ -1983,7 +1988,13 @@ def _fit_decision_seconds(specs: Optional[SystemSpecs], fit: FitResult) -> float
 def _prefer_fast_card(
     pool: list[FitResult], fits: list[FitResult], specs: Optional[SystemSpecs],
 ) -> list[FitResult]:
-    """Swap a CPU pool for a much faster card-resident fit, when there is one."""
+    """Swap a CPU pool for a much faster fit that uses the graphics card.
+
+    A partial split counts. On a 32 GB card with a big story already loaded,
+    full Clef only fits in system RAM (~half a minute) while Clef-flash still
+    has most of its layers on the card (a couple of seconds). The CPU model
+    stays when the card is not at least ``REFEREE_CARD_SPEED_RATIO`` times quicker.
+    """
     best_home = min(_decision_home(fit) for fit in pool)
     if best_home < 2:
         return pool
@@ -1993,7 +2004,7 @@ def _prefer_fast_card(
     fast = []
     for fit in fits:
         seconds = _fit_decision_seconds(specs, fit)
-        if fit.verdict not in ("great", "ok", "tight") or _decision_home(fit) != 0:
+        if fit.verdict not in ("great", "ok", "tight") or _decision_home(fit) >= 2:
             continue
         if seconds > 0 and cpu_seconds >= REFEREE_CARD_SPEED_RATIO * seconds:
             fast.append(fit)
@@ -2009,10 +2020,18 @@ def _latency_clause(chosen: FitResult, fits: list[FitResult], specs: Optional[Sy
     ]
     if bigger_on_cpu and _decision_home(chosen) < 2:
         big = max(bigger_on_cpu, key=lambda fit: fit.model.params_b)
+        if chosen.placement == "partial":
+            share = chosen.gpu_share or 0.0
+            where = (
+                f"{chosen.model.display_name} keeps about {share:.0%} of its layers "
+                "on the graphics card and the rest in system RAM"
+            )
+        else:
+            where = f"{chosen.model.display_name} stays on the graphics card"
         return (
             f"{big.model.display_name} is larger, but it would run on the CPU "
             f"({format_decision_seconds(_fit_decision_seconds(specs, big))}). "
-            f"{chosen.model.display_name} stays on the graphics card "
+            f"{where} "
             f"({format_decision_seconds(_fit_decision_seconds(specs, chosen))}), "
             "so the referee call should come back sooner. "
             "That figure is an estimate for one forward pass, not a measured run on this computer."

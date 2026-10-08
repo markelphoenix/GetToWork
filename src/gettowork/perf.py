@@ -599,14 +599,24 @@ def layer_split_bandwidth(specs: SystemSpecs, demand_gb: float) -> Optional[tupl
 def primary_gpu(specs: SystemSpecs) -> Optional[GPUInfo]:
     """The GPU the game would use: the Apple GPU on unified-memory Macs, else
     the dedicated GPU with the most video memory (None if there isn't one, or
-    if the engine can't use graphics cards on this computer - ``gpu_offload``)."""
+    if the engine can't use graphics cards on this computer - ``gpu_offload``).
+
+    A laptop's built-in GPU is ignored even when Windows reports a large
+    shared-memory number for it. The discrete card is the one with its own
+    VRAM; planning on the integrated chip would ignore that card.
+    """
     if specs.gpu_offload is False:
         return None
     if specs.unified_memory:
         for gpu in specs.gpus:
             if gpu.vendor == "apple":
                 return gpu
-    dedicated = [g for g in specs.gpus if g.vendor != "apple" and g.vram_gb > 0]
+    from . import specs as hardware
+
+    dedicated = [
+        g for g in specs.gpus
+        if g.vendor != "apple" and g.vram_gb > 0 and not hardware._is_integrated(g)
+    ]
     return max(dedicated, key=lambda g: g.vram_gb, default=None)
 
 

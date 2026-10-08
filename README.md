@@ -250,7 +250,11 @@ automatic, explained in plain English, and reversible.
 
 1. **Hardware check (about a second).** Your operating system, CPU (and which
    speed-up instructions it has), RAM, graphics card(s) and video memory,
-   Apple Silicon unified memory, and free disk space. A 0.3-second memory
+   Apple Silicon unified memory, and free disk space. A laptop with both a
+   built-in chip and a separate graphics card is planned on the separate
+   card, even when Windows reports a large shared-memory number for the
+   built-in chip. Steam Deck's graphics chip shares its 16 GB with the
+   processor, so the plan uses that shared memory. A 0.3-second memory
    speed test measures how fast your RAM is. Nothing is sent anywhere.
 2. **Live Hugging Face search.** The game asks the free
    [Hugging Face Hub](https://huggingface.co) API for today's most popular
