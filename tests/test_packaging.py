@@ -906,7 +906,11 @@ def _smoke_env(tmp_path: Path, *, distribution_file: bool) -> tuple[Path, dict]:
     """A fake built game (engine + distribution.json, like assemble.py writes) and the smoke test's environment."""
     game = tmp_path / "GetToWork"
     engine = fake_engine(game / "engine")
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "GETTOWORK_HOME": str(tmp_path / "home")}
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "GETTOWORK_HOME": str(tmp_path / "home"),
+           # The smoke script starts a new Python, which does not get the test
+           # harness's Rich patches. A dumb terminal wraps this sentence, and
+           # colour codes would split it. Wide columns, no colour.
+           "COLUMNS": "200", "TERM": "xterm-256color", "NO_COLOR": "1"}
     for var in ("GETTOWORK_ENGINE_DIR", "GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "GETTOWORK_DISTRIBUTION"):
         env.pop(var, None)
     if distribution_file:

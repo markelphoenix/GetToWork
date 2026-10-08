@@ -7,10 +7,14 @@ import os
 
 import pytest
 
-# Rich treats TERM=dumb as a hard 80x25 and ignores COLUMNS, which wraps
-# assertions mid-sentence. An explicit Console(width=...) still wins. When
-# width was left unset, honor COLUMNS or use 200 columns.
-os.environ.setdefault("COLUMNS", "200")
+# This environment sets TERM=dumb, NO_COLOR, and FORCE_COLOR=0. Rich then
+# ignores an explicit width (80 columns, so assertion strings wrap) and drops
+# colour even when a test asked for it. Live updates also skip a dumb terminal,
+# so spinners never erase. Tests set COLUMNS and treat the terminal as capable.
+# A console that was given a width still uses that width.
+os.environ["COLUMNS"] = "200"
+os.environ.pop("NO_COLOR", None)
+os.environ.pop("FORCE_COLOR", None)
 
 
 def pytest_configure() -> None:
@@ -20,15 +24,28 @@ def pytest_configure() -> None:
     original = original_property.fget
 
     def size(self):
-        if self.is_dumb_terminal and self._width is None:
-            columns = os.environ.get("COLUMNS", "")
-            lines = os.environ.get("LINES", "")
-            width = int(columns) if columns.isdigit() else 200
-            height = int(lines) if lines.isdigit() else 50
+        # Rich returns 80x25 for a dumb terminal as soon as height is unset,
+        # even when width was passed in. Honor an explicit width. When width
+        # was left unset, use COLUMNS or 200.
+        if self.is_dumb_terminal and not (self._width is not None and self._height is not None):
+            if self._width is not None:
+                width = self._width
+            else:
+                columns = os.environ.get("COLUMNS", "")
+                width = int(columns) if columns.isdigit() else 200
+            if self._height is not None:
+                height = self._height
+            else:
+                lines = os.environ.get("LINES", "")
+                height = int(lines) if lines.isdigit() else 25
             return rich_console.ConsoleDimensions(width, height)
         return original(self)
 
+    def not_dumb(self) -> bool:
+        return False
+
     rich_console.Console.size = property(size, original_property.fset)
+    rich_console.Console.is_dumb_terminal = property(not_dumb)
 
 # The biggest file any test leaves behind today is well under 1 MB.
 MAX_TMP_PATH_BYTES = 64 * 1024**2
