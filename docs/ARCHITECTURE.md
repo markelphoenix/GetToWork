@@ -526,8 +526,10 @@ class LlamaServerBackend(LLMBackend):
     "-c", str(n_ctx), "--reasoning-format", "deepseek", "--no-webui", "-np", "1",
     "--fit", "on", "--fit-target", "819", "--fit-ctx", str(n_ctx)]`
     (819 MiB is `GPU_VRAM_RESERVE_GB` when nothing else is using the card;
-    a live launch adds in-use video memory and, on Windows, `WINDOWS_VRAM_MARGIN_GB`,
-    because CUDA's free figure ignored other programs. b11485's `--fit` default margin is
+    a live launch adds in-use video memory. A Clef launch also adds
+    `WINDOWS_VRAM_MARGIN_GB` on Windows, because that run used about 2.9 GB
+    more than the projection. Story launches do not. CUDA's free figure
+    ignored other programs. b11485's `--fit` default margin is
     1024 MiB and would spill layers the menu said fit. Context is only adjusted
     by `--fit` when `-c` is 0, which this launch never leaves. CPU variant:
     `--fit off`, `--device none`, `-ngl 0`). Free port chosen via a bound socket. stdout/stderr to a log

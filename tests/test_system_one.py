@@ -597,14 +597,24 @@ def test_in_use_memory_and_the_windows_margin_change_the_budget():
     linux_free = catalog._usable_vram_gb(linux)
     windows_free = catalog._usable_vram_gb(windows)
     assert linux_free == pytest.approx(32.0 - 6.0 - catalog.GPU_VRAM_RESERVE_GB)
-    assert windows_free == pytest.approx(linux_free - catalog.WINDOWS_VRAM_MARGIN_GB)
+    # Story budgets subtract memory already in use, not another 3 GB. That
+    # extra is the Clef projection margin, so a 6 GB Windows card still has
+    # the same free memory the store page was written against.
+    assert windows_free == pytest.approx(linux_free)
+    clef_budget = catalog._usable_vram_gb(
+        windows, extra_per_card_gb=catalog.WINDOWS_VRAM_MARGIN_GB,
+    )
+    assert clef_budget == pytest.approx(linux_free - catalog.WINDOWS_VRAM_MARGIN_GB)
     fit = catalog.evaluate_fit(windows, catalog.get_system_one("clef-flash"))
     assert "needs ~" in fit.reason and "of 32 GB" not in fit.reason
     assert catalog.fit_target_mib(None) == round(catalog.GPU_VRAM_RESERVE_GB * 1024)
-    assert catalog.fit_target_mib(windows) == round(
+    assert catalog.fit_target_mib(windows) == round((catalog.GPU_VRAM_RESERVE_GB + 6.0) * 1024)
+    assert catalog.fit_target_mib(windows, decision=True) == round(
         (catalog.GPU_VRAM_RESERVE_GB + catalog.WINDOWS_VRAM_MARGIN_GB + 6.0) * 1024
     )
-    assert catalog.fit_target_mib(linux) == round((catalog.GPU_VRAM_RESERVE_GB + 6.0) * 1024)
+    assert catalog.fit_target_mib(linux, decision=True) == round(
+        (catalog.GPU_VRAM_RESERVE_GB + 6.0) * 1024
+    )
 
 
 def test_local_clef_timeout_and_request_cannot_exceed_the_batch():

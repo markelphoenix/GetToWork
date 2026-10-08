@@ -515,33 +515,39 @@ def windows_vram_margin_gb(specs: SystemSpecs) -> float:
     return 0.0
 
 
-def _usable_vram_gb(specs: SystemSpecs) -> float:
+def _usable_vram_gb(specs: SystemSpecs, *, extra_per_card_gb: float = 0.0) -> float:
     """Video memory a model may use.
 
-    Each card keeps ``GPU_VRAM_RESERVE_GB`` free, plus ``WINDOWS_VRAM_MARGIN_GB``
-    on Windows, and loses whatever nvidia-smi or NVML already shows as in use.
+    Each card keeps ``GPU_VRAM_RESERVE_GB`` free and loses whatever nvidia-smi
+    or NVML already shows as in use. ``extra_per_card_gb`` is the Clef
+    projection margin on Windows (see ``windows_vram_margin_gb``). Story
+    models do not take that extra cut: it was measured on Clef, and taking it
+    from a 6 GB card would drop the story below the published 4B recommendation.
     The "needs ~X of Y GB" line uses this Y, so Y is free memory, not the
     card's total.
     """
-    reserve = GPU_VRAM_RESERVE_GB + windows_vram_margin_gb(specs)
+    reserve = GPU_VRAM_RESERVE_GB + max(0.0, extra_per_card_gb)
     return sum(
         max(0.0, g.vram_gb - _vram_in_use_gb(g) - reserve) for g in _vram_contributors(specs)
     )
 
 
-def fit_target_mib(specs: Optional[SystemSpecs] = None) -> int:
+def fit_target_mib(specs: Optional[SystemSpecs] = None, *, decision: bool = False) -> int:
     """MiB to pass as llama.cpp ``--fit-target``.
 
     With no specs this is the 819 MiB menu reserve, which is what the docs
     show. CUDA on the Windows test machine reported ~30,991 MiB free while
     nvidia-smi showed other programs using 1–6 GB, so a live launch adds that
-    in-use memory. Windows also adds ``WINDOWS_VRAM_MARGIN_GB`` because real
-    use ran about 2.9 GB over llama.cpp's projection.
+    in-use memory. A Clef launch (``decision=True``) also adds
+    ``WINDOWS_VRAM_MARGIN_GB`` on Windows, because that run used about 2.9 GB
+    more than llama.cpp projected. Story launches do not, so the engine margin
+    stays the one the story menu already counted.
     """
     kept = float(GPU_VRAM_RESERVE_GB)
     used = 0.0
     if specs is not None:
-        kept += windows_vram_margin_gb(specs)
+        if decision:
+            kept += windows_vram_margin_gb(specs)
         gpu = perf.primary_gpu(specs)
         if gpu is not None:
             used = _vram_in_use_gb(gpu)
@@ -558,6 +564,7 @@ def _ram_budget_gb(specs: SystemSpecs) -> float:
 
 def _place(
     specs: SystemSpecs, base_need_gb: float, *, compute_gb: float = GPU_COMPUTE_BUFFER_GB,
+    extra_vram_gb: float = 0.0,
 ) -> tuple[str, float, float, float]:
     """Decide where a model needing `base_need_gb` runs.
 
@@ -581,7 +588,7 @@ def _place(
             return "partial", gpu_need, ram_budget, gpu.vram_gb / gpu_need
         return "none", base_need_gb, max(ram_budget, gpu.vram_gb), 0.0
     elif gpu is not None:
-        vram_budget = _usable_vram_gb(specs)
+        vram_budget = _usable_vram_gb(specs, extra_per_card_gb=extra_vram_gb)
         if vram_budget > 0 and gpu_need <= vram_budget:
             return "gpu", gpu_need, vram_budget, 1.0
         share = vram_budget / gpu_need if vram_budget > 0 else 0.0
@@ -603,7 +610,7 @@ def _place(
     if gpu is not None and gpu.vendor == "apple":
         budgets.append(gpu.vram_gb)
     elif gpu is not None:
-        budgets.append(_usable_vram_gb(specs) + ram_budget)
+        budgets.append(_usable_vram_gb(specs, extra_per_card_gb=extra_vram_gb) + ram_budget)
     return "none", base_need_gb, max(budgets), 0.0
 
 
@@ -636,8 +643,12 @@ def _plan(specs: SystemSpecs, model: ModelEntry, quant: str, size_gb: float, *,
     """Where (quant, size) runs and how fast. `on_disk`: already downloaded (needs no disk space)."""
     kv = kv_cache_gb(model, context)
     base_need = (size_gb + kv) * GIB_PER_GB + OVERHEAD_GB  # in the computer's own (binary) units
-    compute = CLEF_COMPUTE_BUFFER_GB if is_decision_model(model) else GPU_COMPUTE_BUFFER_GB
-    placement, need, budget, offload = _place(specs, base_need, compute_gb=compute)
+    decision = is_decision_model(model)
+    compute = CLEF_COMPUTE_BUFFER_GB if decision else GPU_COMPUTE_BUFFER_GB
+    # The extra Windows margin is the Clef projection error (~2.9 GB), not a
+    # cut every story model takes.
+    extra = windows_vram_margin_gb(specs) if decision else 0.0
+    placement, need, budget, offload = _place(specs, base_need, compute_gb=compute, extra_vram_gb=extra)
     ratio = need / budget if budget > 0 else math.inf
     if placement == "partial" and _is_apple(specs):
         # A Mac's split runs past the GPU's share into the rest of the same RAM,
@@ -1444,7 +1455,7 @@ def explain_fit(specs: SystemSpecs, fit: FitResult) -> str:
                 )
                 + (
                     f", plus {windows_vram_margin_gb(specs):g} GB extra on Windows"
-                    if windows_vram_margin_gb(specs) > 0 else ""
+                    if is_decision_model(model) and windows_vram_margin_gb(specs) > 0 else ""
                 )
                 + ")"
             ),

@@ -312,7 +312,7 @@ def _start_process(
     api_key = "clef_local_" + secrets.token_hex(16)
     args = clef_server_args(
         exe, model_path, port=port, n_ctx=n_ctx, cpu_only=fit.placement == "cpu",
-        fit_target_mib=catalog.fit_target_mib(specs),
+        fit_target_mib=catalog.fit_target_mib(specs, decision=True),
     )
     log_dir = runtime_dir() / "logs"
     try:

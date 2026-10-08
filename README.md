@@ -478,9 +478,12 @@ Published context is **65,536** tokens. The game asks the server for **4,096**
 for a short referee call. Cloudflare has not published how much video memory
 a local run needs at the full window, and the GGUF header's 262,144-token
 figure is not used here (it was not verified for the decision head). The
-game's "fits / doesn't fit" line is its usual estimate: file size, plus a
-rule-of-thumb KV cache whose shape is **unverified** for architecture `clef`,
-plus engine overhead. It also subtracts the story model that is already loaded.
+game's "fits / doesn't fit" line is its usual estimate, with one change
+for Clef: a local run measured **0** for the context cache, so that part
+does not grow with the context window. The estimate is the file size, plus
+about 1.3 GB of compute buffer at the 4,096 batch, plus engine overhead.
+It also subtracts the story model that is already loaded, and video memory
+other programs are already using.
 
 The menu shows an estimated **seconds per decision**, from one forward pass.
 Clef does not write tokens, so that line is not a tokens/s chat speed. It is
@@ -497,10 +500,13 @@ partial GPU split waits 2 minutes. If that runs out, the message talks about
 hardware speed, not a slow connection to Jev.
 
 "Needs ~X of Y GB" uses video memory that is actually free: the card's total,
-minus what other programs are already using, minus 0.8 GB kept spare, and on
-Windows another 3 GB. The same margin is what `llama-server --fit-target`
-is told to leave free, because on Windows CUDA's own free-memory figure
-ignored programs `nvidia-smi` could see.
+minus what other programs are already using, minus 0.8 GB kept spare. On
+Windows the Clef line also keeps another 3 GB spare, because a measured run
+used about 2.9 GB more than the engine projected. Story models do not take
+that extra cut. `llama-server --fit-target` is told to leave the same spare
+memory free. A Clef launch on Windows includes the extra 3 GB. A story
+launch adds only the memory already in use, because on that machine CUDA's
+own free-memory figure ignored programs `nvidia-smi` could see.
 
 The text referee does not need the optional `mmproj` vision file. llama.cpp
 **b11371** (3 October 2026) is the first release whose notes say it can load
