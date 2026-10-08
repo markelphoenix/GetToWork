@@ -1943,11 +1943,161 @@ def test_the_engine_is_pinned_to_the_planned_cards(tmp_path):
     )
     assert lone is not None
     assert lone[0] == ["CUDA0"] and lone[1]["CUDA_VISIBLE_DEVICES"] == "1"
+    # The story filled the first of two identical cards. The referee is planned
+    # on the second, so the pin must not take the first listing row.
+    filled = GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=2.0)
+    free = GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0)
+    other = ls.device_launch_pin(
+        make_specs(gpus=[filled, free]),
+        [("CUDA0", "NVIDIA GeForce RTX 3060", 12288), ("CUDA1", "NVIDIA GeForce RTX 3060", 12288)],
+    )
+    assert other is not None
+    assert other[0] == ["CUDA0"] and other[1]["CUDA_VISIBLE_DEVICES"] == "1"
     ti = ls.device_launch_pin(
         make_specs(gpus=[GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0)]),
         [("CUDA0", "NVIDIA GeForce RTX 3060 Ti", 8192), ("CUDA1", "NVIDIA GeForce RTX 3060", 12288)],
     )
     assert ti is not None and ti[0] == ["CUDA0"] and ti[1]["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_clef_is_pinned_to_its_own_card(tmp_path, monkeypatch):
+    """Story on one card, Clef on the other; a built-in chip is left out."""
+    from gettowork import catalog, system_one
+
+    both = (
+        "Available devices:\n"
+        "  Vulkan0: NVIDIA GeForce RTX 4090 (24576 MiB, 23000 MiB free)\n"
+        "  Vulkan1: AMD Radeon RX 7800 XT (16384 MiB, 15000 MiB free)\n"
+    )
+    # Driver 470 is too old for the CUDA builds, so this machine starts on Vulkan,
+    # which is the build that can see both cards.
+    nvidia = GPUInfo(name="NVIDIA GeForce RTX 4090", vendor="nvidia", vram_gb=24.0, driver_version="470.00")
+    amd = GPUInfo(name="AMD Radeon RX 7800 XT", vendor="amd", vram_gb=16.0)
+    specs = make_specs(gpus=[nvidia, amd], flags=["vulkan"])
+    installer = FakeInstaller(tmp_path)
+    runner = DeviceRunner({"vulkan": both})
+    popen = FakePopen()
+    backend = make_backend(
+        tmp_path, popen=popen, specs=specs, installer=installer, runner=runner,
+    )
+    backend.prepare(make_ui())
+    story_args, story_env = popen.calls[0]
+    assert story_args[story_args.index("--device") + 1] == "Vulkan0"
+    assert story_env["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert "CUDA_VISIBLE_DEVICES" not in story_env["env"]
+    assert len(runner.list_envs) == 1
+
+    from gettowork.perf import primary_gpu
+
+    story = catalog.recommend(specs)
+    assert story is not None
+    story = dataclasses.replace(story, placement="gpu", est_memory_gb=21.0, download_gb=0.0)
+    reserved = catalog.reserve_for_loaded_model(specs, story)
+    assert reserved.gpus[0].vram_gb < 4
+    reserved_primary = primary_gpu(reserved)
+    assert reserved_primary is not None and "7800" in reserved_primary.name
+
+    probed = {"n": 0}
+
+    def refuse_probe(*args, **kwargs):
+        probed["n"] += 1
+        raise AssertionError("Clef probed devices again")
+
+    captured: dict = {}
+
+    def clef_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr(system_one, "_newest_clef_server", lambda: backend.server_exe)
+    monkeypatch.setattr(system_one.download, "download_gguf", lambda *a, **k: tmp_path / "clef.gguf")
+    monkeypatch.setattr(system_one, "_wait_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(system_one.atexit, "register", lambda fn: None)
+    monkeypatch.setattr(system_one.subprocess, "Popen", clef_popen)
+    fit = dataclasses.replace(
+        catalog.evaluate_fit(reserved, catalog.get_system_one("clef-flash")),
+        placement="gpu",
+    )
+    system_one.launch_local_clef(
+        make_ui(), fit.model, fit, engine_tag="b11485", specs=reserved, device_runner=refuse_probe,
+    )
+    assert probed["n"] == 0
+    clef_args = captured["args"]
+    assert clef_args[clef_args.index("--device") + 1] == "Vulkan1"
+    assert "CUDA_DEVICE_ORDER" not in captured["env"]
+    assert "CUDA_VISIBLE_DEVICES" not in captured["env"]
+    assert "--no-repack" in clef_args
+
+    mixed = (
+        "Available devices:\n"
+        "  Vulkan0: Intel(R) Iris(R) Xe Graphics (16384 MiB, 14000 MiB free)\n"
+        "  Vulkan1: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)\n"
+    )
+    intel = GPUInfo(name="Intel Iris Xe Graphics", vendor="intel", vram_gb=0.0)
+    discrete = GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0)
+    igpu_specs = make_specs(gpus=[intel, discrete], flags=["vulkan"])
+    exe = tmp_path / "clef-bin" / "llama-server"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_bytes(b"fake")
+    seen = {"n": 0}
+
+    def once(args, **kwargs):
+        seen["n"] += 1
+        assert args[1:] == ["--list-devices"]
+        assert kwargs["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+        assert "CUDA_VISIBLE_DEVICES" not in kwargs["env"]
+        return subprocess.CompletedProcess(args, 0, stdout=mixed.encode("utf-8"))
+
+    monkeypatch.setattr(system_one, "_newest_clef_server", lambda: exe)
+    captured.clear()
+    system_one.launch_local_clef(
+        make_ui(), fit.model, fit, engine_tag="b11485", specs=igpu_specs, device_runner=once,
+    )
+    assert seen["n"] == 1
+    igpu_args = captured["args"]
+    assert igpu_args[igpu_args.index("--device") + 1] == "Vulkan1"
+    assert captured["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert "CUDA_VISIBLE_DEVICES" not in captured["env"]
+    captured.clear()
+    system_one.launch_local_clef(
+        make_ui(), fit.model, fit, engine_tag="b11485", specs=igpu_specs, device_runner=once,
+    )
+    assert seen["n"] == 1  # the second launch reused the listing
+    assert captured["args"][captured["args"].index("--device") + 1] == "Vulkan1"
+
+    # Two identical NVIDIA cards. The story plan names both. Once the first card
+    # is full, the referee is planned on the second, and that launch hides the first.
+    cuda_listing = (
+        "Available devices:\n"
+        "  CUDA0: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)\n"
+        "  CUDA1: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)\n"
+    )
+    filled = GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=2.0)
+    free = GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0)
+    both_free = make_specs(gpus=[
+        GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0),
+        GPUInfo(name="NVIDIA GeForce RTX 3060", vendor="nvidia", vram_gb=12.0),
+    ])
+    story_pin = ls.device_launch_pin(both_free, ls.device_rows_from_listing(cuda_listing))
+    assert story_pin is not None and story_pin[0] == ["CUDA0", "CUDA1"]
+    assert story_pin[1]["CUDA_VISIBLE_DEVICES"] == "0,1"
+    cuda_exe = tmp_path / "cuda-bin" / "llama-server"
+    cuda_exe.parent.mkdir(parents=True, exist_ok=True)
+    cuda_exe.write_bytes(b"fake")
+
+    def cuda_probe(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout=cuda_listing.encode("utf-8"))
+
+    monkeypatch.setattr(system_one, "_newest_clef_server", lambda: cuda_exe)
+    captured.clear()
+    system_one.launch_local_clef(
+        make_ui(), fit.model, fit, engine_tag="b11485",
+        specs=make_specs(gpus=[filled, free]), device_runner=cuda_probe,
+    )
+    assert captured["args"][captured["args"].index("--device") + 1] == "CUDA0"
+    assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "1"
+    assert captured["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
 
 
 class DeviceRunner(FakeRunner):

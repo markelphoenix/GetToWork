@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import catalog, distribution, download, runtime_install
-from .backends.llamaserver import build_server_args, find_free_port, server_env
+from .backends.llamaserver import build_server_args, find_free_port, planned_device_pin, server_env
 from .config import runtime_dir
 from .jev import JevClient
 from .notices import LOCAL_RUN_NOTICES
@@ -276,22 +276,32 @@ def launch_local_clef(
     engine_tag: Optional[str],
     launcher: Optional[Launcher] = None,
     specs: Optional[SystemSpecs] = None,
+    device_runner: Optional[Callable] = None,
 ) -> Any:
     """Start a local Clef referee, or raise :class:`LocalClefUnavailable`.
 
-    ``launcher`` replaces the real process (tests). It is not called when the
-    engine is too old or unknown, and nothing is downloaded in that case.
+    ``specs`` is the machine the fit was planned on. Pass the specs from after
+    the story model's memory is reserved, so the process is pinned to that
+    card, which can be a different card from the story. ``launcher`` replaces
+    the real process (tests). It is not called when the engine is too old or
+    unknown, and nothing is downloaded in that case. ``device_runner`` replaces
+    the ``--list-devices`` probe when this build has not already listed devices.
     """
     status = clef_engine_status(engine_tag)
     if status != "ok":
         raise LocalClefUnavailable(engine_block_message(engine_tag, status))
     if launcher is not None:
         return launcher(entry, fit)
-    return _start_process(ui, entry, fit, specs=specs)
+    return _start_process(ui, entry, fit, specs=specs, device_runner=device_runner)
 
 
 def _start_process(
-    ui: UI, entry: ModelEntry, fit: FitResult, *, specs: Optional[SystemSpecs] = None,
+    ui: UI,
+    entry: ModelEntry,
+    fit: FitResult,
+    *,
+    specs: Optional[SystemSpecs] = None,
+    device_runner: Optional[Callable] = None,
 ) -> LocalClefReferee:
     exe = _newest_clef_server()
     if exe is None:
@@ -310,9 +320,18 @@ def _start_process(
     port = find_free_port()
     n_ctx = int(fit.context_tokens or entry.context_tokens or 4096)
     api_key = "clef_local_" + secrets.token_hex(16)
+    cpu_only = fit.placement == "cpu"
+    devices = None
+    device_env = None
+    # A CPU plan passes --device none. A GPU or split plan is pinned to the
+    # cards this fit was counted on, so --fit cannot spread onto the story
+    # card or a built-in chip.
+    if specs is not None and not cpu_only:
+        devices, device_env = planned_device_pin(exe, specs, device_runner)
     args = clef_server_args(
-        exe, model_path, port=port, n_ctx=n_ctx, cpu_only=fit.placement == "cpu",
+        exe, model_path, port=port, n_ctx=n_ctx, cpu_only=cpu_only,
         fit_target_mib=catalog.fit_target_mib(specs, decision=True),
+        devices=devices,
     )
     log_dir = runtime_dir() / "logs"
     try:
@@ -323,7 +342,7 @@ def _start_process(
     try:
         proc = subprocess.Popen(
             args,
-            env=server_env(exe, api_key=api_key),
+            env=server_env(exe, api_key=api_key, extra=device_env),
             cwd=str(Path(exe).resolve().parent),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
@@ -369,6 +388,7 @@ def clef_server_args(
     n_ctx: int,
     cpu_only: bool,
     fit_target_mib: Optional[int] = None,
+    devices: Optional[list[str]] = None,
 ) -> list[str]:
     """The llama-server command for a local Clef referee.
 
@@ -390,11 +410,16 @@ def clef_server_args(
     65,536 context instead made the compute buffer 26,519 MiB and pushed
     layers off the GPU until CUDA failed. 4,096 is enough for the request,
     and the request builder refuses to exceed it.
+
+    ``devices`` names the cards this referee was planned on, as
+    ``--list-devices`` prints them. Without that, ``--fit on`` can place
+    layers on every device the build sees, including the card the story
+    model is using or a built-in chip beside it.
     """
     batch = str(clef_batch_tokens(n_ctx))
     return build_server_args(
         exe, model_path, port=port, n_ctx=n_ctx, cpu_only=cpu_only,
-        fit_target_mib=fit_target_mib,
+        fit_target_mib=fit_target_mib, devices=devices,
     ) + ["--no-repack", "-b", batch, "-ub", batch]
 
 

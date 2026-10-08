@@ -661,16 +661,23 @@ def _device_row_score(gpu_name: str, row_name: str, gpu_mib: float, row_mib: Opt
     return score
 
 
-def match_planned_devices(gpus: list, rows: list[tuple[str, str, Optional[int]]]) -> list[tuple[str, str, Optional[int]]]:
+def match_planned_devices(
+    gpus: list,
+    rows: list[tuple[str, str, Optional[int]]],
+    positions: Optional[list[Optional[int]]] = None,
+) -> list[tuple[str, str, Optional[int]]]:
     """Listing rows for the planned cards, in plan order.
 
-    Identical cards take the first unused matching row, then the next. A
-    built-in chip whose name has no model tokens (for example "Radeon
-    Graphics") does not match a discrete card.
+    Identical cards take the first unused matching row, then the next, unless
+    ``positions`` says which detected card this is. Two cards with the same
+    name then keep their place in the device list, so the second card is not
+    given the first row. A built-in chip whose name has no model tokens (for
+    example "Radeon Graphics") does not match a discrete card.
     """
     chosen: list[tuple[str, str, Optional[int]]] = []
     used: set[int] = set()
-    for gpu in gpus:
+    for nth, gpu in enumerate(gpus):
+        prefer = positions[nth] if positions is not None and nth < len(positions) else None
         best_index = None
         best_score = 0.0
         vram_gb = float(getattr(gpu, "vram_gb", 0.0) or 0.0)
@@ -678,7 +685,10 @@ def match_planned_devices(gpus: list, rows: list[tuple[str, str, Optional[int]]]
             if index in used:
                 continue
             score = _device_row_score(getattr(gpu, "name", ""), row[1], vram_gb, row[2])
-            if score > best_score:
+            tied_for_this_card = (
+                score == best_score and score > 0 and prefer is not None and index == prefer
+            )
+            if score > best_score or tied_for_this_card:
                 best_score = score
                 best_index = index
         if best_index is None:
@@ -706,7 +716,10 @@ def device_launch_pin(specs, rows: Optional[list[tuple[str, str, Optional[int]]]
     planned = perf.pooled_gpus(specs)
     if not planned:
         return None
-    matched = match_planned_devices(planned, rows)
+    # Same object the pool returned, so two identical names stay on the row
+    # that lines up with that card in the detected list.
+    place = {id(gpu): index for index, gpu in enumerate(getattr(specs, "gpus", ()) or ())}
+    matched = match_planned_devices(planned, rows, [place.get(id(gpu)) for gpu in planned])
     if not matched:
         return None
     ids = [row[0] for row in matched]
@@ -722,6 +735,100 @@ def device_launch_pin(specs, rows: Optional[list[tuple[str, str, Optional[int]]]
     env["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in indexes)
     renamed = [f"CUDA{number}" for number in range(len(indexes))]
     return renamed, env
+
+
+# ``--list-devices`` text keyed by the engine file. The story launch fills it.
+# A Clef launch on that same file reuses it; a different build probes once.
+_DEVICE_LISTINGS: dict[str, str] = {}
+
+
+def remember_device_listing(exe: Path | str, text: str) -> None:
+    """Keep one successful ``--list-devices`` printout for this engine file."""
+    if text:
+        _DEVICE_LISTINGS[str(_absolute_exe(exe))] = text
+
+
+def cached_device_listing(exe: Path | str) -> Optional[str]:
+    """The listing already read for this engine file, or None."""
+    return _DEVICE_LISTINGS.get(str(_absolute_exe(exe)))
+
+
+def device_probe_env(exe: Path | str, specs) -> dict[str, str]:
+    """Environment for ``--list-devices``.
+
+    NVIDIA's CUDA order is pinned to PCI bus order so the indexes match
+    ``nvidia-smi``. ``CUDA_VISIBLE_DEVICES`` is removed: a value inherited
+    from the player would hide cards before they can be listed.
+    """
+    env = server_env(exe)
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    if specs is not None:
+        from .. import perf
+
+        gpu = perf.primary_gpu(specs)
+        if gpu is not None and gpu.vendor == "nvidia":
+            env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    return env
+
+
+def probe_device_listing(exe: Path | str, specs, runner) -> Optional[str]:
+    """Run ``llama-server --list-devices``. None when that probe does not answer.
+
+    Does not read the cache. A non-zero exit (an old build, a crash) is None
+    so the caller leaves the device choice to the engine.
+    """
+    if runner is None:
+        return None
+    exe_path = _absolute_exe(exe)
+    try:
+        with windows_system_dll_search():
+            result = runner(
+                [str(exe_path), "--list-devices"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=device_probe_env(exe_path, specs),
+                cwd=str(exe_path.parent),
+                timeout=ENGINE_CHECK_TIMEOUT_S,
+                **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
+            )
+    except Exception:
+        return None
+    if getattr(result, "returncode", 0):
+        return None
+    raw = getattr(result, "stdout", b"") or b""
+    return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+
+
+def listing_for_engine(exe: Path | str, specs, runner=None) -> Optional[str]:
+    """Device listing for ``exe``: the cached one, or one new probe.
+
+    ``runner`` defaults to ``subprocess.run``. Tests pass their own.
+    """
+    cached = cached_device_listing(exe)
+    if cached is not None:
+        return cached
+    text = probe_device_listing(exe, specs, runner if runner is not None else subprocess.run)
+    if text is not None:
+        remember_device_listing(exe, text)
+    return text
+
+
+def planned_device_pin(exe: Path | str, specs, runner=None) -> tuple[Optional[list[str]], Optional[dict[str, str]]]:
+    """``(--device`` names, environment) for the cards ``specs`` plans on.
+
+    ``specs`` is the machine the launch was planned against. For the referee
+    that is the machine after the story model's video memory is set aside, so
+    the pin can be a different card from the story. ``(None, None)`` when the
+    listing is missing or no row matches.
+    """
+    if specs is None:
+        return None, None
+    rows = device_rows_from_listing(listing_for_engine(exe, specs, runner) or "")
+    pin = device_launch_pin(specs, rows)
+    if pin is None:
+        return None, None
+    return pin
 
 
 def slow_load_message(placement: str) -> Optional[str]:
@@ -1465,40 +1572,16 @@ class LlamaServerBackend(LLMBackend):
         """The graphics devices ``llama-server --list-devices`` reports, or None if unknown."""
         if self._runner is None:
             return None
-        exe = _absolute_exe(exe)
-        try:
-            with windows_system_dll_search():
-                result = self._runner(
-                    [str(exe), "--list-devices"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, env=self._device_probe_env(exe), cwd=str(Path(exe).parent),
-                    timeout=ENGINE_CHECK_TIMEOUT_S,
-                    **({"creationflags": _CREATE_NO_WINDOW} if platform.system() == "Windows" else {}),
-                )
-        except Exception:
-            return None
-        if getattr(result, "returncode", 0):
+        text = probe_device_listing(exe, self.specs, self._runner)
+        if text is None:
             return None  # an old build that doesn't know the flag, or a crash: let the real start decide
-        raw = getattr(result, "stdout", b"") or b""
-        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         self._device_listing = text
+        remember_device_listing(exe, text)
         return gpu_devices_from_listing(text)
 
     def _device_probe_env(self, exe: Path) -> dict[str, str]:
-        """Environment for ``--list-devices``.
-
-        NVIDIA's CUDA order is pinned to PCI bus order so the indexes match
-        ``nvidia-smi``. ``CUDA_VISIBLE_DEVICES`` is removed: a value inherited
-        from the player would hide cards before they can be listed.
-        """
-        env = server_env(exe)
-        env.pop("CUDA_VISIBLE_DEVICES", None)
-        if self.specs is not None:
-            from .. import perf
-
-            gpu = perf.primary_gpu(self.specs)
-            if gpu is not None and gpu.vendor == "nvidia":
-                env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        return env
+        """Environment for ``--list-devices``. See :func:`device_probe_env`."""
+        return device_probe_env(exe, self.specs)
 
     def _planned_device_pin(self) -> tuple[Optional[list[str]], Optional[dict[str, str]]]:
         rows = device_rows_from_listing(self._device_listing or "")

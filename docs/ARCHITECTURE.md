@@ -248,6 +248,9 @@ def friendly_summary(specs: SystemSpecs) -> str                     # 1–2 warm
   When in-use video memory was not read, the fit keeps about 2 GiB spare
   instead of 0.8 GiB. The engine is started with `--device` set to the
   planned cards from `--list-devices`, so a built-in chip is not given layers.
+  The Clef process uses that listing when it is the same engine file, or
+  reads it once from its own build, and is pinned to the cards left in its
+  plan. That can be a different card from the story model.
 
 ### perf.py
 ```python

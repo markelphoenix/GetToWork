@@ -255,6 +255,8 @@ automatic, explained in plain English, and reversible.
    card, even when Windows reports a large shared-memory number for the
    built-in chip. The engine is then started on the card or cards that plan
    counted, so a built-in chip beside them is not given part of the model.
+   The referee is started the same way, on the card its own plan counted,
+   which can be a different card once the story model is loaded.
    Steam Deck's graphics chip shares its 16 GB with the
    processor, so the plan uses that shared memory. A 0.3-second memory
    speed test measures how fast your RAM is. Nothing is sent anywhere.

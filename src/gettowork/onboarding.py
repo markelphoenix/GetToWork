@@ -773,7 +773,7 @@ class _JevOnboarding:
         try:
             client = launch_local_clef(
                 ui, model, fit, engine_tag=self._engine_tag(), launcher=self.clef_launcher,
-                specs=self.specs,
+                specs=reserved,
             )
         except LocalClefUnavailable as exc:
             ui.warn(escape(str(exc)))
