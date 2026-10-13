@@ -1,4 +1,4 @@
-// SteamPipe app build: uploads all three depots of Get To Work in one go.
+// SteamPipe app build: uploads all three depots of GottaGottaGottaGo: To Work We Go in one go.
 //
 // Run it on macOS or Linux (not Windows), so the Linux and macOS programs keep
 // their "executable" permission and the Mac app keeps its symbolic links -
@@ -11,7 +11,7 @@
 "AppBuild"
 {
 	"AppID" "<APP_ID>"
-	"Desc" "Get To Work <VERSION>"
+	"Desc" "GottaGottaGottaGo: To Work We Go <VERSION>"
 	"ContentRoot" "../content/"
 	"BuildOutput" "../output/"
 	"Preview" "0"

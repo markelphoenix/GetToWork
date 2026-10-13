@@ -1,4 +1,4 @@
-// SteamPipe app build: uploads the Windows depot of Get To Work.
+// SteamPipe app build: uploads the Windows depot of GottaGottaGottaGo: To Work We Go.
 //
 // 1. Replace <APP_ID> and <DEPOT_ID_WIN> with the numbers from Steamworks
 //    (App Admin > SteamPipe > Depots) and <VERSION> with the game's version.
@@ -13,7 +13,7 @@
 "AppBuild"
 {
 	"AppID" "<APP_ID>"
-	"Desc" "Get To Work <VERSION> (Windows)"
+	"Desc" "GottaGottaGottaGo: To Work We Go <VERSION> (Windows)"
 	"ContentRoot" "../content/"
 	"BuildOutput" "../output/"
 	"Preview" "0"

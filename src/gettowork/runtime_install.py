@@ -58,7 +58,7 @@ from typing import Any, Mapping, Optional
 
 from rich.markup import escape
 
-from . import __version__, config, distribution
+from . import PROJECT_URL, SHORT_NAME, __version__, config, distribution
 from .tls import CERTIFICATE_HELP, https_context, is_certificate_error
 from .types import SystemSpecs
 from .ui import UI
@@ -136,12 +136,11 @@ INSTALL_MARKER = "install.json"
 # writing into the app would break its signature).
 BUNDLED_UNUSABLE_FILE = "bundled-unusable.json"
 ENGINE_MISSING_MESSAGE = (
-    "The game's built-in engine is missing. On Steam: right-click Get To Work → Properties → Installed Files → "
+    "The game's built-in engine is missing. On Steam: right-click GottaGottaGottaGo: To Work We Go → Properties → Installed Files → "
     "Verify integrity. Otherwise re-download the game."
 )
 SERVER_NAMES = ("llama-server", "llama-server.exe")
-PROJECT_URL = "https://github.com/markelphoenix/GetToWork"  # who is making these requests (User-Agent)
-USER_AGENT = f"GetToWork/{__version__} (+{PROJECT_URL})"
+USER_AGENT = f"{SHORT_NAME}/{__version__} (+{PROJECT_URL})"
 
 _CHUNK = 256 * 1024
 # Safety limits for unpacking: real llama.cpp archives are well under these.

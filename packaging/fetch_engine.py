@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch the official llama.cpp engine builds that ship inside the game (used by CI).
 
-A built copy of Get To Work (Steam, or the double-click test build) carries
+A built copy of GottaGottaGottaGo: To Work We Go (Steam, or the double-click test build) carries
 the llama.cpp engine in its ``engine`` folder, so players never download
 programs while they play - only the AI model, during the guided setup. This
 script puts those builds together::

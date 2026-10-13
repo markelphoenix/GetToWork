@@ -539,7 +539,7 @@ def _static_renderables():
     tree = Tree("root")
     tree.add("branch").add("leaf")
     return [
-        Panel("[bold magenta]GET TO WORK[/]\nA farcical race - [link=https://example.com]link[/link]",
+        Panel("[bold magenta]GottaGottaGottaGo[/]\nA farcical race - [link=https://example.com]link[/link]",
               title="Hi", border_style="magenta", padding=(1, 2)),
         table,
         Markdown("# Heading\n\nSome *emphasis* and `code`.\n\n* one\n* two\n\n> a quote\n\n```\nprint('x')\n```"),

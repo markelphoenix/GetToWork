@@ -397,7 +397,7 @@ def test_exported_json_and_markdown_contents(tmp_path):
     assert data["rounds"][1]["llm_calls"][0]["messages"][0]["content"] == "TASK: test"
 
     md = md_path.read_text(encoding="utf-8")
-    assert md.startswith("# Get To Work - game transcript")
+    assert md.startswith("# GottaGottaGottaGo: To Work We Go - game transcript")
     for heading in ("## Good morning!", "## Round 1", "## Round 2", "## The ending", "### Jev request", "### Jev response"):
         assert heading in md
     assert "intro thoughts" in md and "judge thoughts" in md
@@ -539,7 +539,7 @@ def test_real_game_then_review_and_export(tmp_path):
 def test_exported_transcripts_hide_the_home_folder(tmp_path, monkeypatch):
     fake_home = tmp_path / "home" / "alice"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
-    model_path = str(fake_home / "GetToWork" / "models" / "qwen3.gguf")
+    model_path = str(fake_home / "GottaGottaGottaGo" / "models" / "qwen3.gguf")
     result = llm_result("You overslept.")
     result.raw = {"model": model_path, "usage": {"prompt_tokens": 12}}
     summary = GameSummary(won=False, quit_early=True, progress=0, target=5, intro="You overslept.", ending="Bye.",

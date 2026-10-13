@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gettowork"
 dynamic = ["version"]  # read from src/gettowork/__init__.py: the one place to bump it
-description = "Get To Work: an edutainment text adventure that teaches local open-weight LLMs and the Jev typed-judgment API."
+description = "GottaGottaGottaGo: To Work We Go — an edutainment text adventure that teaches local open-weight LLMs and the Jev typed-judgment API."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

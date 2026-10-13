@@ -1,7 +1,7 @@
-"""Entry point of the windowed program, ``GetToWork`` - what Steam and a double-click start.
+"""Entry point of the windowed program, ``GottaGottaGottaGo`` - what Steam and a double-click start.
 
-PyInstaller turns this file into ``GetToWork`` (``GetToWork.exe`` on
-Windows, ``Get To Work.app`` on macOS), which opens the game's own window
+PyInstaller turns this file into ``GottaGottaGottaGo`` (``GottaGottaGottaGo.exe`` on
+Windows, ``GottaGottaGottaGo.app`` on macOS), which opens the game's own window
 (:func:`gettowork.launcher.gui_main`). ``pip install`` users get the same
 thing as the ``gettowork-gui`` command. The build recipe is
 ``packaging/gettowork.spec``.

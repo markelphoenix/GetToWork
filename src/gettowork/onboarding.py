@@ -14,7 +14,7 @@ Principles:
   sends over the internet (their plan, the challenge, a story summary) and to whom.
 
 Jev is a paid third-party API from TypeSafe AI with its own pricing and terms;
-Get To Work isn't affiliated with TypeSafe AI.
+GottaGottaGottaGo: To Work We Go isn't affiliated with TypeSafe AI.
 """
 
 from __future__ import annotations
@@ -238,7 +238,7 @@ class _JevOnboarding:
     def _how_to_turn_jev_on(self) -> str:
         if getattr(self.ui, "in_window", False):
             return ("To turn it on, choose 'Play with Jev on this time' when the game welcomes you back - or start "
-                    "it once with --jev (on Steam: right-click Get To Work > Properties > General > Launch Options).")
+                    "it once with --jev (on Steam: right-click GottaGottaGottaGo: To Work We Go > Properties > General > Launch Options).")
         return (f"To turn it on, choose jev ('Play with Jev on this time') when the game welcomes you back, or start "
                 f"the game with [bold]{command_name()} --jev[/bold].")
 

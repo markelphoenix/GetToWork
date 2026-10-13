@@ -105,8 +105,8 @@ def _candidates() -> list[Path]:
     exe = getattr(sys, "executable", "") or ""
     if exe:  # (empty in some embedded Pythons: never fall back to the current folder)
         here = Path(exe).parent
-        found.append(here / DISTRIBUTION_FILE)  # Windows / Linux: next to GetToWork(.exe)
-        found.append(here.parent / "Resources" / DISTRIBUTION_FILE)  # macOS: Get To Work.app/Contents/Resources
+        found.append(here / DISTRIBUTION_FILE)  # Windows / Linux: next to GottaGottaGottaGo(.exe)
+        found.append(here.parent / "Resources" / DISTRIBUTION_FILE)  # macOS: GottaGottaGottaGo.app/Contents/Resources
     bundle = getattr(sys, "_MEIPASS", None)  # PyInstaller's folder of bundled files (only in a built game)
     if bundle:
         found.append(Path(bundle) / DISTRIBUTION_FILE)

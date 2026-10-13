@@ -294,8 +294,8 @@ def test_transcripts_go_to_documents_when_there_is_such_a_folder(tmp_path, monke
     monkeypatch.setattr(app.Path, "home", classmethod(lambda cls: tmp_path))
     assert app.default_export_dir() == isolated_home / "transcripts"
     (tmp_path / "Documents").mkdir()
-    assert app.default_export_dir() == tmp_path / "Documents" / "Get To Work"
-    assert app._with_export_dir(["--mock"]) == ["--mock", "--export-dir", str(tmp_path / "Documents" / "Get To Work")]
+    assert app.default_export_dir() == tmp_path / "Documents" / "GottaGottaGottaGo"
+    assert app._with_export_dir(["--mock"]) == ["--mock", "--export-dir", str(tmp_path / "Documents" / "GottaGottaGottaGo")]
     assert app._with_export_dir(["--export-dir", "x"]) == ["--export-dir", "x"]
     assert app._with_export_dir(["--export-dir=x"]) == ["--export-dir=x"]
 
@@ -408,7 +408,7 @@ def test_no_window_and_no_terminal_exits_with_an_error(isolated_home, monkeypatc
     assert crash.exists()
     # Started by a double-click or from Steam there's no console: a message box says what happened.
     [(title, message)] = no_real_dialogs
-    assert title == "Get To Work"
+    assert title == "GottaGottaGottaGo: To Work We Go"
     assert "couldn't open its window (ImportError: No module named '_tkinter')" in message
     assert "Verify integrity of game files" in message and str(crash) in message
 
@@ -441,17 +441,17 @@ class _Ran:
 
 def test_error_dialog_on_windows_macos_and_linux(monkeypatch):
     ran = _Ran()
-    assert REAL_SHOW_ERROR_DIALOG("Get To Work", "It broke.", system="win32", runner=ran)
-    assert ran.calls == [["MessageBoxW", "Get To Work", "It broke."]]
+    assert REAL_SHOW_ERROR_DIALOG("GottaGottaGottaGo: To Work We Go", "It broke.", system="win32", runner=ran)
+    assert ran.calls == [["MessageBoxW", "GottaGottaGottaGo: To Work We Go", "It broke."]]
     ran = _Ran()
-    assert REAL_SHOW_ERROR_DIALOG("Get To Work", 'Say "hi" \\ bye', system="darwin", runner=ran)
+    assert REAL_SHOW_ERROR_DIALOG("GottaGottaGottaGo: To Work We Go", 'Say "hi" \\ bye', system="darwin", runner=ran)
     [call] = ran.calls
-    assert call[0] == "osascript" and call[-2:] == ["Get To Work", 'Say "hi" \\ bye']  # text as arguments, never code
+    assert call[0] == "osascript" and call[-2:] == ["GottaGottaGottaGo: To Work We Go", 'Say "hi" \\ bye']  # text as arguments, never code
     assert all('"hi"' not in part for part in call[:-2])
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}" if name in ("kdialog", "xmessage") else None)
     ran = _Ran()
-    assert REAL_SHOW_ERROR_DIALOG("Get To Work", "It broke.", system="linux", runner=ran, env={"DISPLAY": ":0"})
-    assert ran.calls == [["/usr/bin/kdialog", "--title", "Get To Work", "--error", "It broke."]]
+    assert REAL_SHOW_ERROR_DIALOG("GottaGottaGottaGo: To Work We Go", "It broke.", system="linux", runner=ran, env={"DISPLAY": ":0"})
+    assert ran.calls == [["/usr/bin/kdialog", "--title", "GottaGottaGottaGo: To Work We Go", "--error", "It broke."]]
 
 
 def test_error_dialog_needs_a_display_on_linux_and_never_raises(monkeypatch):
@@ -589,18 +589,18 @@ def test_the_window_shows_the_game_and_takes_answers(harness):
     got = {}
 
     def game(argv, ui):
-        ui.console.print("[bold magenta]GET TO WORK[/] - a farcical race")
+        ui.console.print("[bold magenta]GottaGottaGottaGo[/] - a farcical race")
         got["name"] = ui.ask("What's your name?")
         ui.say(f"Hello, {got['name']}!")
         got["can_hide"] = ui.can_hide_input()
         return 0
 
     h = harness(game)
-    assert h.root.title() == "Get To Work"
+    assert h.root.title() == "GottaGottaGottaGo: To Work We Go"
     prompt = h.wait_prompt("name")
     assert h.window.prompt_label.cget("text") == "What's your name?"
     assert h.window.entry.cget("show") == ""
-    assert "GET TO WORK - a farcical race" in h.widget_text()
+    assert "GottaGottaGottaGo - a farcical race" in h.widget_text()
     h.window.type_answer("Ada")
     h.pump(lambda: "Hello, Ada!" in h.transcript(), what="the reply")
     assert got == {"name": "Ada", "can_hide": True}

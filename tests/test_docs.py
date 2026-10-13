@@ -620,10 +620,10 @@ def test_readme_play_from_source_commands() -> None:
 
 def test_readme_windows_commands_work_in_powershell_and_command_prompt() -> None:
     """PowerShell (Windows Terminal's default) runs nothing from the current folder without .\\, and Command
-    Prompt reads "./" as a switch: the Windows forms must be .\\GetToWork.exe / .\\gettowork-cli.exe."""
+    Prompt reads "./" as a switch: the Windows forms must be .\\GottaGottaGottaGo.exe / .\\gettowork-cli.exe."""
     text = read(README)
-    assert "`.\\GetToWork.exe --jev`" in text and "`.\\gettowork-cli.exe --mock`" in text
-    assert "`GetToWork.exe --jev`" not in text
+    assert "`.\\GottaGottaGottaGo.exe --jev`" in text and "`.\\gettowork-cli.exe --mock`" in text
+    assert "`GottaGottaGottaGo.exe --jev`" not in text
     windows_lines = [line for line in text.splitlines() if "**Windows:**" in line and "`" in line]
     assert windows_lines and not any("`./" in line for line in windows_lines)
 
@@ -657,12 +657,12 @@ def test_readme_test_build_instructions_match_the_build() -> None:
     for os_key, arch in (("windows", "x64"), ("macos", "arm64"), ("linux", "x64")):
         name = assemble.archive_name(os_key, arch, "<version>")
         assert f"`{name}`" in section, name
-    assert "`GetToWork.exe`" in section and f"`{assemble.MAC_APP}`" in section and "`GetToWork`" in section
+    assert "`GottaGottaGottaGo.exe`" in section and f"`{assemble.MAC_APP}`" in section and "`GottaGottaGottaGo`" in section
     assert f"`{assemble.CLI_NAME}`" in section and f"`{assemble.CLI_NAME}.exe`" in section
     assert f"Contents/MacOS/{assemble.CLI_NAME}" in section
     assert "More info" in section and "Run anyway" in section  # Windows SmartScreen
     assert "Open Anyway" in section and "xattr -dr com.apple.quarantine" in section  # macOS Gatekeeper
-    assert "./GetToWork" in section  # Linux
+    assert "./GottaGottaGottaGo" in section  # Linux
 
 
 def _packaging_module(name: str):
@@ -692,8 +692,8 @@ def test_readme_window_controls_match_the_window() -> None:
     assert '"equal": +1' in source and '"minus": -1' in source and '"0": 0' in source
     assert "Ctrl + = / Ctrl + - / Ctrl + 0" in section and "F11" in section and "Escape" in section
     assert "Keyboard" in section and 'text="Keyboard"' in source
-    assert app.default_export_dir().name == "Get To Work" or not (Path.home() / "Documents").is_dir()
-    assert "`Documents/Get To Work`" in text
+    assert app.default_export_dir().name == "GottaGottaGottaGo" or not (Path.home() / "Documents").is_dir()
+    assert "`Documents/GottaGottaGottaGo`" in text
 
 
 def test_readme_troubleshooting_covers_the_window_and_steam_deck() -> None:
@@ -733,22 +733,29 @@ def test_readme_storage_locations_match_config(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("GETTOWORK_MODELS_DIR", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
+    fake_home = tmp_path / "home"
+    (fake_home / ".config").mkdir(parents=True)
+    (fake_home / "Library" / "Application Support").mkdir(parents=True)
+    monkeypatch.setattr(config.Path, "home", lambda *args: fake_home)
+
     monkeypatch.setattr(config.platform, "system", lambda: "Linux")
-    assert config.config_dir() == Path.home() / ".config" / "gettowork"
-    assert "`~/.config/gettowork`" in text and "`$XDG_CONFIG_HOME/gettowork`" in text
+    assert config.config_dir() == fake_home / ".config" / "gottagottagottago"
+    assert "`~/.config/gottagottagottago`" in text and "`$XDG_CONFIG_HOME/gottagottagottago`" in text
+    assert "older `gettowork` folder keeps being used" in text
 
     monkeypatch.setattr(config.platform, "system", lambda: "Darwin")
-    assert config.config_dir() == Path.home() / "Library" / "Application Support" / "GetToWork"
-    assert "`~/Library/Application Support/GetToWork`" in text
+    assert config.config_dir() == fake_home / "Library" / "Application Support" / "GottaGottaGottaGo"
+    assert "`~/Library/Application Support/GottaGottaGottaGo`" in text
+    assert "`~/Library/Application Support/GetToWork` keeps being used" in text
 
     monkeypatch.setattr(config.platform, "system", lambda: "Windows")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
-    assert config.config_dir() == tmp_path / "Local" / "GetToWork"  # big files stay out of the roaming profile
-    assert "`%LOCALAPPDATA%\\GetToWork`" in text
-    (tmp_path / "Roaming" / "GetToWork").mkdir(parents=True)  # made by an older version...
-    assert config.config_dir() == tmp_path / "Roaming" / "GetToWork"  # ...keeps being used
-    assert "`%APPDATA%\\GetToWork` keeps being used" in text
+    assert config.config_dir() == tmp_path / "Local" / "GottaGottaGottaGo"  # big files stay out of the roaming profile
+    assert "`%LOCALAPPDATA%\\GottaGottaGottaGo`" in text
+    (tmp_path / "Roaming" / "GottaGottaGottaGo").mkdir(parents=True)  # same-name roaming folder...
+    assert config.config_dir() == tmp_path / "Roaming" / "GottaGottaGottaGo"  # ...keeps being used
+    assert "`%APPDATA%\\GottaGottaGottaGo`" in text and "GetToWork" in text
 
     monkeypatch.setenv("GETTOWORK_HOME", str(tmp_path / "home"))
     assert config.models_dir() == tmp_path / "home" / "models"
@@ -1032,7 +1039,7 @@ def test_distribution_contract_matches_the_build() -> None:
     assert app.SelftestPlayer().max_answers == 120 and "after 120 answers" in flat_doc
     # Launch options agree with the Steam checklist.
     steam = read(STEAM_README)
-    for launch in ("GetToWork\\GetToWork.exe", "Get To Work.app", "GetToWork/GetToWork"):
+    for launch in ("GottaGottaGottaGo\\GottaGottaGottaGo.exe", "GottaGottaGottaGo.app", "GottaGottaGottaGo/GottaGottaGottaGo"):
         assert f"`{launch}`" in steam and f"`{launch}`" in doc, launch
 
 

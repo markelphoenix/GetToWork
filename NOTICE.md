@@ -1,10 +1,10 @@
 # Third-party notices
 
-Get To Work's own code is licensed under the [MIT License](LICENSE). It builds
+GottaGottaGottaGo: To Work We Go's own code is licensed under the [MIT License](LICENSE). It builds
 on, talks to, or downloads (at your request) the third-party software and
 services below, and each keeps its own license and terms.
 
-- **The source repository** contains only Get To Work's own code (plus the
+- **The source repository** contains only GottaGottaGottaGo: To Work We Go's own code (plus the
   window icon it draws itself). No third-party programs, engine binaries or
   model weights are committed to it; pip installs the Python packages from
   PyPI.
@@ -13,7 +13,7 @@ services below, and each keeps its own license and terms.
   [Inside the game builds](#inside-the-game-builds): Python, its libraries,
   Tcl/Tk, PyInstaller's start-up program and the llama.cpp engine. Every
   build ships their license texts in **`THIRD_PARTY_LICENSES.txt`** (next to
-  the game on Windows and Linux; in `Get To Work.app/Contents/Resources` on
+  the game on Windows and Linux; in `GottaGottaGottaGo.app/Contents/Resources` on
   macOS), made by `packaging/collect_licenses.py` from the exact packages in
   that build.
 - **Model weights** are never bundled: you download them from Hugging Face,
@@ -57,7 +57,7 @@ Besides the Python packages above, every game build contains:
 |-----------|---------|-------|--------|
 | **Python** (the interpreter and its standard library) | PSF-2.0, the Python Software Foundation License | Bundled by PyInstaller. | https://www.python.org |
 | **Tcl/Tk** (the toolkit behind the game's window, used through Python's `tkinter`) | Tcl/Tk license (BSD-style), copyright the Regents of the University of California, Sun Microsystems, Inc. and others | Free to use, copy and distribute for any purpose as long as the copyright notices are kept. | https://www.tcl-lang.org/software/tcltk/license.html |
-| **PyInstaller** bootloader (the small start-up program inside `GetToWork` and `gettowork-cli`) | GPL-2.0-or-later with the PyInstaller bootloader exception | The exception explicitly allows shipping the bootloader inside programs under any license, so distributing the built game - free on Steam or anywhere else - is fine, and Get To Work's own code stays MIT. | https://github.com/pyinstaller/pyinstaller |
+| **PyInstaller** bootloader (the small start-up program inside `GottaGottaGottaGo` and `gettowork-cli`) | GPL-2.0-or-later with the PyInstaller bootloader exception | The exception explicitly allows shipping the bootloader inside programs under any license, so distributing the built game - free on Steam or anywhere else - is fine, and GottaGottaGottaGo: To Work We Go's own code stays MIT. | https://github.com/pyinstaller/pyinstaller |
 | **llama.cpp** (`llama-server` and its libraries), official prebuilt release builds | MIT, copyright the ggml authors | **Bundled** in the game builds: Vulkan and CPU builds on Windows and Linux, the Metal build on macOS (Apple Silicon). Each build's license texts - llama.cpp's own and those of the code compiled into it: cpp-httplib (MIT), nlohmann/json (MIT), BoringSSL (Apache-2.0) in the Windows and macOS builds, and LLVM OpenMP (Apache-2.0 with LLVM exceptions, `libomp.dll`) on Windows - are taken from the official archive and from the texts llama.cpp embeds in its programs (or, when missing, fetched from the same release's source) into `engine/<build>/licenses/`, and included in `THIRD_PARTY_LICENSES.txt`. | https://github.com/ggml-org/llama.cpp/releases |
 | **OpenSSL 3** (`libssl.so.3`, `libcrypto.so.3`), Linux engine builds only | Apache-2.0, copyright the OpenSSL Project Authors | Copied from the build machine (Ubuntu 22.04) next to the bundled llama.cpp engine, which links it: Steam's Linux runtime has no OpenSSL 3. Its license text ships in `engine/<build>/licenses/LICENSE-OpenSSL` and `THIRD_PARTY_LICENSES.txt`. | https://www.openssl.org/source/license.html |
 | **Microsoft Visual C++ runtime** (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), Windows builds only | Microsoft Visual C++ Redistributable terms | Copied next to the bundled llama.cpp engine so it starts on a PC without the Visual C++ Redistributable; Microsoft allows applications to redistribute these files. | https://visualstudio.microsoft.com/license-terms/ |
@@ -108,13 +108,13 @@ Notes:
 | Service | Used for | Terms |
 |---------|----------|-------|
 | Hugging Face Hub | Searching for models and downloading model files | Hugging Face's terms of service, https://huggingface.co/terms-of-service, and each model's license |
-| GitHub | Hosting the (private) source repository and its test builds; for copies run from source, listing llama.cpp releases (`api.github.com`) and downloading the engine | GitHub's terms of service, https://docs.github.com/en/site-policy/github-terms/github-terms-of-service |
+| GitHub | Hosting the source repository and its test builds; for copies run from source, listing llama.cpp releases (`api.github.com`) and downloading the engine | GitHub's terms of service, https://docs.github.com/en/site-policy/github-terms/github-terms-of-service |
 | TypeSafe AI, Jev API (optional, paid) | Judging each round when you enable Jev | TypeSafe AI's own terms and pricing, https://typesafe.ai |
 | Steam (Valve) | Distributing the free game, when released there | The Steam Subscriber Agreement, https://store.steampowered.com/subscriber_agreement/ |
 
 ## Referenced, not bundled
 
-- **TypeSafe SDK** (`typesafe-sdk`, MIT License, by TypeSafe AI). Get To Work's
+- **TypeSafe SDK** (`typesafe-sdk`, MIT License, by TypeSafe AI). GottaGottaGottaGo: To Work We Go's
   `jev.py` is an independent client written with the Python standard library.
   It follows the public wire format (endpoints, JSON shapes, headers and error
   conventions) used by TypeSafe's official MIT-licensed SDK, so learners can
@@ -128,7 +128,7 @@ Notes:
 
 ## Not affiliated
 
-Get To Work is an independent project. It is **not affiliated with, endorsed
+GottaGottaGottaGo: To Work We Go is an independent project. It is **not affiliated with, endorsed
 by or sponsored by** TypeSafe AI, Hugging Face, ggml-org / the llama.cpp
 project, Ollama, Valve / Steam, the Python Software Foundation, the Tcl/Tk
 or PyInstaller projects, NVIDIA, AMD, Intel, Apple, Microsoft, GitHub, or any

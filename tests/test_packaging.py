@@ -82,22 +82,22 @@ def fake_dist(root: Path, os_key: str) -> Path:
     """A folder shaped like PyInstaller's output for `os_key` (tiny stand-in files)."""
     dist = root / "dist"
     if os_key == "macos":
-        contents = dist / "Get To Work.app" / "Contents"
+        contents = dist / "GottaGottaGottaGo.app" / "Contents"
         for sub in ("MacOS", "Resources", "Frameworks"):
             (contents / sub).mkdir(parents=True)
-        for name in ("GetToWork", "gettowork-cli"):
+        for name in ("GottaGottaGottaGo", "gettowork-cli"):
             (contents / "MacOS" / name).write_bytes(b"\xcf\xfa\xed\xfe fake program")
             (contents / "MacOS" / name).chmod(0o755)
         (contents / "Frameworks" / "libpython3.12.dylib").write_bytes(b"fake library")
         (contents / "Info.plist").write_text("<plist/>", encoding="utf-8")
         if POSIX:  # PyInstaller cross-links files between Frameworks and Resources
             os.symlink("../Frameworks/libpython3.12.dylib", contents / "Resources" / "libpython3.12.dylib")
-        (dist / "GetToWork").mkdir()  # PyInstaller's plain folder build, also made on macOS
+        (dist / "GottaGottaGottaGo").mkdir()  # PyInstaller's plain folder build, also made on macOS
     else:
-        folder = dist / "GetToWork"
+        folder = dist / "GottaGottaGottaGo"
         (folder / "_internal").mkdir(parents=True)
         ext = ".exe" if os_key == "windows" else ""
-        for name in ("GetToWork", "gettowork-cli"):
+        for name in ("GottaGottaGottaGo", "gettowork-cli"):
             (folder / f"{name}{ext}").write_bytes(b"fake program")
             (folder / f"{name}{ext}").chmod(0o755)
         (folder / "_internal" / "base_library.zip").write_bytes(b"PK fake")
@@ -107,7 +107,7 @@ def fake_dist(root: Path, os_key: str) -> Path:
 @pytest.fixture
 def licenses_file(tmp_path: Path) -> Path:
     path = tmp_path / "THIRD_PARTY_LICENSES.txt"
-    path.write_text("Third-party software in Get To Work\n", encoding="utf-8")
+    path.write_text("Third-party software in GottaGottaGottaGo: To Work We Go\n", encoding="utf-8")
     return path
 
 
@@ -212,7 +212,7 @@ def test_spec_builds_one_analysis_and_two_programs_in_one_folder(monkeypatch, tm
     assert (str(ICON), "gettowork/assets") in analysis.kwargs["datas"]
 
     gui, cli = built["exe"]
-    assert gui.kwargs["name"] == "GetToWork" and gui.kwargs["console"] is False
+    assert gui.kwargs["name"] == "GottaGottaGottaGo" and gui.kwargs["console"] is False
     assert cli.kwargs["name"] == "gettowork-cli" and cli.kwargs["console"] is True
     for exe in (gui, cli):
         assert exe.kwargs["exclude_binaries"] is True  # one-folder build
@@ -222,15 +222,15 @@ def test_spec_builds_one_analysis_and_two_programs_in_one_folder(monkeypatch, tm
     assert [name for name, *_ in cli.args[1]] == ["pyiboot01_bootstrap", "cli_entry"]
 
     collect = built["collect"]
-    assert collect.kwargs["name"] == "GetToWork"
+    assert collect.kwargs["name"] == "GottaGottaGottaGo"
     assert collect.args[0] is gui and collect.args[1] is cli  # the GUI first: the Mac app's main program
     assert ("bundle" in built) == (platform == "darwin")
 
 
 def test_spec_makes_a_mac_app_with_the_right_details(monkeypatch, tmp_path) -> None:
     bundle = run_spec(monkeypatch, tmp_path, "darwin")["bundle"]
-    assert bundle.kwargs["name"] == "Get To Work.app"
-    assert bundle.kwargs["bundle_identifier"] == "com.markelphoenix.gettowork"
+    assert bundle.kwargs["name"] == "GottaGottaGottaGo.app"
+    assert bundle.kwargs["bundle_identifier"] == "com.markelphoenix.gottagottagottago"
     assert bundle.kwargs["version"] == gettowork.__version__
     plist = bundle.kwargs["info_plist"]
     assert plist["NSHighResolutionCapable"] is True
@@ -240,6 +240,8 @@ def test_spec_makes_a_mac_app_with_the_right_details(monkeypatch, tmp_path) -> N
     assert plist["CFBundleShortVersionString"] == gettowork.__version__
     # The bundled llama.cpp engine is built for macOS 13.3 and later (see the spec's comment).
     assert plist["LSMinimumSystemVersion"] == "13.3"
+    assert plist["CFBundleName"] == gettowork.SHORT_NAME
+    assert plist["CFBundleDisplayName"] == gettowork.DISPLAY_NAME
     assert bundle.kwargs["icon"].endswith(".icns")
 
 
@@ -267,8 +269,10 @@ def test_spec_reads_the_version_from_the_package(monkeypatch, tmp_path) -> None:
 
 def test_spec_and_assemble_agree_on_names(monkeypatch, tmp_path) -> None:
     ns = run_spec(monkeypatch, tmp_path, "linux")["namespace"]
-    assert ns["GUI_NAME"] == assemble.GUI_NAME == assemble.APP_FOLDER
+    assert ns["GUI_NAME"] == assemble.GUI_NAME == assemble.APP_FOLDER == gettowork.SHORT_NAME
     assert ns["CLI_NAME"] == assemble.CLI_NAME
+    assert ns["APP_NAME"] == gettowork.SHORT_NAME
+    assert ns["DISPLAY_NAME"] == gettowork.DISPLAY_NAME
     assert f"{ns['APP_NAME']}.app" == assemble.MAC_APP
     # Windows and macOS ignore upper/lower case: the two programs need names that differ otherwise too.
     assert ns["GUI_NAME"].lower() != ns["CLI_NAME"].lower()
@@ -508,7 +512,7 @@ def test_collect_licenses_main_writes_the_file(tmp_path, capsys) -> None:
     engine = fake_engine(tmp_path / "engine")
     assert collect_licenses.main(["--engine-dir", str(engine), "--out", str(out)]) == 0
     text = out.read_text(encoding="utf-8")
-    assert text.startswith("Third-party software in Get To Work")
+    assert text.startswith("Third-party software in GottaGottaGottaGo: To Work We Go")
     assert "llama.cpp b9999" in text
     assert "Wrote" in capsys.readouterr().out
 
@@ -538,7 +542,7 @@ MAC_LIBS = ["Python", "libssl.3.dylib", "libcrypto.3.dylib", "libtcl8.6.dylib", 
 
 
 def test_collect_licenses_covers_every_native_library_a_linux_build_bundles(tmp_path) -> None:
-    app = _fake_app(tmp_path / "GetToWork", LINUX_LIBS)
+    app = _fake_app(tmp_path / "GottaGottaGottaGo", LINUX_LIBS)
     looked_up: list[str] = []
 
     def lookup(name):
@@ -559,15 +563,15 @@ def test_collect_licenses_covers_every_native_library_a_linux_build_bundles(tmp_
 
 
 @pytest.mark.parametrize("files, libs", [(WINDOWS_LIBS, "_internal"), (MAC_LIBS, "_internal"),
-                                         (MAC_LIBS, "Get To Work.app/Contents/Frameworks")])
+                                         (MAC_LIBS, "GottaGottaGottaGo.app/Contents/Frameworks")])
 def test_collect_licenses_knows_the_windows_and_mac_libraries(tmp_path, files, libs) -> None:
-    app = _fake_app(tmp_path / "GetToWork", files, libs)
+    app = _fake_app(tmp_path / "GottaGottaGottaGo", files, libs)
     _text, problems = collect_licenses.collect(app_dir=app, lookup=lambda name: None)
     assert problems == []
 
 
 def test_collect_licenses_refuses_gpl3_readline_and_unknown_libraries(tmp_path, capsys) -> None:
-    app = _fake_app(tmp_path / "GetToWork", ["libreadline.so.8", "libmystery.so.2", "libgdbm.so.6"])
+    app = _fake_app(tmp_path / "GottaGottaGottaGo", ["libreadline.so.8", "libmystery.so.2", "libgdbm.so.6"])
     _text, problems = collect_licenses.collect(app_dir=app, lookup=lambda name: None)
     assert any("libreadline.so.8" in p and "GPL-3.0" in p for p in problems)
     assert any("libgdbm.so.6" in p and "GPL-3.0" in p for p in problems)
@@ -654,21 +658,21 @@ def test_assemble_windows_and_linux_layout(tmp_path, licenses_file, os_key) -> N
     engine = fake_engine(tmp_path / "engine", exe="llama-server.exe" if os_key == "windows" else "llama-server")
     layout, archive = assemble.assemble(dist, engine, os_key, "x64", tmp_path / "out", licenses=licenses_file,
                                         built_from="abc123", host="linux", say=lambda _text: None)
-    folder = dist / "GetToWork"
+    folder = dist / "GottaGottaGottaGo"
     assert layout.app_dir == folder and layout.resources == folder and layout.readme_dir == folder
     ext = ".exe" if os_key == "windows" else ""
-    assert layout.gui == folder / f"GetToWork{ext}" and layout.cli == folder / f"gettowork-cli{ext}"
+    assert layout.gui == folder / f"GottaGottaGottaGo{ext}" and layout.cli == folder / f"gettowork-cli{ext}"
     for build in ("b9999-cpu", "b9999-vulkan"):
         assert (folder / "engine" / build / "install.json").is_file()
         assert (folder / "engine" / build / "licenses" / "LICENSE").is_file()
     assert (folder / "THIRD_PARTY_LICENSES.txt").read_text(encoding="utf-8") == licenses_file.read_text(encoding="utf-8")
-    assert "GetToWork" in (folder / "README.txt").read_text(encoding="utf-8")
+    assert "GottaGottaGottaGo" in (folder / "README.txt").read_text(encoding="utf-8")
 
     info = json.loads((folder / "distribution.json").read_text(encoding="utf-8"))
     assert info == {"schema": 1, "channel": "release", "engine_downloads": False, "engine_dir": "engine",
                     "llama_cpp_tag": "b9999", "app_version": gettowork.__version__, "built_from": "abc123"}
 
-    assert archive.name == f"GetToWork-{gettowork.__version__}-{os_key}-x64{'.zip' if os_key == 'windows' else '.tar.gz'}"
+    assert archive.name == f"GottaGottaGottaGo-{gettowork.__version__}-{os_key}-x64{'.zip' if os_key == 'windows' else '.tar.gz'}"
     if os_key == "windows":
         names = zip_names(archive)
     else:
@@ -676,12 +680,12 @@ def test_assemble_windows_and_linux_layout(tmp_path, licenses_file, os_key) -> N
             members = {m.name: m for m in tar.getmembers()}
         names = set(members)
         if POSIX:  # the programs stay executable
-            assert members["GetToWork/GetToWork"].mode & 0o111
-            assert members["GetToWork/engine/b9999-cpu/llama-server"].mode & 0o111
-            assert members["GetToWork/GetToWork"].uname == ""  # no builder's user name in the archive
-    for inside in (f"GetToWork/GetToWork{ext}", f"GetToWork/gettowork-cli{ext}", "GetToWork/distribution.json",
-                   "GetToWork/README.txt", "GetToWork/THIRD_PARTY_LICENSES.txt",
-                   "GetToWork/engine/b9999-vulkan/install.json", "GetToWork/_internal/base_library.zip"):
+            assert members["GottaGottaGottaGo/GottaGottaGottaGo"].mode & 0o111
+            assert members["GottaGottaGottaGo/engine/b9999-cpu/llama-server"].mode & 0o111
+            assert members["GottaGottaGottaGo/GottaGottaGottaGo"].uname == ""  # no builder's user name in the archive
+    for inside in (f"GottaGottaGottaGo/GottaGottaGottaGo{ext}", f"GottaGottaGottaGo/gettowork-cli{ext}", "GottaGottaGottaGo/distribution.json",
+                   "GottaGottaGottaGo/README.txt", "GottaGottaGottaGo/THIRD_PARTY_LICENSES.txt",
+                   "GottaGottaGottaGo/engine/b9999-vulkan/install.json", "GottaGottaGottaGo/_internal/base_library.zip"):
         assert inside in names, inside
 
 
@@ -690,11 +694,11 @@ def test_assemble_macos_layout(tmp_path, licenses_file) -> None:
     engine = fake_engine(tmp_path / "engine", variants=("metal",))
     layout, archive = assemble.assemble(dist, engine, "macos", "arm64", tmp_path / "out", licenses=licenses_file,
                                         host="linux", say=lambda _text: None)
-    stage = dist / "macos-package" / "GetToWork"
-    app = stage / "Get To Work.app"
-    assert not (dist / "Get To Work.app").exists()  # moved next to its README
+    stage = dist / "macos-package" / "GottaGottaGottaGo"
+    app = stage / "GottaGottaGottaGo.app"
+    assert not (dist / "GottaGottaGottaGo.app").exists()  # moved next to its README
     assert layout.app_dir == app and layout.readme_dir == stage
-    assert layout.gui == app / "Contents" / "MacOS" / "GetToWork"
+    assert layout.gui == app / "Contents" / "MacOS" / "GottaGottaGottaGo"
     assert layout.cli == app / "Contents" / "MacOS" / "gettowork-cli"
     resources = app / "Contents" / "Resources"
     assert (resources / "engine" / "b9999-metal" / "install.json").is_file()
@@ -702,18 +706,18 @@ def test_assemble_macos_layout(tmp_path, licenses_file) -> None:
     assert (resources / "THIRD_PARTY_LICENSES.txt").is_file()
     assert (stage / "README.txt").is_file() and not (resources / "README.txt").exists()
 
-    assert archive.name == f"GetToWork-{gettowork.__version__}-macos-arm64.zip"
+    assert archive.name == f"GottaGottaGottaGo-{gettowork.__version__}-macos-arm64.zip"
     names = zip_names(archive)
-    for inside in ("GetToWork/README.txt", "GetToWork/Get To Work.app/Contents/MacOS/GetToWork",
-                   "GetToWork/Get To Work.app/Contents/Resources/distribution.json",
-                   "GetToWork/Get To Work.app/Contents/Resources/engine/b9999-metal/install.json"):
+    for inside in ("GottaGottaGottaGo/README.txt", "GottaGottaGottaGo/GottaGottaGottaGo.app/Contents/MacOS/GottaGottaGottaGo",
+                   "GottaGottaGottaGo/GottaGottaGottaGo.app/Contents/Resources/distribution.json",
+                   "GottaGottaGottaGo/GottaGottaGottaGo.app/Contents/Resources/engine/b9999-metal/install.json"):
         assert inside in names, inside
     if POSIX:  # the app's symbolic links survive as links
         with zipfile.ZipFile(archive) as z:
-            info = z.getinfo("GetToWork/Get To Work.app/Contents/Resources/libpython3.12.dylib")
+            info = z.getinfo("GottaGottaGottaGo/GottaGottaGottaGo.app/Contents/Resources/libpython3.12.dylib")
             assert stat.S_ISLNK(info.external_attr >> 16)
             assert z.read(info) == b"../Frameworks/libpython3.12.dylib"
-            assert (z.getinfo("GetToWork/Get To Work.app/Contents/MacOS/GetToWork").external_attr >> 16) & 0o111
+            assert (z.getinfo("GottaGottaGottaGo/GottaGottaGottaGo.app/Contents/MacOS/GottaGottaGottaGo").external_attr >> 16) & 0o111
 
 
 def test_assemble_on_a_mac_re_signs_the_app_and_zips_with_ditto(tmp_path, licenses_file, monkeypatch) -> None:
@@ -826,7 +830,7 @@ def test_readme_is_three_friendly_lines(os_key) -> None:
     text = assemble.readme_text(os_key, "1.2.3")
     lines = text.splitlines()
     assert len(lines) == 3 and all(lines)
-    assert "Get To Work 1.2.3" in lines[0] and "double-click" in lines[0]
+    assert "GottaGottaGottaGo: To Work We Go 1.2.3" in lines[0] and "double-click" in lines[0]
     expected = {"windows": ["Extract All", "extract the whole zip first", "More info", "Run anyway", "SmartScreen",
                             "Smart App Control", "0x11C7", "from Steam too"],
                 "macos": ["right-click", "Open", "xattr -dr com.apple.quarantine", "On Steam, just press Play"],
@@ -877,10 +881,10 @@ def test_main_prints_and_records_the_outputs(tmp_path, licenses_file, monkeypatc
     printed = capsys.readouterr().out
     recorded = dict(line.split("=", 1) for line in outputs.read_text(encoding="utf-8").splitlines())
     assert set(recorded) == {"archive", "app_dir", "gui", "cli", "engine"}
-    assert recorded["cli"] == (dist / "GetToWork" / "gettowork-cli").as_posix()
-    assert recorded["engine"] == (dist / "GetToWork" / "engine").as_posix()
+    assert recorded["cli"] == (dist / "GottaGottaGottaGo" / "gettowork-cli").as_posix()
+    assert recorded["engine"] == (dist / "GottaGottaGottaGo" / "engine").as_posix()
     assert f"ARCHIVE={recorded['archive']}" in printed and Path(recorded["archive"]).is_file()
-    assert json.loads((dist / "GetToWork" / "distribution.json").read_text(encoding="utf-8"))["built_from"] == "deadbeef"
+    assert json.loads((dist / "GottaGottaGottaGo" / "distribution.json").read_text(encoding="utf-8"))["built_from"] == "deadbeef"
 
 
 def test_main_reports_problems_without_a_traceback(tmp_path, licenses_file, capsys) -> None:
@@ -904,7 +908,7 @@ def test_smoke_test_script_is_valid_bash() -> None:
 
 def _smoke_env(tmp_path: Path, *, distribution_file: bool) -> tuple[Path, dict]:
     """A fake built game (engine + distribution.json, like assemble.py writes) and the smoke test's environment."""
-    game = tmp_path / "GetToWork"
+    game = tmp_path / "GottaGottaGottaGo"
     engine = fake_engine(game / "engine")
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "GETTOWORK_HOME": str(tmp_path / "home")}
     for var in ("GETTOWORK_ENGINE_DIR", "GETTOWORK_ALLOW_ENGINE_DOWNLOAD", "GETTOWORK_DISTRIBUTION"):
@@ -1088,7 +1092,7 @@ def test_build_workflow_matrix_and_steps() -> None:
     assert "--tag pinned" in fetch["run"]
     assert (PACKAGING / "llama_cpp_tag.txt").is_file()
     licenses = step_named(data, "Gather the third-party license")
-    assert "--app-dir dist/GetToWork" in licenses["run"]  # the native libraries PyInstaller bundled, too
+    assert "--app-dir dist/GottaGottaGottaGo" in licenses["run"]  # the native libraries PyInstaller bundled, too
     install = step_named(data, "Install the game, PyInstaller")
     assert "pip install . pyinstaller pillow" in install["run"]
     selftest = step_named(data, "Self-test the game window")
@@ -1247,7 +1251,7 @@ def test_steam_launch_options_match_the_archive_layout() -> None:
     linux = f"{assemble.APP_FOLDER}/{assemble.GUI_NAME}"
     for launch in (windows, assemble.MAC_APP, linux):
         assert f"`{launch}`" in readme, launch
-    # macOS: only the inside of the archive's GetToWork folder is uploaded, so the app sits at the top.
+    # macOS: only the inside of the archive's GottaGottaGottaGo folder is uploaded, so the app sits at the top.
     mac_depot = parse_vdf((STEAM / "depot_build_macos.vdf").read_text(encoding="utf-8"))["DepotBuild"]
     assert mac_depot["FileMapping"]["LocalPath"] == f"macos/{assemble.APP_FOLDER}/*"
 

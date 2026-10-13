@@ -448,17 +448,17 @@ def _pretend_built_game_on_windows(monkeypatch, kernel32) -> None:
 
 def test_a_built_game_on_windows_starts_the_engine_with_the_normal_dll_search(monkeypatch):
     # PyInstaller's SetDllDirectory(_internal) would be inherited by llama-server.exe.
-    kernel32 = _FakeKernel32(r"C:\Games\GetToWork\_internal")
+    kernel32 = _FakeKernel32(r"C:\Games\GottaGottaGottaGo\_internal")
     _pretend_built_game_on_windows(monkeypatch, kernel32)
     with ls.windows_system_dll_search():
         kernel32.calls.append("the engine starts")
-    assert kernel32.calls == [None, "the engine starts", r"C:\Games\GetToWork\_internal"]
+    assert kernel32.calls == [None, "the engine starts", r"C:\Games\GottaGottaGottaGo\_internal"]
 
     kernel32.calls.clear()
     with pytest.raises(OSError):
         with ls.windows_system_dll_search():
             raise OSError("the engine couldn't start")
-    assert kernel32.calls == [None, r"C:\Games\GetToWork\_internal"]  # put back even then
+    assert kernel32.calls == [None, r"C:\Games\GottaGottaGottaGo\_internal"]  # put back even then
 
 
 def test_the_dll_search_is_left_alone_when_there_is_nothing_to_undo(monkeypatch):
@@ -477,7 +477,7 @@ def test_the_dll_search_is_left_alone_when_there_is_nothing_to_undo(monkeypatch)
 
 @pytest.mark.parametrize("system, frozen", [("Windows", False), ("Linux", True), ("Darwin", True)])
 def test_the_dll_search_is_only_touched_in_a_built_game_on_windows(monkeypatch, system, frozen):
-    kernel32 = _FakeKernel32(r"C:\Games\GetToWork\_internal")
+    kernel32 = _FakeKernel32(r"C:\Games\GottaGottaGottaGo\_internal")
     _pretend_built_game_on_windows(monkeypatch, kernel32)
     monkeypatch.setattr(ls.platform, "system", lambda: system)
     monkeypatch.setattr(sys, "frozen", frozen, raising=False)
@@ -487,14 +487,14 @@ def test_the_dll_search_is_only_touched_in_a_built_game_on_windows(monkeypatch, 
 
 
 def test_the_engine_is_started_inside_the_normal_dll_search(monkeypatch, tmp_path):
-    kernel32 = _FakeKernel32(r"C:\Games\GetToWork\_internal")
+    kernel32 = _FakeKernel32(r"C:\Games\GottaGottaGottaGo\_internal")
     events = []
     kernel32.SetDllDirectoryW = lambda value: events.append(("dll dir", value)) or 1  # type: ignore[method-assign]
     backend = make_backend(tmp_path, popen=lambda args, **kw: events.append(("start", args[0])) or FakeProcess())
     _pretend_built_game_on_windows(monkeypatch, kernel32)
     backend._launch(tmp_path / "llama-server", tmp_path / "m.gguf", cpu_only=False, minimal=False)
     assert [e[0] for e in events] == ["dll dir", "start", "dll dir"]
-    assert events[0][1] is None and events[2][1] == r"C:\Games\GetToWork\_internal"
+    assert events[0][1] is None and events[2][1] == r"C:\Games\GottaGottaGottaGo\_internal"
     backend._close_log()
 
 
@@ -2106,7 +2106,7 @@ def test_built_game_permanent_failure_is_noted_outside_the_game(tmp_path, monkey
 
 def test_a_saved_engine_from_a_moved_game_is_found_again(tmp_path, monkeypatch, no_engine_downloads):
     exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
-    old = tmp_path / "OldLibrary" / "steamapps" / "common" / "GetToWork" / "engine" / "b7000-cpu" / "llama-server"
+    old = tmp_path / "OldLibrary" / "steamapps" / "common" / "GottaGottaGottaGo" / "engine" / "b7000-cpu" / "llama-server"
     model = tmp_path / "m.gguf"
     model.write_bytes(b"GGUF")
     installer = FakeInstaller(tmp_path, fail={"cpu", "vulkan", "cuda-12"})  # must not be needed

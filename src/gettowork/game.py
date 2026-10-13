@@ -60,7 +60,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import catalog
+from . import DISPLAY_NAME, catalog
 from . import jev as jevlib
 from . import prompts
 from . import safety
@@ -372,7 +372,7 @@ _JEV_LESSONS = (
 )
 
 class Game:
-    """One play-through of Get To Work.
+    """One play-through of GottaGottaGottaGo: To Work We Go.
 
     Args:
         llm: The local model backend (storyteller, and referee when Jev is off).
@@ -732,7 +732,7 @@ class Game:
 
     def _welcome(self) -> None:
         ui = self.ui
-        ui.heading("Get To Work!")
+        ui.heading(f"{DISPLAY_NAME}!")
         ui.say(
             f"You're running late, and the universe is in a playful mood. Reach your desk in "
             f"[bold]{self.target}[/bold] steps by telling me what you do - silly ideas welcome!"

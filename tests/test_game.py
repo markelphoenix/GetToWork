@@ -1120,7 +1120,7 @@ def test_the_think_hint_fits_where_the_game_runs(monkeypatch):
     assert "start the game with gettowork --think" in note(False) and "[bold]" not in note(False)
     assert "--think" not in note(True) and "9 tokens/s" in note(True)  # a double-clicked window: no hint
     monkeypatch.setenv("SteamAppId", "480")
-    assert "add --think to its Launch Options in Steam (right-click Get To Work > Properties > General)" in note(True)
+    assert "add --think to its Launch Options in Steam (right-click GottaGottaGottaGo: To Work We Go > Properties > General)" in note(True)
 
 
 def test_force_think_lets_a_slow_model_think():

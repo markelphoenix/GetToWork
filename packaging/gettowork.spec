@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller recipe for the double-click / Steam build of Get To Work.
+"""PyInstaller recipe for the double-click / Steam build of GottaGottaGottaGo: To Work We Go.
 
 Build it from the repository root (after ``pip install . pyinstaller pillow``)::
 
@@ -7,22 +7,22 @@ Build it from the repository root (after ``pip install . pyinstaller pillow``)::
 
 One analysis of the game's code, two programs that share it, in one folder:
 
-* ``GetToWork``      - windowed: the game's own window. This is what Steam
+* ``GottaGottaGottaGo``      - windowed: the game's own window. This is what Steam
   launches and what players double-click (``packaging/gui_entry.py``).
 * ``gettowork-cli``  - console: the terminal version (``packaging/cli_entry.py``).
 
-Both live in ``dist/GetToWork/`` next to ``_internal/`` (Python and the
+Both live in ``dist/GottaGottaGottaGo/`` next to ``_internal/`` (Python and the
 libraries). On macOS the same files are also wrapped into
-``dist/Get To Work.app``, with ``GetToWork`` as the app's main program and
+``dist/GottaGottaGottaGo.app``, with ``GottaGottaGottaGo`` as the app's main program and
 ``gettowork-cli`` beside it in ``Contents/MacOS``.
 
 ``packaging/assemble.py`` then adds the llama.cpp engine, ``distribution.json``,
 the license texts and a README, and packs the archive players download.
 See docs/DISTRIBUTION.md.
 
-(The console program is not called plain ``gettowork``: Windows and macOS
-ignore upper/lower case in file names, so ``gettowork.exe`` and
-``GetToWork.exe`` would be the same file.)
+(The console program stays ``gettowork-cli``, matching the pip command
+``gettowork`` for the terminal version. The windowed program is
+``GottaGottaGottaGo``, the game's short name.)
 """
 
 import importlib.util
@@ -41,10 +41,11 @@ ICON_PNG = PACKAGE / "assets" / "icon.png"
 GUI_ENTRY = ROOT / "packaging" / "gui_entry.py"
 CLI_ENTRY = ROOT / "packaging" / "cli_entry.py"
 
-APP_NAME = "Get To Work"
-GUI_NAME = "GetToWork"  # also the name of the output folder
+DISPLAY_NAME = "GottaGottaGottaGo: To Work We Go"  # player-facing title (colon is not a valid filename)
+APP_NAME = "GottaGottaGottaGo"  # filesystem / CFBundleName; must match assemble.MAC_APP
+GUI_NAME = "GottaGottaGottaGo"  # also the name of the output folder
 CLI_NAME = "gettowork-cli"
-BUNDLE_ID = "com.markelphoenix.gettowork"
+BUNDLE_ID = "com.markelphoenix.gottagottagottago"
 # The oldest macOS the app starts on. The bundled llama.cpp engine is built by
 # its project with CMAKE_OSX_DEPLOYMENT_TARGET=13.3, so on older systems the
 # engine can't run - better that macOS says so up front than a confusing
@@ -81,10 +82,10 @@ def platform_icon(work: Path):
     work.mkdir(parents=True, exist_ok=True)
     picture = Image.open(ICON_PNG).convert("RGBA")
     if IS_WINDOWS:
-        out = work / "GetToWork.ico"
+        out = work / "GottaGottaGottaGo.ico"
         picture.save(out, format="ICO", sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
     else:
-        out = work / "GetToWork.icns"
+        out = work / "GottaGottaGottaGo.icns"
         # Pixel art: grow it with "nearest neighbour" so the big pixels stay crisp;
         # Pillow then shrinks it to every size an .icns holds.
         big = picture.resize((1024, 1024), Image.Resampling.NEAREST)
@@ -225,7 +226,7 @@ if IS_MAC:
         version=VERSION,
         info_plist={
             "CFBundleName": APP_NAME,
-            "CFBundleDisplayName": APP_NAME,
+            "CFBundleDisplayName": DISPLAY_NAME,
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,  # sharp text on Retina screens
@@ -235,6 +236,6 @@ if IS_MAC:
             "LSBackgroundOnly": False,
             "LSMinimumSystemVersion": MACOS_MINIMUM,
             "LSApplicationCategoryType": "public.app-category.educational-games",
-            "NSHumanReadableCopyright": "Get To Work by markelphoenix",
+            "NSHumanReadableCopyright": "GottaGottaGottaGo: To Work We Go by markelphoenix",
         },
     )

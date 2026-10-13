@@ -1,9 +1,9 @@
 # Builds the game players download, checks that it works, and uploads it
 # (each game archive is its own artifact, named after the file):
 #
-#   * GetToWork-<version>-windows-x64.zip
-#   * GetToWork-<version>-linux-x64.tar.gz (also Steam Deck)
-#   * GetToWork-<version>-macos-arm64.zip (Apple Silicon)
+#   * GottaGottaGottaGo-<version>-windows-x64.zip
+#   * GottaGottaGottaGo-<version>-linux-x64.tar.gz (also Steam Deck)
+#   * GottaGottaGottaGo-<version>-macos-arm64.zip (Apple Silicon)
 #   * gettowork-python-package - the pip-installable wheel + source archive
 #
 # Each game build is a double-click build: the game's own window, no Python
@@ -206,7 +206,7 @@ jobs:
       - name: Gather the third-party license texts
         # --app-dir: also every native library PyInstaller copied into the game (fails on one with no license entry).
         run: >
-          python packaging/collect_licenses.py --engine-dir build/engine --app-dir dist/GetToWork
+          python packaging/collect_licenses.py --engine-dir build/engine --app-dir dist/GottaGottaGottaGo
           --out build/THIRD_PARTY_LICENSES.txt
 
       - name: Code-sign the Windows programs (once signing is set up)
@@ -229,7 +229,7 @@ jobs:
             # Microsoft's signing library for signtool (Azure.CodeSigning.Dlib.dll).
             nuget install Microsoft.Trusted.Signing.Client -OutputDirectory "$RUNNER_TEMP/trusted-signing" -NonInteractive
           fi
-          python packaging/sign_windows.py dist/GetToWork build/engine --trusted-signing-dir "$RUNNER_TEMP/trusted-signing"
+          python packaging/sign_windows.py dist/GottaGottaGottaGo build/engine --trusted-signing-dir "$RUNNER_TEMP/trusted-signing"
 
       - name: Add the engine, licenses and README, then pack the archive
         id: assemble
@@ -302,7 +302,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           # archive: false uploads the game archive itself, not zipped again: the download is
-          # GetToWork-<version>-<os>-<arch>.zip / .tar.gz (the artifact takes the file's name),
+          # GottaGottaGottaGo-<version>-<os>-<arch>.zip / .tar.gz (the artifact takes the file's name),
           # one layer to unpack. The archive keeps the file permissions and the Mac app's signature.
           path: ${{ steps.assemble.outputs.archive }}
           archive: false

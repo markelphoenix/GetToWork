@@ -1,8 +1,8 @@
 """Starting the game the way players do: from Steam, or with a double-click.
 
-A built copy of Get To Work has two programs side by side:
+A built copy of GottaGottaGottaGo: To Work We Go has two programs side by side:
 
-* **GetToWork** (windowed) - what Steam launches and what you double-click.
+* **GottaGottaGottaGo** (windowed) - what Steam launches and what you double-click.
   It runs :func:`gui_main`, which opens the game's own window
   (:mod:`gettowork.gui.app`) and plays the normal game inside it: the
   guided setup (hardware check, picking and downloading a model, optional

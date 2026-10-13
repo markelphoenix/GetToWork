@@ -1,15 +1,15 @@
-// SteamPipe depot build: the macOS (Apple Silicon) depot of Get To Work.
-// content/macos/ holds the unpacked macOS archive: content/macos/GetToWork/Get To Work.app ...
+// SteamPipe depot build: the macOS (Apple Silicon) depot of GottaGottaGottaGo: To Work We Go.
+// content/macos/ holds the unpacked macOS archive: content/macos/GottaGottaGottaGo/GottaGottaGottaGo.app ...
 // (unpack it with ditto on a Mac, so the app keeps its symbolic links and permissions).
-// Only the inside of that GetToWork folder is uploaded, so players' install folder
-// gets "Get To Work.app" at the top and the launch option is: Get To Work.app
+// Only the inside of that GottaGottaGottaGo folder is uploaded, so players' install folder
+// gets "GottaGottaGottaGo.app" at the top and the launch option is: GottaGottaGottaGo.app
 "DepotBuild"
 {
 	"DepotID" "<DEPOT_ID_MAC>"
 	"FileMapping"
 	{
 		// Relative to the app build's ContentRoot (../content/).
-		"LocalPath" "macos/GetToWork/*"
+		"LocalPath" "macos/GottaGottaGottaGo/*"
 		// Relative to the game's install folder.
 		"DepotPath" "."
 		"Recursive" "1"
