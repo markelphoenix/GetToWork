@@ -241,7 +241,7 @@ def test_spec_makes_a_mac_app_with_the_right_details(monkeypatch, tmp_path) -> N
     # The bundled llama.cpp engine is built for macOS 13.3 and later (see the spec's comment).
     assert plist["LSMinimumSystemVersion"] == "13.3"
     assert plist["CFBundleName"] == gettowork.SHORT_NAME
-    assert plist["CFBundleDisplayName"] == gettowork.DISPLAY_NAME
+    assert plist["CFBundleDisplayName"] == gettowork.SHORT_NAME  # colon-free; matches the .app folder
     assert bundle.kwargs["icon"].endswith(".icns")
 
 

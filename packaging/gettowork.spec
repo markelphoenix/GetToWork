@@ -226,7 +226,7 @@ if IS_MAC:
         version=VERSION,
         info_plist={
             "CFBundleName": APP_NAME,
-            "CFBundleDisplayName": DISPLAY_NAME,
+            "CFBundleDisplayName": APP_NAME,  # colon-free; must match the .app folder (Finder maps : to /)
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,  # sharp text on Retina screens

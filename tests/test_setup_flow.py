@@ -1211,7 +1211,7 @@ def test_ollama_fallback_reuses_the_model_file_already_downloaded(tmp_path, isol
     assert "nothing new to download" in output(ui)
     assert "Shall I hand the model to Ollama?" in script.prompts[-1]
     saved = settings_file(isolated_home)
-    assert saved["backend"] == "ollama" and saved["ollama_model"].startswith("gettowork-qwen")
+    assert saved["backend"] == "ollama" and saved["ollama_model"].startswith("gottagottagottago-qwen")
 
 
 def test_model_arg_with_unknown_size_makes_no_made_up_estimate(tmp_path, isolated_home):

@@ -25,8 +25,8 @@
 # Every OS job fetches the same pinned llama.cpp release, so the three builds
 # of one commit (and any re-run) ship the same engine.
 #
-# Private-repository budget: GitHub counts macOS minutes 10x and Windows 2x,
-# and artifact storage is small (500 MB on the free plan, and one run's three
+# Actions budget: GitHub counts macOS minutes 10x and Windows 2x, and
+# artifact storage is small (500 MB on the free plan, and one run's three
 # game builds are a few hundred MB). So pull requests only build when they
 # touch the packaging (and don't upload the big game builds - run this
 # workflow by hand on the branch to get them), pushes that only change docs

@@ -1803,7 +1803,7 @@ def test_ollama_imports_an_already_downloaded_gguf_instead_of_pulling(tmp_path):
     gguf = tmp_path / "Qwen3-4B-Q4_K_M.gguf"
     gguf.write_bytes(b"GGUF" + b"\0" * 100)
     fake = FakeOllamaWithBlobs()
-    backend = OllamaBackend("gettowork-qwen3-4b:q4_k_m", http=fake, gguf_path=gguf)
+    backend = OllamaBackend("gottagottagottago-qwen3-4b:q4_k_m", http=fake, gguf_path=gguf)
     ui = RecordingUI()
     backend.prepare(ui)
     digest = "sha256:" + hashlib.sha256(gguf.read_bytes()).hexdigest()
@@ -1812,7 +1812,7 @@ def test_ollama_imports_an_already_downloaded_gguf_instead_of_pulling(tmp_path):
     assert upload["path"] == f"/api/blobs/{digest}"
     assert upload["headers"]["Content-Length"] == str(gguf.stat().st_size)
     create = fake.bodies("/api/create")[0]
-    assert create == {"model": "gettowork-qwen3-4b:q4_k_m", "files": {gguf.name: digest}, "stream": False}
+    assert create == {"model": "gottagottagottago-qwen3-4b:q4_k_m", "files": {gguf.name: digest}, "stream": False}
     assert fake.bodies("/api/pull") == []  # nothing downloaded from the internet
 
 
@@ -1820,7 +1820,7 @@ def test_ollama_import_skips_the_upload_when_it_has_the_file(tmp_path):
     gguf = tmp_path / "m.gguf"
     gguf.write_bytes(b"GGUF")
     fake = FakeOllamaWithBlobs(have_blob=True)
-    OllamaBackend("gettowork-m:q4", http=fake, gguf_path=gguf).prepare(RecordingUI())
+    OllamaBackend("gottagottagottago-m:q4", http=fake, gguf_path=gguf).prepare(RecordingUI())
     assert fake.uploaded == b""
     assert len(fake.bodies("/api/create")) == 1
 
@@ -1830,7 +1830,7 @@ def test_ollama_import_failure_is_a_friendly_error(tmp_path):
     gguf.write_bytes(b"GGUF")
     fake = FakeOllamaWithBlobs(create_status=400)
     with pytest.raises(OllamaError, match="couldn't take the model file"):
-        OllamaBackend("gettowork-m:q4", http=fake, gguf_path=gguf).prepare(RecordingUI())
+        OllamaBackend("gottagottagottago-m:q4", http=fake, gguf_path=gguf).prepare(RecordingUI())
 
 
 def test_a_failing_notice_callback_never_breaks_a_call():
