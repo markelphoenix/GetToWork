@@ -1077,7 +1077,7 @@ def test_unknown_model_flag_falls_back_to_the_menu(tmp_path):
 
 def test_model_flag_naming_a_not_family_friendly_model_is_refused_plainly(tmp_path):
     refusal = DownloadError("x/Qwen3-8B-abliterated-GGUF is marked as uncensored, safety-removed or adult content, "
-                            "and Get To Work only plays family-friendly models. Please pick another one.",
+                            "and GottaGottaGottaGo: To Work We Go only plays family-friendly models. Please pick another one.",
                             "not_family_friendly")
     services = make_services(FakeFactory(tmp_path), custom=refusal)
     ui = make_ui(Script("quit"))
@@ -1211,7 +1211,7 @@ def test_ollama_fallback_reuses_the_model_file_already_downloaded(tmp_path, isol
     assert "nothing new to download" in output(ui)
     assert "Shall I hand the model to Ollama?" in script.prompts[-1]
     saved = settings_file(isolated_home)
-    assert saved["backend"] == "ollama" and saved["ollama_model"].startswith("gettowork-qwen")
+    assert saved["backend"] == "ollama" and saved["ollama_model"].startswith("gottagottagottago-qwen")
 
 
 def test_model_arg_with_unknown_size_makes_no_made_up_estimate(tmp_path, isolated_home):
@@ -1792,7 +1792,7 @@ def test_a_returning_player_whose_game_moved_goes_straight_in(tmp_path, monkeypa
     exes = built_game(monkeypatch, tmp_path, "vulkan", "cpu")
     factory = FakeFactory(tmp_path)
     settings = saved_managed_settings(factory)
-    moved_from = tmp_path / "OldSteamLibrary" / "GetToWork" / "engine" / "b7000-cpu" / "llama-server"
+    moved_from = tmp_path / "OldSteamLibrary" / "GottaGottaGottaGo" / "engine" / "b7000-cpu" / "llama-server"
     settings.server_exe = str(moved_from)
     script = Script("")
     services = make_services(factory, runtimes=runtime_install.installed_runtimes())

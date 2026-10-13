@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import ClassVar, Optional
 
+from . import SHORT_NAME
+
 # Credentials for other services that no child program (the llama.cpp engine,
 # a hardware-detection tool) ever needs: left out of their environment.
 SECRET_ENV_VARS = frozenset({
@@ -28,34 +30,49 @@ def child_env(base: Optional[dict] = None) -> dict[str, str]:
     source = os.environ if base is None else base
     return {k: v for k, v in source.items() if k.upper() not in SECRET_ENV_VARS}
 
-APP_DIR_NAME = "GetToWork"
+APP_DIR_NAME = SHORT_NAME
+LEGACY_APP_DIR_NAME = "GetToWork"  # folder name used before the Steam-name change
+
+
+def _first_existing(*paths: Optional[Path]) -> Optional[Path]:
+    for path in paths:
+        if path is not None and path.is_dir():
+            return path
+    return None
 
 
 def config_dir() -> Path:
     """The game's one folder: settings, models, the engine and caches (delete it to remove them all).
 
-    On Windows this is ``%LOCALAPPDATA%\\GetToWork``, not the *roaming*
+    On Windows this is ``%LOCALAPPDATA%\\GottaGottaGottaGo``, not the *roaming*
     ``%APPDATA%``: multi-GB models and the engine are specific to this
     computer, and on managed PCs a roaming profile would copy them to a
-    server at every log-off. (A folder an older version made in the roaming
-    ``%APPDATA%`` keeps being used, so nothing is downloaded twice.)
-    ``GETTOWORK_HOME`` overrides it everywhere.
+    server at every log-off. A folder an older version made as ``GetToWork``
+    (under Local or roaming ``%APPDATA%``) keeps being used, so nothing is
+    downloaded twice. ``GETTOWORK_HOME`` overrides it everywhere.
     """
     override = os.environ.get("GETTOWORK_HOME")
     if override:
         return Path(override).expanduser()
     system = platform.system()
     if system == "Windows":
-        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / APP_DIR_NAME
+        local_base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         roaming_base = os.environ.get("APPDATA")
-        roaming = Path(roaming_base) / APP_DIR_NAME if roaming_base else None
-        if roaming is not None and roaming.is_dir() and not local.exists():
-            return roaming  # an install from an older version: keep its models and settings
-        return local
+        roaming = Path(roaming_base) if roaming_base else None
+        found = _first_existing(
+            local_base / APP_DIR_NAME,
+            local_base / LEGACY_APP_DIR_NAME,
+            (roaming / APP_DIR_NAME) if roaming is not None else None,
+            (roaming / LEGACY_APP_DIR_NAME) if roaming is not None else None,
+        )
+        return found if found is not None else local_base / APP_DIR_NAME
     if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
+        support = Path.home() / "Library" / "Application Support"
+        found = _first_existing(support / APP_DIR_NAME, support / LEGACY_APP_DIR_NAME)
+        return found if found is not None else support / APP_DIR_NAME
     base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return base / APP_DIR_NAME.lower()
+    found = _first_existing(base / APP_DIR_NAME.lower(), base / LEGACY_APP_DIR_NAME.lower())
+    return found if found is not None else base / APP_DIR_NAME.lower()
 
 
 _chosen_models_dir: Optional[Path] = None  # set by use_models_dir() (--models-dir, or the saved choice)

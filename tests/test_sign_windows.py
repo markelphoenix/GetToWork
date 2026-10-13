@@ -51,9 +51,9 @@ class FakeSigntool:
 
 
 def windows_build(tmp_path: Path) -> list[Path]:
-    game = tmp_path / "dist" / "GetToWork"
+    game = tmp_path / "dist" / "GottaGottaGottaGo"
     engine = tmp_path / "build" / "engine" / "b11100-vulkan"
-    files = [game / "GetToWork.exe", game / "gettowork-cli.exe", game / "_internal" / "python312.dll",
+    files = [game / "GottaGottaGottaGo.exe", game / "gettowork-cli.exe", game / "_internal" / "python312.dll",
              game / "_internal" / "tcl86t.dll", engine / "llama-server.exe", engine / "ggml-vulkan.dll",
              engine / "vcruntime140.dll"]
     for path in files:
@@ -66,7 +66,7 @@ def windows_build(tmp_path: Path) -> list[Path]:
 
 def run(tmp_path, runner, env=ENV):
     out = io.StringIO()
-    code = sw.main([str(tmp_path / "dist" / "GetToWork"), str(tmp_path / "build" / "engine")], env=env,
+    code = sw.main([str(tmp_path / "dist" / "GottaGottaGottaGo"), str(tmp_path / "build" / "engine")], env=env,
                    runner=runner, signtool="signtool.exe", out=out)
     return code, out.getvalue()
 
@@ -81,7 +81,7 @@ def test_every_unsigned_program_and_library_is_signed_and_signed_ones_are_kept(t
     sign_calls = [c for c in tool.calls if c[1] == "sign"]
     assert len(sign_calls) == 1
     signed = {Path(f).name for f in sign_calls[0][sign_calls[0].index("/p") + 2:]}
-    assert signed == {"GetToWork.exe", "gettowork-cli.exe", "tcl86t.dll", "llama-server.exe", "ggml-vulkan.dll"}
+    assert signed == {"GottaGottaGottaGo.exe", "gettowork-cli.exe", "tcl86t.dll", "llama-server.exe", "ggml-vulkan.dll"}
     call = sign_calls[0]
     assert call[call.index("/fd") + 1] == "SHA256" and call[call.index("/td") + 1] == "SHA256"
     assert call[call.index("/tr") + 1] == sw.TIMESTAMP_URL
@@ -119,7 +119,7 @@ def test_azure_trusted_signing_uses_microsofts_library_and_the_service_metadata(
     (dlib.parent.parent / "x86" / sw.DLIB_NAME).write_bytes(b"MZ")
     tool = FakeAzureSigntool(signed=("python312.dll", "vcruntime140.dll"))
     out = io.StringIO()
-    code = sw.main([str(tmp_path / "dist" / "GetToWork"), str(tmp_path / "build" / "engine"),
+    code = sw.main([str(tmp_path / "dist" / "GottaGottaGottaGo"), str(tmp_path / "build" / "engine"),
                     "--trusted-signing-dir", str(tmp_path / "trusted-signing")],
                    env=AZURE_ENV, runner=tool, signtool="signtool.exe", out=out)
     assert code == 0, capsys.readouterr().err
@@ -214,7 +214,7 @@ def test_the_build_workflow_signs_only_when_a_certificate_is_set_up():
     names_needed = (sw.PFX_ENV, sw.PASSWORD_ENV, sw.AZURE_ENDPOINT_ENV, sw.AZURE_ACCOUNT_ENV, sw.AZURE_PROFILE_ENV,
                     *sw.AZURE_CREDENTIAL_ENVS)
     assert step["env"] == {name: "${{ secrets.%s }}" % name for name in names_needed}
-    assert "packaging/sign_windows.py dist/GetToWork build/engine" in step["run"]
+    assert "packaging/sign_windows.py dist/GottaGottaGottaGo build/engine" in step["run"]
     assert "nuget install Microsoft.Trusted.Signing.Client" in step["run"] and "--trusted-signing-dir" in step["run"]
     # After PyInstaller and the engine fetch, before the archive is packed (and tested).
     assert names.index("Build the game with PyInstaller") < names.index(step["name"])

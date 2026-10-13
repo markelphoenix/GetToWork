@@ -16,7 +16,7 @@ It also holds the game-specific parts: the three questions Jev is asked about
 each round, how the answers become a :class:`~gettowork.types.JevVerdict`, and
 the "Learn" panels that explain each question type.
 
-Get To Work is not affiliated with TypeSafe AI; the names identify their product.
+GottaGottaGottaGo: To Work We Go is not affiliated with TypeSafe AI; the names identify their product.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import urllib.request
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping, Optional
 
-from . import __version__
+from . import PROJECT_URL, SHORT_NAME, __version__
 from .prompts import defang_plan
 from .tls import CERTIFICATE_HELP, https_context, is_certificate_error
 from .types import JevExchange, JevVerdict
@@ -52,7 +52,7 @@ JEV_DOCS_URL = "https://docs.typesafe.ai/"
 
 SYSTEM_ONE_PATH = "/v1/systemone"
 MODELS_PATH = "/v1/models"
-USER_AGENT = f"GetToWork/{__version__} (+https://github.com/markelphoenix/GetToWork)"
+USER_AGENT = f"{SHORT_NAME}/{__version__} (+{PROJECT_URL})"
 
 # Retry policy - the same defaults as the SDK's RetryPolicy: up to 2 retries
 # after the first attempt, for timeouts/connection failures and these statuses.
@@ -691,7 +691,7 @@ def _check_questions(questions: Any) -> None:
 # ---------------------------------------------------------------------------
 
 _WORLD_RULES = (
-    "You are the fair, impartial referee of 'Get To Work', a farcical, family-friendly text adventure "
+    "You are the fair, impartial referee of 'GottaGottaGottaGo: To Work We Go', a farcical, family-friendly text adventure "
     "where the player is racing to get to work on time. The world runs on cartoon logic: absurd, silly "
     "or physically impossible plans are perfectly fine, as long as they plausibly deal with the CURRENT "
     "challenge in the state (`current_challenge`) by the story's own playful rules. "
@@ -777,7 +777,7 @@ def build_round_state(
     requests small (input tokens are what you pay for).
     """
     return {
-        "game": "Get To Work - a farcical, family-friendly text adventure about getting to work on time.",
+        "game": "GottaGottaGottaGo: To Work We Go - a farcical, family-friendly text adventure about getting to work on time.",
         "story_so_far": _clip(intro, 800),
         "progress": {"steps_completed": int(progress), "steps_needed_to_win": int(target)},
         "recent_rounds": [_clip(h, 300) for h in list(history)[-4:]],

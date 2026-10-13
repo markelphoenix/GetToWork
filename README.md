@@ -1,6 +1,6 @@
-# Get To Work
+# GottaGottaGottaGo: To Work We Go
 
-[![tests](https://github.com/markelphoenix/GetToWork/actions/workflows/ci.yml/badge.svg)](https://github.com/markelphoenix/GetToWork/actions/workflows/ci.yml)
+[![tests](https://github.com/markelphoenix/GottaGottaGottaGo/actions/workflows/ci.yml/badge.svg)](https://github.com/markelphoenix/GottaGottaGottaGo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **A silly text adventure that runs a real AI model on your own computer and
@@ -16,11 +16,10 @@ You don't need to know anything about AI to play. The game checks your
 computer, finds models on Hugging Face that will actually run well on it, and
 sets everything up for you. **All you do is pick a model.**
 
-> **Where this is heading:** Get To Work is a **free game, planned for Steam**.
+> **Where this is heading:** GottaGottaGottaGo: To Work We Go is a **free game, planned for Steam**.
 > Players press **Play** and the game opens its own window, walks them through
-> a one-time setup and starts the story. The source repository is private;
-> test builds come from its GitHub Actions (see
-> [Playing the test builds](#playing-the-test-builds)).
+> a one-time setup and starts the story. Test builds come from GitHub Actions
+> (see [Playing the test builds](#playing-the-test-builds)).
 
 ---
 
@@ -124,13 +123,13 @@ repository). Each game artifact is the game archive itself:
 
 | Artifact | For |
 |---|---|
-| `GetToWork-<version>-windows-x64.zip` | Windows 10/11, 64-bit |
-| `GetToWork-<version>-macos-arm64.zip` | Macs with Apple Silicon (M1 or later), macOS 13.3+ |
-| `GetToWork-<version>-linux-x64.tar.gz` | 64-bit Linux with glibc 2.35+ (Ubuntu 22.04+, SteamOS 3.5+) |
+| `GottaGottaGottaGo-<version>-windows-x64.zip` | Windows 10/11, 64-bit |
+| `GottaGottaGottaGo-<version>-macos-arm64.zip` | Macs with Apple Silicon (M1 or later), macOS 13.3+ |
+| `GottaGottaGottaGo-<version>-linux-x64.tar.gz` | 64-bit Linux with glibc 2.35+ (Ubuntu 22.04+, SteamOS 3.5+) |
 | `gettowork-python-package` (the wheel and source archive, zipped by GitHub) | `pip install gettowork-*.whl` |
 
-Game builds are kept for **3 days**, the Python package for 7 (the repository
-is private, so storage is tight). Need a fresh one? Open the **build** workflow
+Game builds are kept for **3 days**, the Python package for 7 (to keep Actions
+storage down). Need a fresh one? Open the **build** workflow
 and press **Run workflow**. Pushes that only change docs or tests don't make
 new builds, and game builds for pull requests (made only when a pull request
 touches the packaging) are tested but not uploaded - run the workflow by hand
@@ -140,16 +139,16 @@ release, the one pinned in `packaging/llama_cpp_tag.txt`.
 **2. Unpack** the archive (one layer):
 
 - **Windows:** right-click the zip, **Extract All...** - the game can't start
-  from inside the zip (double-clicking `GetToWork.exe` in Explorer's zip view
+  from inside the zip (double-clicking `GottaGottaGottaGo.exe` in Explorer's zip view
   fails), so extract it first.
 - **macOS:** double-click the zip (Safari may already have unpacked it for you).
-- **Linux:** `tar xzf GetToWork-*-linux-x64.tar.gz` (the `.tar.gz` keeps the
+- **Linux:** `tar xzf GottaGottaGottaGo-*-linux-x64.tar.gz` (the `.tar.gz` keeps the
   programs executable, so no `chmod` is needed).
 
-You get a `GetToWork` folder with a `README.txt` and the game.
+You get a `GottaGottaGottaGo` folder with a `README.txt` and the game.
 
-**3. Double-click the game** - `GetToWork.exe` (Windows), `Get To Work.app`
-(macOS) or `GetToWork` (Linux). The game opens its own window and walks you
+**3. Double-click the game** - `GottaGottaGottaGo.exe` (Windows), `GottaGottaGottaGo.app`
+(macOS) or `GottaGottaGottaGo` (Linux). The game opens its own window and walks you
 through everything:
 
 1. a short note that the story is written by an AI (first launch only);
@@ -187,35 +186,34 @@ step:
 - **macOS:** Gatekeeper refuses apps from unidentified developers. Right-click
   the app and choose **Open**; on macOS 15 or later, try to open it once, then
   go to **System Settings > Privacy & Security** and click **Open Anyway**.
-  Or, in Terminal: `xattr -dr com.apple.quarantine "Get To Work.app"`.
+  Or, in Terminal: `xattr -dr com.apple.quarantine "GottaGottaGottaGo.app"`.
 - **Linux:** if your file manager won't run programs by double-click, open a
-  terminal in the folder and type `./GetToWork`.
+  terminal in the folder and type `./GottaGottaGottaGo`.
 
 Each build also contains the **terminal version**, `gettowork-cli`
 (`gettowork-cli.exe` on Windows; on macOS it's
-`Get To Work.app/Contents/MacOS/gettowork-cli`). It takes every
+`GottaGottaGottaGo.app/Contents/MacOS/gettowork-cli`). It takes every
 [command-line option](#command-line-options), for example
 `./gettowork-cli --mock` (macOS/Linux) or `.\gettowork-cli.exe --mock`
 (Windows) to try the game instantly with a pretend model.
 To give the **window** an option (say `--jev` or `--think`), start it from a
 terminal in the game's folder:
 
-- **Windows:** `.\GetToWork.exe --jev` (works in both PowerShell - Windows
+- **Windows:** `.\GottaGottaGottaGo.exe --jev` (works in both PowerShell - Windows
   Terminal's default - and Command Prompt)
-- **macOS:** `open "Get To Work.app" --args --jev`
-- **Linux:** `./GetToWork --jev`
-- **Steam:** right-click Get To Work > **Properties > General > Launch Options**.
+- **macOS:** `open "GottaGottaGottaGo.app" --args --jev`
+- **Linux:** `./GottaGottaGottaGo --jev`
+- **Steam:** right-click GottaGottaGottaGo: To Work We Go > **Properties > General > Launch Options**.
 
 ## Playing from source
 
 For development and tinkering. You need **Python 3.10 or newer** (from
 [python.org](https://www.python.org/downloads/); on Windows tick
-**"Add python.exe to PATH"**) and a copy of this repository (it's private, so
-you need access to clone it).
+**"Add python.exe to PATH"**) and a copy of this repository.
 
 ```bash
-git clone https://github.com/markelphoenix/GetToWork
-cd GetToWork
+git clone https://github.com/markelphoenix/GottaGottaGottaGo
+cd GottaGottaGottaGo
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -e .
@@ -327,9 +325,9 @@ you downloaded):
 
 | System  | Folder |
 |---------|--------|
-| Windows | `%LOCALAPPDATA%\GetToWork` (for example `C:\Users\you\AppData\Local\GetToWork`; kept out of your roaming profile because models are big. A folder an older version made in `%APPDATA%\GetToWork` keeps being used.) |
-| macOS   | `~/Library/Application Support/GetToWork` |
-| Linux   | `~/.config/gettowork` (or `$XDG_CONFIG_HOME/gettowork`) |
+| Windows | `%LOCALAPPDATA%\GottaGottaGottaGo` (for example `C:\Users\you\AppData\Local\GottaGottaGottaGo`; kept out of your roaming profile because models are big. A folder an older version made as `GetToWork` under `%LOCALAPPDATA%` or `%APPDATA%`, or one in `%APPDATA%\GottaGottaGottaGo`, keeps being used.) |
+| macOS   | `~/Library/Application Support/GottaGottaGottaGo` (an older `~/Library/Application Support/GetToWork` keeps being used) |
+| Linux   | `~/.config/gottagottagottago` (or `$XDG_CONFIG_HOME/gottagottagottago`; an older `gettowork` folder keeps being used) |
 
 Inside it:
 
@@ -355,10 +353,10 @@ Inside it:
   calibration and any saved key. It doesn't delete models.
 - To remove a model, delete its folder under `models/`. To remove everything,
   delete the whole folder above, then uninstall the game (on Steam, or by
-  deleting the `GetToWork` folder / `Get To Work.app`; a copy from source:
+  deleting the `GottaGottaGottaGo` folder / `GottaGottaGottaGo.app`; a copy from source:
   `pip uninstall gettowork`).
 - Transcripts you choose to save (`gettowork-transcript-1.json` / `.md`) go in
-  `Documents/Get To Work` when you play in the game's window, and in the
+  `Documents/GottaGottaGottaGo` when you play in the game's window, and in the
   folder you ran the terminal version from otherwise - or wherever
   `--export-dir` says.
 - If you use Ollama, its models are managed by Ollama: `ollama list` and
@@ -447,7 +445,7 @@ set TYPESAFE_API_KEY=your-key             # Windows Command Prompt
 
 > **Costs and terms are TypeSafe's.** Jev is a paid third-party service with
 > its own pricing and terms of service. Check them on their website before
-> signing up. Get To Work is not affiliated with TypeSafe AI, and any charges
+> signing up. GottaGottaGottaGo: To Work We Go is not affiliated with TypeSafe AI, and any charges
 > for using Jev are between you and TypeSafe.
 
 ## How to play
@@ -572,7 +570,7 @@ through **Properties > General > Launch Options**.
 | `--think` | Let a "thinking" model think out loud even on a slow computer (each turn takes longer). |
 | `--target N` | Steps needed to win (default 5). |
 | `--reset` | Forget saved settings: your choices, speed calibration and any saved key (models stay on disk). |
-| `--export-dir DIR` | Where to save transcripts (default: the current folder; `Documents/Get To Work` in the game's window). |
+| `--export-dir DIR` | Where to save transcripts (default: the current folder; `Documents/GottaGottaGottaGo` in the game's window). |
 | `--debug` | Show full error details (tracebacks). Useful for bug reports. |
 | `--version` | Print the version and exit. |
 
@@ -679,7 +677,7 @@ shows them on screen. Look at the engine's log in `runtime/logs/llama-server.log
 ### "The game's built-in engine is missing"
 
 The Steam or test build lost part of its files (an antivirus quarantine, an
-interrupted update). On Steam: right-click Get To Work, then
+interrupted update). On Steam: right-click GottaGottaGottaGo: To Work We Go, then
 **Properties > Installed Files > Verify integrity of game files**. Otherwise
 download and unpack the build again.
 
@@ -787,7 +785,7 @@ open the model's page on Hugging Face while logged in, accept the terms, run
 - Playing from source and macOS says `llama-server` "can't be opened"? The
   engine's folder has been marked as downloaded from the internet. You can
   clear that mark for the game's runtime folder only with
-  `xattr -dr com.apple.quarantine ~/Library/Application\ Support/GetToWork/runtime`,
+  `xattr -dr com.apple.quarantine ~/Library/Application\ Support/GottaGottaGottaGo/runtime`,
   or use Ollama instead.
 - macOS older than 13.3 can't run the current prebuilt engine; Ollama or
   `--mock` still work.
@@ -808,7 +806,7 @@ scratch.
 
 ## Releasing on Steam
 
-Get To Work is planned as a **free** Steam game. The builds the `build`
+GottaGottaGottaGo: To Work We Go is planned as a **free** Steam game. The builds the `build`
 workflow makes are exactly what gets uploaded, and every step is written
 down:
 
@@ -869,16 +867,16 @@ docs/LEARN.md        the mini-course
 
 ## Contributing
 
-Contributions, bug reports and ideas are very welcome from everyone with
-access to the repository. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+Contributions, bug reports and ideas are very welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the
 development setup, how the model list and filters work, and the (short)
 rules.
 
 ## License and disclaimer
 
-Get To Work is **free**: the game costs nothing, on Steam or anywhere else.
-Its source code is licensed under the [MIT License](LICENSE); the source
-repository itself is private. Third-party components and services - including
+GottaGottaGottaGo: To Work We Go is **free**: the game costs nothing, on Steam or anywhere else.
+Its source code is licensed under the [MIT License](LICENSE). Third-party
+components and services - including
 the software built into the game builds, whose license texts ship with every
 build in `THIRD_PARTY_LICENSES.txt` - are listed in [NOTICE.md](NOTICE.md).
 

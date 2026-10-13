@@ -613,7 +613,7 @@ def _inspect_custom(repo_id: str, quant: Optional[str], api: Any) -> tuple[Model
         # The game is family-friendly (and its Steam AI disclosure says so): the model search
         # leaves these out, and naming one yourself doesn't bring it back.
         raise DownloadError(
-            f"{repo} is marked as uncensored, safety-removed or adult content, and Get To Work only "
+            f"{repo} is marked as uncensored, safety-removed or adult content, and GottaGottaGottaGo: To Work We Go only "
             "plays family-friendly models. Please pick another one.",
             "not_family_friendly",
         )

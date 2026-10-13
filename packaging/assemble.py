@@ -4,29 +4,29 @@
     python packaging/assemble.py --dist dist --engine-dir build/engine --os linux --out out
     python packaging/assemble.py --dist dist --engine-dir build/engine --os macos --arch arm64 --out out
 
-``pyinstaller packaging/gettowork.spec`` makes the programs (``dist/GetToWork/``,
-and ``dist/Get To Work.app`` on macOS). This script adds everything else a
+``pyinstaller packaging/gettowork.spec`` makes the programs (``dist/GottaGottaGottaGo/``,
+and ``dist/GottaGottaGottaGo.app`` on macOS). This script adds everything else a
 player needs, in the place the game looks for it (see docs/DISTRIBUTION.md):
 
 ======================  ===============================  ==========================================
 what                    Windows / Linux                  macOS
 ======================  ===============================  ==========================================
-llama.cpp engine        ``GetToWork/engine/``            ``Get To Work.app/Contents/Resources/engine/``
-distribution.json       ``GetToWork/``                   ``.../Contents/Resources/``
-THIRD_PARTY_LICENSES    ``GetToWork/``                   ``.../Contents/Resources/``
-README.txt              ``GetToWork/``                   next to the app
+llama.cpp engine        ``GottaGottaGottaGo/engine/``            ``GottaGottaGottaGo.app/Contents/Resources/engine/``
+distribution.json       ``GottaGottaGottaGo/``                   ``.../Contents/Resources/``
+THIRD_PARTY_LICENSES    ``GottaGottaGottaGo/``                   ``.../Contents/Resources/``
+README.txt              ``GottaGottaGottaGo/``                   next to the app
 ======================  ===============================  ==========================================
 
 The files are added to the build folder itself, so it can be tested right
-away (``packaging/smoke_test.sh``, ``GetToWork --gui-selftest``). Then it
+away (``packaging/smoke_test.sh``, ``GottaGottaGottaGo --gui-selftest``). Then it
 packs one archive into ``--out``:
 
-* Windows: ``.zip`` of the ``GetToWork`` folder;
+* Windows: ``.zip`` of the ``GottaGottaGottaGo`` folder;
 * macOS: ``.zip`` made with ``ditto`` (Apple's tool, which keeps the app's
-  symbolic links, permissions and signature intact) of a ``GetToWork``
+  symbolic links, permissions and signature intact) of a ``GottaGottaGottaGo``
   folder holding the app and the README. The app is moved there first:
-  ``dist/macos-package/GetToWork/Get To Work.app``;
-* Linux: ``.tar.gz`` of the ``GetToWork`` folder, so the programs stay
+  ``dist/macos-package/GottaGottaGottaGo/GottaGottaGottaGo.app``;
+* Linux: ``.tar.gz`` of the ``GottaGottaGottaGo`` folder, so the programs stay
   executable (a zip would lose that).
 
 On macOS the app is signed again ("ad-hoc", no Apple account needed) after
@@ -54,10 +54,10 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_FOLDER = "GetToWork"  # the PyInstaller output folder (and the top folder in every archive)
-MAC_APP = "Get To Work.app"
-MAC_STAGE = "macos-package"  # dist/macos-package/GetToWork/ holds the finished app and its README
-GUI_NAME = "GetToWork"
+APP_FOLDER = "GottaGottaGottaGo"  # the PyInstaller output folder (and the top folder in every archive)
+MAC_APP = "GottaGottaGottaGo.app"
+MAC_STAGE = "macos-package"  # dist/macos-package/GottaGottaGottaGo/ holds the finished app and its README
+GUI_NAME = "GottaGottaGottaGo"
 CLI_NAME = "gettowork-cli"
 ENGINE_DIR = "engine"
 DISTRIBUTION_FILE = "distribution.json"
@@ -68,8 +68,8 @@ DEFAULT_ARCH = {"windows": "x64", "linux": "x64", "macos": "arm64"}
 
 README_TEXT = {
     "windows": (
-        "Get To Work {version}: extract the whole zip first (right-click it > Extract All - the game can't start "
-        "from inside the zip), then double-click GetToWork.exe to play - the game walks you through the rest "
+        "GottaGottaGottaGo: To Work We Go {version}: extract the whole zip first (right-click it > Extract All - the game can't start "
+        "from inside the zip), then double-click GottaGottaGottaGo.exe to play - the game walks you through the rest "
         "(checking your computer, picking and downloading an AI model, optional Jev setup).\n"
         "This build isn't code-signed. Downloaded outside Steam, Windows SmartScreen may say \"Windows protected "
         "your PC\": click More info, then Run anyway. On Windows 11 with Smart App Control on (from Steam too), "
@@ -79,19 +79,19 @@ README_TEXT = {
         "THIRD_PARTY_LICENSES.txt.\n"
     ),
     "macos": (
-        "Get To Work {version}: double-click \"Get To Work.app\" to play - the game walks you through the rest "
+        "GottaGottaGottaGo: To Work We Go {version}: double-click \"GottaGottaGottaGo.app\" to play - the game walks you through the rest "
         "(picking and downloading an AI model, optional Jev setup). On Steam, just press Play and leave the app "
         "where Steam put it; downloaded from GitHub, drag it into Applications first if you like.\n"
         "Downloaded outside Steam? This build isn't signed by Apple: the first time, right-click the app and "
         "choose Open (on macOS 15 or later: try to open it, then System Settings > Privacy & Security > Open "
-        "Anyway), or run this in Terminal: xattr -dr com.apple.quarantine \"Get To Work.app\"\n"
-        "The terminal version is \"Get To Work.app/Contents/MacOS/gettowork-cli\". The licenses of the "
-        "software inside are in \"Get To Work.app/Contents/Resources/THIRD_PARTY_LICENSES.txt\".\n"
+        "Anyway), or run this in Terminal: xattr -dr com.apple.quarantine \"GottaGottaGottaGo.app\"\n"
+        "The terminal version is \"GottaGottaGottaGo.app/Contents/MacOS/gettowork-cli\". The licenses of the "
+        "software inside are in \"GottaGottaGottaGo.app/Contents/Resources/THIRD_PARTY_LICENSES.txt\".\n"
     ),
     "linux": (
-        "Get To Work {version}: double-click GetToWork (or run ./GetToWork) to play - the game walks you "
+        "GottaGottaGottaGo: To Work We Go {version}: double-click GottaGottaGottaGo (or run ./GottaGottaGottaGo) to play - the game walks you "
         "through the rest (checking your computer, picking and downloading an AI model, optional Jev setup).\n"
-        "Unpack the .tar.gz as it is (for example: tar xzf GetToWork-*.tar.gz) - it keeps the programs "
+        "Unpack the .tar.gz as it is (for example: tar xzf GottaGottaGottaGo-*.tar.gz) - it keeps the programs "
         "executable, so no chmod +x is needed.\n"
         "./gettowork-cli is the terminal version. The licenses of the software inside the game are in "
         "THIRD_PARTY_LICENSES.txt.\n"
@@ -118,8 +118,8 @@ class Layout:
 def layout_for(dist: Path, os_key: str) -> Layout:
     """The build's layout for ``os_key`` ("windows", "linux" or "macos") under PyInstaller's ``dist``."""
     if os_key == "macos":
-        # The app is moved into a "GetToWork" folder next to its README, which becomes the archive's
-        # top folder. (dist/GetToWork itself is PyInstaller's plain folder build, so it lives one level down.)
+        # The app is moved into a "GottaGottaGottaGo" folder next to its README, which becomes the archive's
+        # top folder. (dist/GottaGottaGottaGo itself is PyInstaller's plain folder build, so it lives one level down.)
         stage = dist / MAC_STAGE / APP_FOLDER
         app = stage / MAC_APP
         return Layout(app, app / "Contents" / "Resources", stage,
@@ -186,7 +186,7 @@ def copy_engine(builds: Sequence[tuple[Path, dict]], target: Path, *, os_key: st
 
 
 def move_mac_app(built: Path, target: Path) -> None:
-    """Move PyInstaller's fresh ``Get To Work.app`` to ``target`` (replacing an older one there).
+    """Move PyInstaller's fresh ``GottaGottaGottaGo.app`` to ``target`` (replacing an older one there).
 
     If there is no fresh app (assemble.py already ran once), the one at
     ``target`` is used as it is.
@@ -362,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="assemble.py",
         description="Add the engine, distribution.json, licenses and README to a PyInstaller build, then pack it.",
     )
-    parser.add_argument("--dist", required=True, help="PyInstaller's output folder (holds GetToWork/ or the .app)")
+    parser.add_argument("--dist", required=True, help="PyInstaller's output folder (holds GottaGottaGottaGo/ or the .app)")
     parser.add_argument("--engine-dir", required=True, help="the engine builds made by packaging/fetch_engine.py")
     parser.add_argument("--os", required=True, choices=sorted(README_TEXT), help="the OS the build is for")
     parser.add_argument("--arch", choices=("x64", "arm64"), help="the processor (default: x64, arm64 for macOS)")

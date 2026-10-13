@@ -231,7 +231,7 @@ def read_png_rgba(data: bytes) -> tuple[int, int, bytes]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Draw the Get To Work icon (256 x 256 PNG).")
+    parser = argparse.ArgumentParser(description="Draw the GottaGottaGottaGo: To Work We Go icon (256 x 256 PNG).")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"where to write it (default: {DEFAULT_OUT})")
     args = parser.parse_args(argv)
     args.out.parent.mkdir(parents=True, exist_ok=True)

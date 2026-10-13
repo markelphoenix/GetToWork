@@ -75,7 +75,7 @@ def test_gui_main_with_no_options_plays_normally(fake_gui):
 
 
 def test_gui_main_defaults_to_the_process_arguments(fake_gui, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["GetToWork", "--target", "3"])
+    monkeypatch.setattr(sys, "argv", ["GottaGottaGottaGo", "--target", "3"])
     assert launcher.gui_main() == 0
     assert fake_gui.calls == [(["--target", "3"], {})]
 

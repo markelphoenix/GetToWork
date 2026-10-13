@@ -1,4 +1,4 @@
-// SteamPipe app build: uploads the Linux + SteamOS depot of Get To Work.
+// SteamPipe app build: uploads the Linux + SteamOS depot of GottaGottaGottaGo: To Work We Go.
 //
 // 1. Replace <APP_ID> and <DEPOT_ID_LINUX> with the numbers from Steamworks
 //    (App Admin > SteamPipe > Depots) and <VERSION> with the game's version.
@@ -13,7 +13,7 @@
 "AppBuild"
 {
 	"AppID" "<APP_ID>"
-	"Desc" "Get To Work <VERSION> (Linux + SteamOS)"
+	"Desc" "GottaGottaGottaGo: To Work We Go <VERSION> (Linux + SteamOS)"
 	"ContentRoot" "../content/"
 	"BuildOutput" "../output/"
 	"Preview" "0"

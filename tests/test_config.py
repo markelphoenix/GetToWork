@@ -87,15 +87,42 @@ def test_reset_also_removes_a_leftover_temp_file(home):
     Settings.reset()  # nothing left to delete: still fine
 
 
+def test_legacy_gettowork_data_folders_keep_being_used(tmp_path, monkeypatch):
+    """Players who already downloaded models under the old GetToWork folder keep that copy."""
+    monkeypatch.delenv("GETTOWORK_HOME", raising=False)
+    monkeypatch.setattr(config.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    old_local = tmp_path / "Local" / "GetToWork"
+    old_local.mkdir(parents=True)
+    assert config.config_dir() == old_local
+    old_local.rmdir()
+    old_roaming = tmp_path / "Roaming" / "GetToWork"
+    old_roaming.mkdir(parents=True)
+    assert config.config_dir() == old_roaming
+
+    monkeypatch.setattr(config.platform, "system", lambda: "Linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    old_linux = tmp_path / "xdg" / "gettowork"
+    old_linux.mkdir(parents=True)
+    assert config.config_dir() == old_linux
+
+    monkeypatch.setattr(config.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(config.Path, "home", lambda *args: tmp_path)
+    old_mac = tmp_path / "Library" / "Application Support" / "GetToWork"
+    old_mac.mkdir(parents=True)
+    assert config.config_dir() == old_mac
+
+
 def test_windows_keeps_big_files_out_of_the_roaming_profile(tmp_path, monkeypatch):
     monkeypatch.delenv("GETTOWORK_HOME", raising=False)
     monkeypatch.setattr(config.platform, "system", lambda: "Windows")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
-    assert config.models_dir() == tmp_path / "Local" / "GetToWork" / "models"
-    assert config.runtime_dir() == tmp_path / "Local" / "GetToWork" / "runtime"
+    assert config.models_dir() == tmp_path / "Local" / "GottaGottaGottaGo" / "models"
+    assert config.runtime_dir() == tmp_path / "Local" / "GottaGottaGottaGo" / "runtime"
     monkeypatch.delenv("LOCALAPPDATA")
-    assert config.config_dir().parts[-3:] == ("AppData", "Local", "GetToWork")
+    assert config.config_dir().parts[-3:] == ("AppData", "Local", "GottaGottaGottaGo")
 
 
 def test_saved_model_entries_are_validated():

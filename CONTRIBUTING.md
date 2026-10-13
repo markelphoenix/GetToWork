@@ -1,19 +1,16 @@
-# Contributing to Get To Work
+# Contributing to GottaGottaGottaGo: To Work We Go
 
-Thank you for helping! Get To Work is a learning project first, so clear,
+Thank you for helping! GottaGottaGottaGo: To Work We Go is a learning project first, so clear,
 friendly code and docs matter as much as features. Bug reports, typo fixes,
 new "Try this" exercises and better explanations are all very welcome.
-
-The source repository is private, so contributing means being given access by
-the maintainer first. Everything below assumes you have it.
 
 ## Development setup
 
 You need Python 3.10 or newer and git.
 
 ```bash
-git clone https://github.com/markelphoenix/GetToWork
-cd GetToWork
+git clone https://github.com/markelphoenix/GottaGottaGottaGo
+cd GottaGottaGottaGo
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
@@ -226,7 +223,7 @@ is for all ages, so the filter is part of the game, not an add-on:
 
 ## License rules
 
-- Get To Work's code is currently **MIT licensed** (see [LICENSE](LICENSE)).
+- GottaGottaGottaGo: To Work We Go's code is currently **MIT licensed** (see [LICENSE](LICENSE)).
   By contributing, you agree that your contribution is licensed under the
   license in the LICENSE file at the time you contribute (today: MIT).
 - Only contribute code you wrote yourself or that comes from a compatible
@@ -249,7 +246,7 @@ is for all ages, so the filter is part of the game, not an add-on:
 
 ### A note for the maintainer: the license of future versions
 
-The repository is now private and the game is heading to Steam as a free
+The game is heading to Steam as a free
 game, but the [LICENSE](LICENSE) file is unchanged: the code is still MIT
 licensed, and everyone who received a copy under MIT keeps those rights. Please
 decide, before the next public release, whether future versions stay MIT or
@@ -267,7 +264,7 @@ stays available under MIT.
    Linux (Python 3.10 and 3.12) and Windows (3.12); once a change lands on
    `main` it also runs on Windows (3.10), and the `build` workflow smoke- and
    self-tests the Mac app; the macOS unit tests run on manual runs ("Run
-   workflow"). (The repository is private, where GitHub counts macOS minutes
+   workflow"). (GitHub Actions counts macOS minutes
    10x and Windows minutes 2x.)
 4. Update the docs (README, LEARN, ARCHITECTURE, DISTRIBUTION) when behaviour
    changes.
@@ -296,7 +293,7 @@ and without uploading the game builds). For each OS it:
    (`packaging/fetch_engine.py --tag pinned --verify`; Linux builds also get
    OpenSSL 3 copied in, since Steam's Linux runtime has none, and every
    program's needed libraries are checked);
-2. builds the two programs, `GetToWork` (the window) and `gettowork-cli`
+2. builds the two programs, `GottaGottaGottaGo` (the window) and `gettowork-cli`
    (the terminal version), with PyInstaller (`packaging/gettowork.spec`);
 3. gathers the license texts (`packaging/collect_licenses.py`, including every
    native library PyInstaller bundled - a library with no license entry fails
@@ -310,7 +307,7 @@ and without uploading the game builds). For each OS it:
    (`packaging/smoke_test.sh`, which also checks the game reports its built-in
    engine with downloads off), on Linux starts the engine in a container
    without OpenSSL 3, as under Steam (`packaging/engine_isolation_check.sh`),
-   then lets the window play a scripted game (`GetToWork --gui-selftest`);
+   then lets the window play a scripted game (`GottaGottaGottaGo --gui-selftest`);
 7. uploads the archive itself as a workflow artifact (kept 3 days).
 
 To move the game to a newer llama.cpp release, change the tag in
@@ -325,16 +322,16 @@ script. To make a build on your own computer (for your own OS):
 pip install . pyinstaller pillow
 python packaging/fetch_engine.py --os linux --arch x64 --variants vulkan,cpu --dest build/engine --tag pinned --verify
 pyinstaller packaging/gettowork.spec --noconfirm --clean
-python packaging/collect_licenses.py --engine-dir build/engine --app-dir dist/GetToWork --out build/THIRD_PARTY_LICENSES.txt
+python packaging/collect_licenses.py --engine-dir build/engine --app-dir dist/GottaGottaGottaGo --out build/THIRD_PARTY_LICENSES.txt
 python packaging/assemble.py --dist dist --engine-dir build/engine --os linux --out out \
   --licenses build/THIRD_PARTY_LICENSES.txt
-packaging/smoke_test.sh --engine-dir dist/GetToWork/engine dist/GetToWork/gettowork-cli
-dist/GetToWork/GetToWork --gui-selftest
+packaging/smoke_test.sh --engine-dir dist/GottaGottaGottaGo/engine dist/GottaGottaGottaGo/gettowork-cli
+dist/GottaGottaGottaGo/GottaGottaGottaGo --gui-selftest
 ```
 
 (Use `--os windows --variants vulkan,cpu` on Windows, or
 `--os macos --arch arm64 --variants metal` on a Mac, where the programs are
-inside `dist/macos-package/GetToWork/Get To Work.app`.) Releasing on Steam is
+inside `dist/macos-package/GottaGottaGottaGo/GottaGottaGottaGo.app`.) Releasing on Steam is
 covered in [packaging/steam/README.md](packaging/steam/README.md).
 
 `.github/workflows/live-check.yml` (weekly, or by hand) is the one workflow

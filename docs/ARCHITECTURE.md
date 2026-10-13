@@ -1,4 +1,4 @@
-# Get To Work — Architecture & Module Contracts
+# GottaGottaGottaGo: To Work We Go — Architecture & Module Contracts
 
 This document is both a guide for learners and the **binding contract** the
 modules are built against. If code and this document disagree, fix one of them.
@@ -178,9 +178,9 @@ see exactly what is sent. Python ≥ 3.10. Must run on Windows, macOS, Linux
 Data locations (`config.py`): settings in `config_dir()`; models in
 `models_dir()`; add `runtime_dir()` = `config_dir()/runtime` (llama.cpp
 builds) and `cache_dir()` = `config_dir()/cache` (discovery cache). Both honour
-`GETTOWORK_HOME`. On Windows `config_dir()` is `%LOCALAPPDATA%\GetToWork`
+`GETTOWORK_HOME`. On Windows `config_dir()` is `%LOCALAPPDATA%\GottaGottaGottaGo`
 (multi-GB models must not ride along in a roaming profile); a folder an older
-version created in `%APPDATA%\GetToWork` keeps being used.
+version created as `GetToWork` (under Local or `%APPDATA%`) keeps being used.
 
 ## Module contracts
 
@@ -859,7 +859,7 @@ errors. The window runs this same `main(argv, ui=...)` on a worker thread.
 
 ## Distribution: the game window, the built game and safety (as built)
 
-Get To Work ships as a free double-click / Steam game. This section records
+GottaGottaGottaGo: To Work We Go ships as a free double-click / Steam game. This section records
 the modules added for that; [docs/DISTRIBUTION.md](DISTRIBUTION.md) is the
 detailed contract (build layout, packaging scripts, CI, Steam) and has the
 same authority as this document.
@@ -1009,7 +1009,7 @@ def load(*, refresh: bool = False) -> Distribution   # cached, thread-safe, neve
   surrogates are replaced before they reach Tk (`bridge.clean_text`); a failed
   redraw is logged once and the transcript redrawn, while the question still
   appears. Transcripts default to
-  `default_export_dir()` (`~/Documents/Get To Work`, else
+  `default_export_dir()` (`~/Documents/GottaGottaGottaGo`, else
   `config_dir()/transcripts`) unless the player passes `--export-dir`; macOS
   `-psn_...` arguments are dropped. When the game ends: "Press Enter or close
   the window to exit". Closing: mark closed → `EOFError` → `WindowClosed` (a

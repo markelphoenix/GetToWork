@@ -40,11 +40,11 @@ def write(path: Path, data) -> Path:
     return path
 
 
-def game_folder(tmp_path: Path, monkeypatch, data=RELEASE, name: str = "GetToWork") -> Path:
-    """A Windows/Linux-style built game: GetToWork(.exe) + distribution.json side by side."""
+def game_folder(tmp_path: Path, monkeypatch, data=RELEASE, name: str = "GottaGottaGottaGo") -> Path:
+    """A Windows/Linux-style built game: GottaGottaGottaGo(.exe) + distribution.json side by side."""
     folder = tmp_path / name
     folder.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sys, "executable", str(folder / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(folder / "GottaGottaGottaGo"))
     write(folder / "distribution.json", data)
     return folder
 
@@ -100,9 +100,9 @@ def test_a_built_game_folder(tmp_path, monkeypatch):
 
 
 def test_a_mac_app_keeps_it_in_contents_resources(tmp_path, monkeypatch):
-    app = tmp_path / "Get To Work.app" / "Contents"
+    app = tmp_path / "GottaGottaGottaGo.app" / "Contents"
     (app / "MacOS").mkdir(parents=True)
-    monkeypatch.setattr(sys, "executable", str(app / "MacOS" / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(app / "MacOS" / "GottaGottaGottaGo"))
     write(app / "Resources" / "distribution.json", RELEASE)
     (app / "Resources" / "engine").mkdir()
     dist = load()
@@ -111,7 +111,7 @@ def test_a_mac_app_keeps_it_in_contents_resources(tmp_path, monkeypatch):
 
 
 def test_pyinstallers_bundle_folder_is_the_last_candidate(tmp_path, monkeypatch):
-    internal = tmp_path / "GetToWork" / "_internal"
+    internal = tmp_path / "GottaGottaGottaGo" / "_internal"
     write(internal / "distribution.json", dict(RELEASE, llama_cpp_tag="b7100"))
     monkeypatch.setattr(sys, "_MEIPASS", str(internal), raising=False)
     assert find_distribution_file() == internal / "distribution.json"
@@ -139,9 +139,9 @@ def test_a_missing_file_named_by_the_environment_is_skipped(tmp_path, monkeypatc
 
 
 def test_a_folder_called_distribution_json_is_not_a_file(tmp_path, monkeypatch):
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     (folder / "distribution.json").mkdir(parents=True)
-    monkeypatch.setattr(sys, "executable", str(folder / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(folder / "GottaGottaGottaGo"))
     assert find_distribution_file() is None
     assert load().channel == "dev"
 
@@ -208,9 +208,9 @@ def test_a_damaged_file_in_a_built_game_never_turns_on_engine_downloads(tmp_path
 
 
 def test_a_built_game_without_its_file_keeps_its_engine_and_never_downloads(tmp_path, monkeypatch, caplog):
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     (folder / "engine").mkdir(parents=True)
-    monkeypatch.setattr(sys, "executable", str(folder / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(folder / "GottaGottaGottaGo"))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     with caplog.at_level(logging.WARNING, logger="gettowork.distribution"):
         dist = load()
@@ -222,10 +222,10 @@ def test_a_built_game_without_its_file_keeps_its_engine_and_never_downloads(tmp_
 
 
 def test_undecodable_bytes_are_a_damaged_file_too(tmp_path, monkeypatch):
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     folder.mkdir()
     (folder / "distribution.json").write_bytes(b"\xff\xfe\x00garbage")
-    monkeypatch.setattr(sys, "executable", str(folder / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(folder / "GottaGottaGottaGo"))
     dist = load()
     assert dist.channel == "dev" and dist.notes
 
@@ -245,9 +245,9 @@ def test_a_surprise_in_a_built_game_still_keeps_its_engine_and_never_downloads(t
     def boom():
         raise RecursionError("maximum recursion depth exceeded")  # e.g. a pathologically nested file
 
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     folder.mkdir()
-    monkeypatch.setattr(sys, "executable", str(folder / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(folder / "GottaGottaGottaGo"))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(distribution, "_discover", boom)
     dist = load(refresh=True)
@@ -259,9 +259,9 @@ def test_a_surprise_in_a_built_game_still_keeps_its_engine_and_never_downloads(t
 @pytest.mark.parametrize("variable, value", [("GETTOWORK_ENGINE_DIR", "~nosuchuser_zz/engine"),
                                              ("GETTOWORK_DISTRIBUTION", "~nosuchuser_zz/distribution.json")])
 def test_a_path_with_an_unknown_home_folder_is_skipped_not_fatal(tmp_path, monkeypatch, variable, value):
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     folder.mkdir()
-    monkeypatch.setattr(sys, "executable", str(folder / "GetToWork"))
+    monkeypatch.setattr(sys, "executable", str(folder / "GottaGottaGottaGo"))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv(variable, value)
     dist = load(refresh=True)
@@ -315,7 +315,7 @@ def test_the_download_switch(tmp_path, monkeypatch, value, expected):
     monkeypatch.setenv("GETTOWORK_ALLOW_ENGINE_DOWNLOAD", value)
     assert load(refresh=True).engine_downloads is (False if expected is None else expected)
 
-    (tmp_path / "GetToWork" / "distribution.json").unlink()  # a developer copy: downloads on by default
+    (tmp_path / "GottaGottaGottaGo" / "distribution.json").unlink()  # a developer copy: downloads on by default
     assert load(refresh=True).engine_downloads is (True if expected is None else expected)
 
 

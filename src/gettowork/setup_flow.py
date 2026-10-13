@@ -654,10 +654,10 @@ def _absolute(path: Path) -> Path:
 
 
 def _ollama_import_name(entry: ModelEntry) -> str:
-    """A tidy local Ollama name for a model file we hand over, e.g. "gettowork-qwen3-4b:q4_k_m"."""
+    """A tidy local Ollama name for a model file we hand over, e.g. "gottagottagottago-qwen3-4b:q4_k_m"."""
     base = re.sub(r"[^a-z0-9._-]+", "-", (entry.key or entry.hf_repo).lower()).strip("-.") or "model"
     tag = re.sub(r"[^a-z0-9._-]+", "-", (entry.quant or "latest").lower()).strip("-.") or "latest"
-    return f"gettowork-{base}:{tag}"
+    return f"gottagottagottago-{base}:{tag}"
 
 
 def discovery_summary(result: hf_discovery.DiscoveryResult, ranked: list[FitResult]) -> str:

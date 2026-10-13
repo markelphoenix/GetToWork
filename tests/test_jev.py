@@ -238,7 +238,7 @@ def test_list_models_request_and_headers():
     headers = call["headers"]
     assert headers["Authorization"] == f"Bearer {KEY}"
     assert headers["Accept"] == "application/json"
-    assert headers["User-Agent"] == f"GetToWork/{__version__} (+https://github.com/markelphoenix/GetToWork)"
+    assert headers["User-Agent"] == f"GottaGottaGottaGo/{__version__} (+https://github.com/markelphoenix/GottaGottaGottaGo)"
     assert "Content-Type" not in headers  # only sent when there is a body, like the SDK
     assert call["timeout"] == 30.0
 

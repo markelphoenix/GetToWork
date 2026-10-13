@@ -7,10 +7,10 @@
 # macOS still gets checked on every push to main: build.yml builds the Mac app
 # there and runs its smoke test and window self-test.
 #
-# Why the split: the repository is private, and there GitHub counts every
-# macOS minute as 10 and every Windows minute as 2 against the free monthly
-# allowance. Pull requests get quick, cheap feedback; the expensive runners
-# check each change once it lands on main (or on demand: "Run workflow").
+# Why the split: GitHub Actions counts every macOS minute as 10 and every
+# Windows minute as 2 against the free monthly allowance. Pull requests get
+# quick, cheap feedback; the expensive runners check each change once it
+# lands on main (or on demand: "Run workflow").
 #
 # On Linux the tests run under xvfb-run (a virtual screen), so the tests of
 # the game's window run too; elsewhere the runners have a desktop.

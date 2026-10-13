@@ -1203,12 +1203,12 @@ def test_a_build_whose_architectures_cant_be_read_fails(tmp_path, capsys):
 
 
 def test_the_game_finds_and_uses_the_fetched_builds(tmp_path, monkeypatch):
-    dest = tmp_path / "GetToWork" / "engine"
+    dest = tmp_path / "GottaGottaGottaGo" / "engine"
     assert run(linux_args(dest), http=standard_publisher().http())[0] == 0
-    (tmp_path / "GetToWork" / "distribution.json").write_text(json.dumps(
+    (tmp_path / "GottaGottaGottaGo" / "distribution.json").write_text(json.dumps(
         {"schema": 1, "channel": "release", "engine_downloads": False, "engine_dir": "engine",
          "llama_cpp_tag": "b7001", "app_version": "0.2.0"}))
-    monkeypatch.setenv("GETTOWORK_DISTRIBUTION", str(tmp_path / "GetToWork" / "distribution.json"))
+    monkeypatch.setenv("GETTOWORK_DISTRIBUTION", str(tmp_path / "GottaGottaGottaGo" / "distribution.json"))
     monkeypatch.setattr(ri, "_glibc_version", lambda: (2, 39))
     dist = distribution.load(refresh=True)
     assert dist.bundled and not dist.engine_downloads and dist.llama_cpp_tag == "b7001"

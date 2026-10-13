@@ -5,7 +5,7 @@ scripts and workflows below; docs/ARCHITECTURE.md still applies to everything
 else (its "Distribution" section summarises the same modules). If code and
 this document disagree, fix one of them.*
 
-Goal: a player launches **Get To Work** from Steam (or double-clicks the test
+Goal: a player launches **GottaGottaGottaGo: To Work We Go** from Steam (or double-clicks the test
 build) and lands straight in the guided journey - hardware check → pick and
 download a model if none is set up → optional Jev setup → the game loop - in
 the game's **own window**. No terminal, no Python, no manual installs, and no
@@ -13,7 +13,7 @@ programs downloaded while playing (the llama.cpp engine ships inside the
 build; only the AI model is downloaded, once, after the player confirms).
 Developers keep the terminal version (`gettowork` in a shell).
 
-Get To Work is a free game. The source repository is private; the owner may
+GottaGottaGottaGo: To Work We Go is a free game. The owner may
 later sell a bundle or DLC with their other game, Gridfall, which needs no
 change here (a bundle groups separate Steam apps; a DLC is its own app ID with
 its own depots).
@@ -22,7 +22,7 @@ its own depots).
 
 | How it's started | What runs |
 |---|---|
-| Steam / double-click `GetToWork(.exe)` / `Get To Work.app`; `gettowork-gui` after `pip install`; `python -m gettowork.launcher` | `gettowork.launcher.gui_main()` → `gettowork.gui.app.run_gui()` opens a Tk window; the unchanged game (`cli.main`) runs in a worker thread and talks to the window through `UI`. |
+| Steam / double-click `GottaGottaGottaGo(.exe)` / `GottaGottaGottaGo.app`; `gettowork-gui` after `pip install`; `python -m gettowork.launcher` | `gettowork.launcher.gui_main()` → `gettowork.gui.app.run_gui()` opens a Tk window; the unchanged game (`cli.main`) runs in a worker thread and talks to the window through `UI`. |
 | `gettowork` in a terminal (pip install); `gettowork-cli(.exe)` inside a build | `gettowork.cli.main()` exactly as before (plus "Play again?" and the first-launch AI note, both only when a person is playing). |
 
 Tkinter is used because it ships with Python (python.org / actions/setup-python
@@ -35,15 +35,15 @@ The game's options work in both: `gettowork-gui --mock`, or Steam's
 
 PyInstaller **one-folder** build from `packaging/gettowork.spec`: one Analysis,
 two executables sharing it in one folder. The console program is called
-`gettowork-cli`, not `gettowork`: Windows and macOS file systems ignore
-upper/lower case, so `gettowork.exe` and `GetToWork.exe` would be one file.
+`gettowork-cli`, not `gettowork`: that is the pip/CLI name of the terminal
+version (`gettowork`), kept distinct from the windowed `GottaGottaGottaGo`.
 
 ```
 Windows / Linux                           macOS
-GetToWork/                                GetToWork/
-  GetToWork(.exe)      windowed (GUI)       README.txt
-  gettowork-cli(.exe)  console (CLI)        Get To Work.app/Contents/
-  _internal/           Python + libs          MacOS/GetToWork       (GUI, CFBundleExecutable)
+GottaGottaGottaGo/                                GottaGottaGottaGo/
+  GottaGottaGottaGo(.exe)      windowed (GUI)       README.txt
+  gettowork-cli(.exe)  console (CLI)        GottaGottaGottaGo.app/Contents/
+  _internal/           Python + libs          MacOS/GottaGottaGottaGo       (GUI, CFBundleExecutable)
   engine/              bundled llama.cpp      MacOS/gettowork-cli   (CLI)
   distribution.json                           Frameworks/...        (Python + libs)
   THIRD_PARTY_LICENSES.txt                    Resources/engine/     (bundled llama.cpp)
@@ -51,15 +51,15 @@ GetToWork/                                GetToWork/
                                               Resources/THIRD_PARTY_LICENSES.txt
 ```
 
-On macOS the terminal version is `Get To Work.app/Contents/MacOS/gettowork-cli`.
+On macOS the terminal version is `GottaGottaGottaGo.app/Contents/MacOS/gettowork-cli`.
 
-Archives (one per OS, top folder `GetToWork/`), made by `packaging/assemble.py`:
+Archives (one per OS, top folder `GottaGottaGottaGo/`), made by `packaging/assemble.py`:
 
 | OS | Archive | Why this format |
 |---|---|---|
-| Windows x64 | `GetToWork-<version>-windows-x64.zip` | the usual format |
-| macOS arm64 | `GetToWork-<version>-macos-arm64.zip`, made with `ditto` | keeps the app's symbolic links, permissions and signature |
-| Linux x64 | `GetToWork-<version>-linux-x64.tar.gz` | keeps the executable bits (no `chmod` for players) |
+| Windows x64 | `GottaGottaGottaGo-<version>-windows-x64.zip` | the usual format |
+| macOS arm64 | `GottaGottaGottaGo-<version>-macos-arm64.zip`, made with `ditto` | keeps the app's symbolic links, permissions and signature |
+| Linux x64 | `GottaGottaGottaGo-<version>-linux-x64.tar.gz` | keeps the executable bits (no `chmod` for players) |
 
 On macOS the app is re-signed ad-hoc (`codesign --force --deep --sign -`)
 after the engine and files are added, because adding files breaks the seal.
@@ -170,7 +170,7 @@ developer copy (off when `sys.frozen`).
   (Vulkan/Metal) is used, and the bundled CPU build / CPU mode is the
   fallback. Nothing installed → `RuntimeInstallError`
   with `ENGINE_MISSING_MESSAGE`: "The game's built-in engine is missing. On
-  Steam: right-click Get To Work → Properties → Installed Files → Verify
+  Steam: right-click GottaGottaGottaGo: To Work We Go → Properties → Installed Files → Verify
   integrity. Otherwise re-download the game."
 - `relocate_engine(saved_exe)`: the saved engine path goes stale when a built
   game moves (another Steam library, the app dragged elsewhere); the same
@@ -340,7 +340,7 @@ App Control blocks unsigned programs outright, Steam installs included.
   for the current choices (`UI.choose` / `UI.confirm` / `UI.pause`);
   Ctrl+= / Ctrl+- / Ctrl+0 zoom (also Cmd on macOS), saved as
   `Settings.extra["gui_font_size"]` when the window closes; F11 full screen,
-  Escape leaves it; window title "Get To Work", icon from
+  Escape leaves it; window title "GottaGottaGottaGo: To Work We Go", icon from
   `gettowork/assets/icon.png`; default size ≥ 100×32 characters, fitted to the
   screen. **Steam Deck / Big Picture** (`SteamDeck=1`, `SteamGamepadUI=1`, or
   `GAMESCOPE_WAYLAND_DISPLAY`; `GETTOWORK_FULLSCREEN=1/0` overrides): full
@@ -370,7 +370,7 @@ App Control blocks unsigned programs outright, Steam installs included.
   redraw that fails anyway is logged, the question and buttons still appear,
   and the transcript is redrawn once (the crash report is written for the
   first of each kind of error, at most 5).
-  Transcripts default to `default_export_dir()` (`~/Documents/Get To Work`,
+  Transcripts default to `default_export_dir()` (`~/Documents/GottaGottaGottaGo`,
   else `config_dir()/transcripts`) unless `--export-dir` is given; macOS
   `-psn_…` arguments are dropped. When the game ends it shows "Press Enter or
   close the window to exit". Closing the window (or SIGINT/SIGTERM/SIGHUP/
@@ -496,9 +496,9 @@ engine's raw answer kept for the saved transcript goes through the same filter
 
 ## Packaging & CI
 
-- `packaging/gettowork.spec` (one Analysis, `GetToWork` windowed +
+- `packaging/gettowork.spec` (one Analysis, `GottaGottaGottaGo` windowed +
   `gettowork-cli` console, `BUNDLE` on macOS with bundle id
-  `com.markelphoenix.gettowork` and `LSBackgroundOnly: false` - PyInstaller
+  `com.markelphoenix.gottagottagottago` and `LSBackgroundOnly: false` - PyInstaller
   would otherwise make the app background-only (no Dock icon, no keyboard
   focus) because COLLECT's last program is the console one; hidden imports for rich, truststore,
   huggingface_hub, the whole game and tkinter; excludes tests, Pillow,
@@ -508,7 +508,7 @@ engine's raw answer kept for the saved transcript goes through the same filter
   and `packaging/cli_entry.py` (replacing `gettowork_entry.py`),
   `packaging/make_icon.py` → `src/gettowork/assets/icon.png` (committed;
   stdlib-only PNG writer; the spec turns it into `.ico`/`.icns` with Pillow),
-  `packaging/collect_licenses.py --engine-dir DIR --app-dir dist/GetToWork --out FILE` →
+  `packaging/collect_licenses.py --engine-dir DIR --app-dir dist/GottaGottaGottaGo --out FILE` →
   `THIRD_PARTY_LICENSES.txt` (every bundled Python distribution's license
   files, Python, Tcl/Tk, PyInstaller bootloader note, llama.cpp licenses from
   the engine dir, and every native library PyInstaller copied into
@@ -546,7 +546,7 @@ engine's raw answer kept for the saved transcript goes through the same filter
 - `.github/workflows/ci.yml`: pytest on pull requests on ubuntu (3.10, 3.12)
   + windows 3.12; on push to main also windows 3.10; manual runs add macOS 3.12
   (the Mac app is still smoke- and self-tested by build.yml on every push to main)
-  (private-repo minutes: macOS counts 10×, Windows 2×). Linux runs pytest
+  (Actions minutes: macOS counts 10×, Windows 2×). Linux runs pytest
   under `xvfb-run` so the Tk tests run.
 - `.github/workflows/live-check.yml` (dispatch + weekly, Linux only): real
   Hugging Face discovery (`gettowork --list-models --refresh-models`), real
@@ -561,8 +561,8 @@ engine's raw answer kept for the saved transcript goes through the same filter
   templates per OS with placeholders (`<APP_ID>`, `<DEPOT_ID_WIN>`,
   `<DEPOT_ID_MAC>`, `<DEPOT_ID_LINUX>`, `<VERSION>`), `README.md` (the
   release checklist: depots, launch options - Windows
-  `GetToWork\GetToWork.exe`, macOS `Get To Work.app`, Linux
-  `GetToWork/GetToWork` - the Visual C++ 2015-2022 x64 redistributable,
+  `GottaGottaGottaGo\GottaGottaGottaGo.exe`, macOS `GottaGottaGottaGo.app`, Linux
+  `GottaGottaGottaGo/GottaGottaGottaGo` - the Visual C++ 2015-2022 x64 redistributable,
   code-signing the Windows build (the secrets `sign_windows.py` reads),
   uploading from macOS/Linux, setting `notices.STEAM_APP_ID`, Steam Deck
   notes - the Linux runtime (4.0 if offered; the engine carries its own
@@ -573,8 +573,8 @@ engine's raw answer kept for the saved transcript goes through the same filter
 ## Changes from the first draft of this contract
 
 - The console program is `gettowork-cli(.exe)` (not `gettowork(.exe)`), so it
-  can sit next to `GetToWork(.exe)` on case-insensitive file systems.
-- The macOS archive's top folder is `GetToWork/` holding the app and
+  can sit next to `GottaGottaGottaGo(.exe)` on case-insensitive file systems.
+- The macOS archive's top folder is `GottaGottaGottaGo/` holding the app and
   `README.txt` (the draft left the README's place open); the app is re-signed
   ad-hoc after assembly.
 - `Distribution` gained `built_from` and `notes`; `engine_dir` may be a list;

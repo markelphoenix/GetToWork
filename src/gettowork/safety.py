@@ -1,6 +1,6 @@
 """The family-friendly filter: guardrails for the text the local AI writes live.
 
-Get To Work's story is written on the fly by a language model running on the
+GottaGottaGottaGo: To Work We Go's story is written on the fly by a language model running on the
 player's computer, and a model can say anything. Steam asks games with
 live-generated AI content to have guardrails against illegal or offensive
 output, and this module is the heart of them. The defences, in order:

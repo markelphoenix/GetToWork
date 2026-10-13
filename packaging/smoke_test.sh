@@ -3,8 +3,8 @@
 #
 #   packaging/smoke_test.sh [--engine-dir DIR] <command...>
 #   e.g. packaging/smoke_test.sh gettowork
-#        packaging/smoke_test.sh ./dist/GetToWork/gettowork-cli
-#        packaging/smoke_test.sh --engine-dir dist/GetToWork/engine dist/GetToWork/gettowork-cli
+#        packaging/smoke_test.sh ./dist/GottaGottaGottaGo/gettowork-cli
+#        packaging/smoke_test.sh --engine-dir dist/GottaGottaGottaGo/engine dist/GottaGottaGottaGo/gettowork-cli
 #
 # Runs the info commands, then plays a whole game with the scripted offline
 # "pretend" model and checks that it is won with no Python traceback.
@@ -14,7 +14,7 @@
 # built-in engine with engine downloads off (`--specs`), so a build that lost
 # its distribution.json (and would download llama.cpp while playing) fails.
 #
-# (The game's window has its own check: `GetToWork --gui-selftest`.)
+# (The game's window has its own check: `GottaGottaGottaGo --gui-selftest`.)
 set -euo pipefail
 
 engine_dir=""

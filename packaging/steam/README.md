@@ -1,6 +1,6 @@
-# Putting Get To Work on Steam
+# Putting GottaGottaGottaGo: To Work We Go on Steam
 
-Get To Work is a **free** Steam game. Each push to `main` makes the three builds
+GottaGottaGottaGo: To Work We Go is a **free** Steam game. Each push to `main` makes the three builds
 Steam needs (the [`build` workflow](../../.github/workflows/build.yml)), already
 tested: the terminal version plays a whole game, the bundled llama.cpp engine
 starts, and the game window plays a scripted game (`--gui-selftest`). This
@@ -26,9 +26,9 @@ under **App Admin > SteamPipe > Depots**.
 
    | Operating system | Executable | Notes |
    |---|---|---|
-   | Windows | `GetToWork\GetToWork.exe` | CPU architecture: 64-bit |
-   | macOS | `Get To Work.app` | Apple Silicon only (M1 or later) |
-   | Linux + SteamOS | `GetToWork/GetToWork` | also what Steam Deck runs |
+   | Windows | `GottaGottaGottaGo\GottaGottaGottaGo.exe` | CPU architecture: 64-bit |
+   | macOS | `GottaGottaGottaGo.app` | Apple Silicon only (M1 or later) |
+   | Linux + SteamOS | `GottaGottaGottaGo/GottaGottaGottaGo` | also what Steam Deck runs |
 
    Each build also contains the terminal version (`gettowork-cli`); it doesn't
    need a launch option.
@@ -65,7 +65,7 @@ under **App Admin > SteamPipe > Depots**.
      key on a hardware token or in a cloud service instead - then use that
      service's signtool integration.)
 
-   Check a signed build on Windows: right-click `GetToWork.exe` > Properties >
+   Check a signed build on Windows: right-click `GottaGottaGottaGo.exe` > Properties >
    Digital Signatures.
 
 ## Uploading a build
@@ -75,9 +75,9 @@ a Steam account allowed to upload builds for the app.
 
 1. **Download the builds.** Open the repository's **Actions** tab, pick the
    latest green **build** run on `main`, and download the three game archives
-   from its **Artifacts** list: `GetToWork-<version>-windows-x64.zip`,
-   `GetToWork-<version>-macos-arm64.zip` and
-   `GetToWork-<version>-linux-x64.tar.gz` (each artifact is the archive itself -
+   from its **Artifacts** list: `GottaGottaGottaGo-<version>-windows-x64.zip`,
+   `GottaGottaGottaGo-<version>-macos-arm64.zip` and
+   `GottaGottaGottaGo-<version>-linux-x64.tar.gz` (each artifact is the archive itself -
    there's no extra zip around it). All three carry the same llama.cpp release,
    the one pinned in [`packaging/llama_cpp_tag.txt`](../llama_cpp_tag.txt).
    (Game builds are kept for 3 days; run the workflow again by hand -
@@ -88,16 +88,16 @@ a Steam account allowed to upload builds for the app.
    ```bash
    cd ContentBuilder
    mkdir -p content/windows content/macos content/linux
-   unzip -q GetToWork-*-windows-x64.zip -d content/windows
-   ditto -x -k GetToWork-*-macos-arm64.zip content/macos
-   tar xzf GetToWork-*-linux-x64.tar.gz -C content/linux
+   unzip -q GottaGottaGottaGo-*-windows-x64.zip -d content/windows
+   ditto -x -k GottaGottaGottaGo-*-macos-arm64.zip content/macos
+   tar xzf GottaGottaGottaGo-*-linux-x64.tar.gz -C content/linux
    ```
 
-   (On Linux use `unzip -q GetToWork-*-macos-arm64.zip -d content/macos` for the
+   (On Linux use `unzip -q GottaGottaGottaGo-*-macos-arm64.zip -d content/macos` for the
    Mac build; Info-ZIP's unzip restores the app's symbolic links too.) You should
-   now have `content/windows/GetToWork/GetToWork.exe`,
-   `content/macos/GetToWork/Get To Work.app` and
-   `content/linux/GetToWork/GetToWork`.
+   now have `content/windows/GottaGottaGottaGo/GottaGottaGottaGo.exe`,
+   `content/macos/GottaGottaGottaGo/GottaGottaGottaGo.app` and
+   `content/linux/GottaGottaGottaGo/GottaGottaGottaGo`.
 3. **Copy the `.vdf` files** from this folder into `ContentBuilder/scripts/` and
    fill in the placeholders.
 4. **Upload from macOS or Linux**, not Windows: SteamCMD on Windows can't record
@@ -158,7 +158,7 @@ build, so only the model is ever downloaded.
   (SteamOS is read-only, and the runtime never sees their system's
   libraries): the game asks them to verify the game's files instead.
 - **Storage.** Models are saved in the game's settings folder
-  (`~/.config/gettowork` on Linux), not in the Steam install folder, so
+  (`~/.config/gottagottagottago` on Linux), not in the Steam install folder, so
   verifying or updating the game never deletes a downloaded model. A player
   who wants them elsewhere (a bigger drive, a microSD card) can add
   `--models-dir <folder>` to the game's launch options once: the game
@@ -167,7 +167,7 @@ build, so only the model is ever downloaded.
 
 ## Later: a Gridfall bundle
 
-The owner may later offer their other game, Gridfall, together with Get To Work
+The owner may later offer their other game, Gridfall, together with GottaGottaGottaGo: To Work We Go
 as a paid DLC or bundle. That needs nothing in these builds: a bundle groups
 separate Steam apps, and a DLC is its own app ID with its own depots, so this
 app's depots and launch options stay as they are.

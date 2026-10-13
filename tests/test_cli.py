@@ -255,7 +255,7 @@ def _fake_built_game(tmp_path, monkeypatch, variants=("cpu", "vulkan"), tag="b70
     """A built game's distribution.json + engine folder (downloads off), found via GETTOWORK_DISTRIBUTION."""
     from gettowork import distribution
 
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     assets = {"cpu": "llama-{t}-bin-ubuntu-x64.tar.gz", "vulkan": "llama-{t}-bin-ubuntu-vulkan-x64.tar.gz"}
     for variant in variants:
         build = folder / "engine" / f"{tag}-{variant}"
@@ -387,7 +387,7 @@ def test_full_mock_game_with_scripted_input(tmp_path):
     assert sum("How do you plan to get to work?" in p for p in asked) == 1
     assert sum("What do you do?" in p for p in asked) >= 1
     text = output(ui)
-    assert "GET TO WORK" in text  # the banner
+    assert "GottaGottaGottaGo: To Work We Go" in text  # the banner
     assert "Pretend-model mode" in text
     assert "Behind the scenes" in text  # the review ran
     assert "Thanks for playing" in text
@@ -710,7 +710,7 @@ def test_after_a_pretend_model_game_quitting_says_how_to_play_for_real(recorders
     ui = make_player_ui(_answering([("Your pick", ["mock"]), ("Play again?", ["quit"])], asked))
     assert main([], ui=ui, services=make_services()) == EXIT_OK
     text = " ".join(output(ui).split())
-    assert "Thanks for playing Get To Work!" in text and "tucked back into bed" not in text
+    assert "Thanks for playing GottaGottaGottaGo: To Work We Go!" in text and "tucked back into bed" not in text
     assert "pick a real AI model from the menu" in text
     assert len(GameRecorder.instances) == 1
     # "again" replays the pretend model, as "Play again? [Y/n]" did.
@@ -760,7 +760,7 @@ def test_the_ai_note_is_shown_only_on_the_first_launch(recorders, isolated_home)
     assert NOTICE_TITLE in text and "written live by an AI" in text
     assert "Press Enter to start" in script.prompts[0]  # a moment to read it
     # Shown before anything else happens (the hardware check comes next).
-    assert text.index("GET TO WORK") < text.index(NOTICE_TITLE) < text.index("RTX 3060")
+    assert text.index("GottaGottaGottaGo: To Work We Go") < text.index(NOTICE_TITLE) < text.index("RTX 3060")
     assert seen_notice()
 
     script = Script("", "", "n")  # no pause this time

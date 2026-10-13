@@ -101,7 +101,7 @@ ABSURDITY_LEVELS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 _NARRATOR_RULES = """\
-You are the narrator of "Get To Work", a farcical, family-friendly text adventure.
+You are the narrator of "GottaGottaGottaGo: To Work We Go", a farcical, family-friendly text adventure.
 Style rules:
 - Talk to the player as "you" (second person), in the present tense.
 - Be silly and fantastical: cartoon logic, talking animals, rebellious objects, polite monsters.
@@ -141,7 +141,7 @@ _ENDING_FORMAT = "Do NOT write a CHALLENGE line: the game is over."
 # The referee rules mirror the Jev Noul question in jev.py, so the local
 # model and Jev judge by the same cartoon-logic standard.
 _JUDGE_RULES = """\
-You are the fair referee of "Get To Work", a silly, family-friendly text adventure about getting to \
+You are the fair referee of "GottaGottaGottaGo: To Work We Go", a silly, family-friendly text adventure about getting to \
 work on time. The world runs on cartoon logic.
 
 Decide ONE thing: does the player's plan make progress past the CURRENT challenge?

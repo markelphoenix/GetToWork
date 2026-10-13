@@ -34,7 +34,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from . import __version__, catalog, config, crashlog, launcher, onboarding, perf, runtime_install
+from . import DISPLAY_NAME, __version__, catalog, config, crashlog, launcher, onboarding, perf, runtime_install
 from .config import Settings, command_name
 from .setup_flow import (
     planned_engine_key,
@@ -61,8 +61,8 @@ EXIT_INTERRUPTED = 130  # Ctrl+C: 128 + SIGINT(2), the shell convention
 
 MAX_TARGET = 50
 GOODBYE = "No problem - see you next time you're running late! (Anything already downloaded is kept.)"
-THANKS = "Thanks for playing Get To Work! Your model is being tucked back into bed."
-THANKS_PRETEND = "Thanks for playing Get To Work!"
+THANKS = f"Thanks for playing {DISPLAY_NAME}! Your model is being tucked back into bed."
+THANKS_PRETEND = f"Thanks for playing {DISPLAY_NAME}!"
 REAL_MODEL_NEXT_TIME = ("Next time, pick a real AI model from the menu - it's free, runs privately on your computer, "
                         "and makes up a new story every time.")
 # After a game with the pretend model picked from the menu: the way on to a real one.
@@ -76,7 +76,7 @@ _AFTER_PRETEND_ALIASES = {"y": "again", "yes": "again", "n": "quit", "no": "quit
 AI_NOTICE_SETTING = "ai_notice_seen"  # in Settings.extra: the first-launch AI note was shown
 # Used only if notices.py can't be loaded: the same message, shorter.
 FALLBACK_AI_NOTICE = (
-    "**A quick note before you play:** the story in Get To Work is written live by an AI that runs "
+    f"**A quick note before you play:** the story in {DISPLAY_NAME} is written live by an AI that runs "
     "on your own computer, so every morning turns out differently. A family-friendly filter checks "
     "what it writes, but AI can still surprise us now and then - if you ever see something that "
     "shouldn't be there, please tell us in the game's Steam Discussions."
@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gettowork",
         description=(  # line breaks by hand: RawDescriptionHelpFormatter doesn't re-wrap text
-            "Get To Work: a farcical race to the office, and a friendly hands-on tour of\n"
+            "GottaGottaGottaGo: To Work We Go — a farcical race to the office, and a friendly hands-on tour of\n"
             "local AI models (and, optionally, the Jev typed-judgment API).\n\n"
             "Just run it with no options: the game checks your computer, suggests models\n"
             "that fit, and sets everything up for you."
@@ -176,7 +176,7 @@ def _parse(argv: Optional[list[str]]) -> tuple[Optional[argparse.Namespace], int
 def show_banner(ui: UI) -> None:
     ui.console.print(
         Panel(
-            "[bold magenta]GET TO WORK[/bold magenta]\n"
+            f"[bold magenta]{DISPLAY_NAME}[/bold magenta]\n"
             "A farcical race to the office - and a friendly, hands-on tour of local AI models.\n"
             f"[dim]v{__version__} · MIT licensed · no warranty · not affiliated with any model or API provider[/dim]",
             border_style="magenta",

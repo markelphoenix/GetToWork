@@ -1,4 +1,4 @@
-"""The game's own window: what players see when they launch Get To Work from Steam
+"""The game's own window: what players see when they launch GottaGottaGottaGo: To Work We Go from Steam
 or double-click it.
 
 The game itself doesn't change at all. ``cli.main`` - the same code the
@@ -35,6 +35,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from .. import DISPLAY_NAME, SHORT_NAME
 from .bridge import CHOICES, FINISHED, OUTPUT, PROMPT, GuiBridge, Prompt, clean_text
 from .terminal import DEFAULT_MAX_LINES, DEFAULT_STYLE, Style, TerminalBuffer, xterm_color
 
@@ -66,7 +67,7 @@ __all__ = [
 
 GameMain = Callable[[List[str], Any], int]  # (argv, ui) -> exit code, like cli.main(argv, ui=ui)
 
-WINDOW_TITLE = "Get To Work"
+WINDOW_TITLE = DISPLAY_NAME
 EXIT_HINT = "Press Enter or close the window to exit"
 REPORT_BUTTON = "Report a problem"  # (the same words notices.REPORT_HOW tells players to look for)
 SECRET_HINT = "(what you type stays hidden)"
@@ -489,13 +490,13 @@ def write_crash_report(context: str, exc: Optional[BaseException] = None) -> Opt
         return None
 
 
-VERIFY_HINT = ("Playing on Steam? Right-click Get To Work in your Library > Properties > Installed Files > "
+VERIFY_HINT = ("Playing on Steam? Right-click GottaGottaGottaGo: To Work We Go in your Library > Properties > Installed Files > "
                "Verify integrity of game files, then start it again.")
 
 
 def window_failed_message(reason: str, path: Optional[Path]) -> str:
     """What the player reads when the game window can't open."""
-    lines = [f"Get To Work couldn't open its window ({reason}).", "", VERIFY_HINT]
+    lines = [f"GottaGottaGottaGo: To Work We Go couldn't open its window ({reason}).", "", VERIFY_HINT]
     if path:
         lines += ["", f"The details are saved in {path} - handy for a bug report."]
     return "\n".join(lines)
@@ -678,7 +679,7 @@ def _prepare_windows_process() -> None:
     try:
         import ctypes
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GetToWork.Game")  # type: ignore[attr-defined]
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{SHORT_NAME}.Game")  # type: ignore[attr-defined]
     except Exception:
         pass
 
@@ -1994,14 +1995,14 @@ class GameWindow:
 
 
 def default_export_dir() -> Path:
-    """Where the window's game offers to save transcripts: Documents/Get To Work, if there's a Documents folder.
+    """Where the window's game offers to save transcripts: Documents/GottaGottaGottaGo, if there's a Documents folder.
 
     (The terminal version saves in the current folder. A game started from
     Steam or Finder has no sensible current folder - on macOS it is "/".)
     """
     documents = Path.home() / "Documents"
     if documents.is_dir():
-        return documents / "Get To Work"
+        return documents / SHORT_NAME
     from ..config import config_dir
 
     return config_dir() / "transcripts"
@@ -2054,7 +2055,7 @@ def run_gui(argv: Optional[List[str]] = None, *, selftest: bool = False,
             raise RuntimeError("on macOS the game window must be opened from the main thread")
         tk, _tkfont, _ttk = _import_tk()
         _prepare_windows_process()
-        root = tk.Tk(className="GetToWork")
+        root = tk.Tk(className=SHORT_NAME)
         window = GameWindow(root, args, game_main=game_main, selftest=selftest)
     except Exception as exc:
         if root is not None:

@@ -124,7 +124,7 @@ def option_hint(ui: Any, option: str, *, env: Optional[Any] = None, markup: bool
         command = f"{command_name()} {option}"
         return f"start the game with [bold]{command}[/bold]" if markup else f"start the game with {command}"
     if launched_from_steam(env):
-        return f"add {option} to its Launch Options in Steam (right-click Get To Work > Properties > General)"
+        return f"add {option} to its Launch Options in Steam (right-click GottaGottaGottaGo: To Work We Go > Properties > General)"
     return None
 
 

@@ -420,7 +420,7 @@ def missing_library_hint(text: str, system: Optional[str] = None, *, env: Option
 
         if launched_from_steam(env):
             return (f"The game's llama.cpp engine couldn't find a library it needs{named}. Ask Steam to check the "
-                    "game's files (right-click Get To Work > Properties > Installed Files > Verify integrity of "
+                    "game's files (right-click GottaGottaGottaGo: To Work We Go > Properties > Installed Files > Verify integrity of "
                     "game files), then try again. If it keeps happening, please tell us with the Report a problem "
                     "button.")
         if bundled and name and name.startswith(_SHIPPED_WITH_THE_ENGINE):

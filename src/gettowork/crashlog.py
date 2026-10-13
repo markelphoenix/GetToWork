@@ -41,7 +41,7 @@ def write_crash_report(context: str, exc: Optional[BaseException] = None, *,
     Returns the file's path, or None if it couldn't be written. Never raises.
     """
     try:
-        from . import __version__
+        from . import DISPLAY_NAME, __version__
 
         if exc is not None:
             details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -50,7 +50,7 @@ def write_crash_report(context: str, exc: Optional[BaseException] = None, *,
         path = crash_log_path(file_name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            f"Get To Work {__version__}: {context}\n"
+            f"{DISPLAY_NAME} {__version__}: {context}\n"
             f"When: {datetime.now().isoformat(timespec='seconds')}\n"
             f"Python {platform.python_version()} on {platform.platform()}"
             f" ({'built game' if getattr(sys, 'frozen', False) else 'from source'})\n\n{details}\n",

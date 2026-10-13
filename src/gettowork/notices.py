@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import DISPLAY_NAME
+
 __all__ = ["AI_CONTENT_NOTICE", "STEAM_AI_DISCLOSURE", "REPORT_HOW", "REPORT_BUTTON", "STEAM_APP_ID",
            "report_url"]
 
@@ -19,7 +21,7 @@ __all__ = ["AI_CONTENT_NOTICE", "STEAM_AI_DISCLOSURE", "REPORT_HOW", "REPORT_BUT
 # checklist in packaging/steam/README.md). Until then "Report a problem" opens a Steam
 # store search for the game, which leads to the same Discussions.
 STEAM_APP_ID: Optional[int] = None
-STORE_SEARCH_URL = "https://store.steampowered.com/search/?term=Get+To+Work"
+STORE_SEARCH_URL = "https://store.steampowered.com/search/?term=GottaGottaGottaGo"
 
 REPORT_BUTTON = "Report a problem"  # the button in the game's window
 
@@ -42,7 +44,7 @@ def report_url(app_id: Optional[int] = None) -> str:
     return STORE_SEARCH_URL
 
 AI_CONTENT_NOTICE = f"""\
-**A quick note before you play:** the story in Get To Work is written live by an AI \
+**A quick note before you play:** the story in {DISPLAY_NAME} is written live by an AI \
 that runs on your own computer, so every morning turns out differently.
 
 The game asks the AI to keep things silly and kind, and a family-friendly filter checks \
@@ -52,8 +54,8 @@ AI can still surprise us now and then. If you ever see something that shouldn't 
 please tell us: {REPORT_HOW}. Thank you!
 """
 
-STEAM_AI_DISCLOSURE = """\
-Get To Work uses generative AI to write story text live while you play. The text is written by an \
+STEAM_AI_DISCLOSURE = f"""\
+{DISPLAY_NAME} uses generative AI to write story text live while you play. The text is written by an \
 open-weight language model that runs locally on the player's own computer, through the llama.cpp engine \
 that ships with the game, so the story is written on the player's machine rather than on a server. The \
 in-game model menu only offers popular, instruction-tuned chat models, and it leaves out models that \

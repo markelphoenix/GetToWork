@@ -527,7 +527,7 @@ def test_fetch_releases_request_shape():
     assert call["method"] == "GET"
     assert call["url"] == f"{API}?per_page=5"
     assert call["headers"]["Accept"] == "application/vnd.github+json"
-    assert call["headers"]["User-Agent"].startswith("GetToWork/")
+    assert call["headers"]["User-Agent"].startswith("GottaGottaGottaGo/")
     assert "Authorization" not in call["headers"]
 
 
@@ -1234,7 +1234,7 @@ def test_an_https_to_http_redirect_is_refused():
 
 
 def test_user_agent_names_this_project_not_llama_cpp():
-    assert ri.USER_AGENT.startswith("GetToWork/") and "markelphoenix/GetToWork" in ri.USER_AGENT
+    assert ri.USER_AGENT.startswith("GottaGottaGottaGo/") and "markelphoenix/GottaGottaGottaGo" in ri.USER_AGENT
     assert "ggml-org" not in ri.USER_AGENT
 
 
@@ -1850,7 +1850,7 @@ def test_relocate_engine_finds_the_same_build_after_the_game_moved(tmp_path, mon
     engine = built_game(monkeypatch, tmp_path)
     vulkan = bundle(engine, "b7000", "vulkan")
     cpu = bundle(engine, "b7000", "cpu")
-    old_library = tmp_path / "OldSteamLibrary" / "GetToWork" / "engine"
+    old_library = tmp_path / "OldSteamLibrary" / "GottaGottaGottaGo" / "engine"
     assert ri.relocate_engine(old_library / "b7000-cpu" / "llama-server") == cpu
     assert ri.relocate_engine(old_library / "b7000-vulkan" / "bin" / "llama-server") == vulkan
     assert ri.relocate_engine(old_library / "b6000-cpu" / "llama-server") == cpu  # updated since: same type
@@ -1935,7 +1935,7 @@ def test_a_built_game_with_no_engine_at_all_still_says_verify_integrity(tmp_path
 
 def test_engine_summary_says_where_the_engine_comes_from(tmp_path, monkeypatch):
     assert "engine downloads on" in ri.engine_summary()  # a developer copy
-    folder = tmp_path / "GetToWork"
+    folder = tmp_path / "GottaGottaGottaGo"
     engine = folder / "engine"
     bundle(engine, "b7000", "cpu")
     bundle(engine, "b7000", "vulkan")

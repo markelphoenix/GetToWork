@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Code-sign the Windows build's programs and libraries (used by CI once signing is set up).
 
-    python packaging/sign_windows.py dist/GetToWork build/engine [--trusted-signing-dir DIR]
+    python packaging/sign_windows.py dist/GottaGottaGottaGo build/engine [--trusted-signing-dir DIR]
 
 Windows 11's Smart App Control blocks unknown, unsigned programs outright -
 even ones Steam installed, with no "Run anyway" (Steam shows error 0x11C7) -
@@ -194,7 +194,7 @@ def main(argv: Optional[Sequence[str]] = None, *, env: Optional[Mapping[str, str
          runner: Optional[Callable[..., Any]] = None, signtool: Optional[str] = None, out: Any = None) -> int:
     parser = argparse.ArgumentParser(prog="sign_windows.py",
                                      description="Code-sign the Windows build's .exe and .dll files.")
-    parser.add_argument("folders", nargs="+", help="folders (or files) to sign, e.g. dist/GetToWork build/engine")
+    parser.add_argument("folders", nargs="+", help="folders (or files) to sign, e.g. dist/GottaGottaGottaGo build/engine")
     parser.add_argument("--trusted-signing-dir",
                         help=f"a folder holding Microsoft's {DLIB_NAME} (Azure Trusted Signing)")
     try:

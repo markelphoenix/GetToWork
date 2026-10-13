@@ -1,6 +1,6 @@
-// SteamPipe depot build: the Windows depot of Get To Work.
-// content/windows/ holds the unpacked Windows archive: content/windows/GetToWork/GetToWork.exe ...
-// Players' install folder then gets GetToWork/..., so the launch option is GetToWork\GetToWork.exe.
+// SteamPipe depot build: the Windows depot of GottaGottaGottaGo: To Work We Go.
+// content/windows/ holds the unpacked Windows archive: content/windows/GottaGottaGottaGo/GottaGottaGottaGo.exe ...
+// Players' install folder then gets GottaGottaGottaGo/..., so the launch option is GottaGottaGottaGo\GottaGottaGottaGo.exe.
 "DepotBuild"
 {
 	"DepotID" "<DEPOT_ID_WIN>"

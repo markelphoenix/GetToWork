@@ -1,4 +1,4 @@
-"""The game's own window, for players who launch Get To Work from Steam or by double-clicking.
+"""The game's own window, for players who launch GottaGottaGottaGo: To Work We Go from Steam or by double-clicking.
 
 Three small pieces, each readable on its own:
 

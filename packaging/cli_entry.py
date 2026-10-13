@@ -1,7 +1,7 @@
 """Entry point of the console program, ``gettowork-cli`` - the terminal version of the game.
 
 PyInstaller turns this file into ``gettowork-cli`` (``gettowork-cli.exe`` on
-Windows), which sits next to the windowed ``GetToWork`` in every build. It
+Windows), which sits next to the windowed ``GottaGottaGottaGo`` in every build. It
 runs :func:`gettowork.cli.main`, exactly like the ``gettowork`` command that
 ``pip install`` gives you. The build recipe is ``packaging/gettowork.spec``.
 """

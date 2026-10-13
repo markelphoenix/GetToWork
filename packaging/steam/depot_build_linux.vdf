@@ -1,7 +1,7 @@
-// SteamPipe depot build: the Linux + SteamOS (Steam Deck) depot of Get To Work.
-// content/linux/ holds the unpacked Linux archive: content/linux/GetToWork/GetToWork ...
+// SteamPipe depot build: the Linux + SteamOS (Steam Deck) depot of GottaGottaGottaGo: To Work We Go.
+// content/linux/ holds the unpacked Linux archive: content/linux/GottaGottaGottaGo/GottaGottaGottaGo ...
 // (unpack it with tar on Linux or macOS, so the programs stay executable).
-// Players' install folder then gets GetToWork/..., so the launch option is GetToWork/GetToWork.
+// Players' install folder then gets GottaGottaGottaGo/..., so the launch option is GottaGottaGottaGo/GottaGottaGottaGo.
 "DepotBuild"
 {
 	"DepotID" "<DEPOT_ID_LINUX>"

@@ -3,7 +3,7 @@
 
     python packaging/collect_licenses.py --out build/THIRD_PARTY_LICENSES.txt --engine-dir build/engine
 
-A built copy of Get To Work contains other people's software: Python itself,
+A built copy of GottaGottaGottaGo: To Work We Go contains other people's software: Python itself,
 the Python libraries the game uses, Tcl/Tk (the toolkit behind the game
 window), PyInstaller's small start-up program, and the llama.cpp engine.
 Their licenses allow that on one condition we must honour: their license
@@ -28,7 +28,7 @@ What it collects:
    which ``packaging/fetch_engine.py`` gathers into each build's
    ``licenses/`` and lists in its ``install.json``. A build without llama.cpp's
    own text, or missing a text its ``install.json`` lists, fails;
-6. with ``--app-dir`` (the PyInstaller output folder, e.g. ``dist/GetToWork``):
+6. with ``--app-dir`` (the PyInstaller output folder, e.g. ``dist/GottaGottaGottaGo``):
    every native library PyInstaller copied into the game - OpenSSL, libffi,
    and on Linux the system libraries Tk and Python link against (X11, Xft,
    fontconfig, FreeType, libpng, ...). Each one is matched to its component
@@ -707,10 +707,10 @@ def native_sections(app_dir: Path, *, lookup: Callable[[str], Optional[tuple[str
 def render(sections: Sequence[Section]) -> str:
     """The finished THIRD_PARTY_LICENSES.txt text."""
     lines = [
-        "Third-party software in Get To Work",
+        "Third-party software in GottaGottaGottaGo: To Work We Go",
         "===================================",
         "",
-        "Get To Work is built with software written by other people - thank you to all",
+        "GottaGottaGottaGo: To Work We Go is built with software written by other people - thank you to all",
         "of them! Each part is listed here with its license; the full license texts",
         "follow below.",
         "",
@@ -773,7 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine-dir", action="append", default=[],
                         help="a folder of llama.cpp builds made by fetch_engine.py (can be repeated)")
     parser.add_argument("--app-dir", default=None,
-                        help="the built game (PyInstaller's dist/GetToWork): its native libraries are listed too")
+                        help="the built game (PyInstaller's dist/GottaGottaGottaGo): its native libraries are listed too")
     return parser
 
 

@@ -28,6 +28,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
+from . import DISPLAY_NAME
 from .jev import redact_key
 from .types import GameSummary, JevExchange, JevVerdict, LLMResult, RoundRecord
 from .ui import UI, UserQuit, WindowClosed, plain, safe_text
@@ -388,7 +389,7 @@ def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, inclu
     """A readable transcript. Jev exchanges and model reasoning can each be left out.
     Credentials (`secrets` too) are masked wherever they appear."""
     secrets = _raw_secrets_in(_all_exchanges(summary)) | _secret_set(secrets)
-    out: list[str] = ["# Get To Work - game transcript", "", f"**Result:** {_result_line(summary)}", ""]
+    out: list[str] = [f"# {DISPLAY_NAME} - game transcript", "", f"**Result:** {_result_line(summary)}", ""]
 
     out += ["## Good morning!", "", summary.intro.strip() or "_(no opening story)_", ""]
     if include_reasoning:
@@ -421,7 +422,7 @@ def summary_to_markdown(summary: GameSummary, *, include_jev: bool = True, inclu
     out += [
         "---",
         "",
-        "_Made with Get To Work (MIT licensed, no warranty). API keys are never included in transcripts._",
+        f"_Made with {DISPLAY_NAME} (MIT licensed, no warranty). API keys are never included in transcripts._",
         "",
     ]
     # Terminal control codes from model text are dropped, so `cat`-ing a shared
